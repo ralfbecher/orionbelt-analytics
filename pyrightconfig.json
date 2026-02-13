@@ -1,0 +1,50 @@
+{
+  "include": [
+    "src",
+    "tests"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/node_modules",
+    "**/.venv",
+    "**/venv",
+    "**/build",
+    "**/dist"
+  ],
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Darwin",
+  "executionEnvironments": [
+    {
+      "root": "src",
+      "pythonVersion": "3.10",
+      "extraPaths": [
+        "src"
+      ]
+    }
+  ],
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false,
+  "reportUnusedImport": "none",
+  "reportUnusedClass": "none",
+  "reportUnusedFunction": "none",
+  "reportUnusedVariable": "none",
+  "reportUnusedCoroutine": "none",
+  "reportDuplicateImport": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOptionalSubscript": "none",
+  "reportPrivateImportUsage": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportArgumentType": "none",
+  "reportCallIssue": "none",
+  "reportReturnType": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportOperatorIssue": "none",
+  "reportIndexIssue": "none",
+  "stubPath": "typings",
+  "venvPath": ".",
+  "venv": ".venv"
+}

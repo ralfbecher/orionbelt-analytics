@@ -1,0 +1,47 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.env
+
+# Virtual environments
+.venv
+venv/
+env/
+
+# IDE cache files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Import folder
+import/
+
+# Temporary chart files
+tmp/
+
+# Test files in main directory
+/test_*.py
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Generated files and images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Allow assets directory (logos etc.)
+!assets/
+!assets/*
+
+# MCP connection state
+.mcp_db_connection.json

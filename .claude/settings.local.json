@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(python -m pytest:*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:claude.com)",
+      "WebFetch(domain:fastmcp.me)",
+      "WebFetch(domain:gofastmcp.com)",
+      "Bash(ls:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:modelcontextprotocol.github.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(uv run python:*)",
+      "Bash(uv sync)",
+      "Bash(pytest:*)",
+      "Bash(uv pip install:*)",
+      "WebFetch(domain:mcpui.dev)",
+      "WebFetch(domain:support.claude.com)",
+      "Bash(uv run:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(uv pip index versions:*)",
+      "Bash(pip index:*)"
+    ]
+  }
+}

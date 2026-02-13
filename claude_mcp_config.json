@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "database-ontology": {
+      "command": "/Users/ralfbecher/.local/bin/uv",
+      "args": [
+        "run",
+        "--project",
+        "/Users/ralfbecher/database-ontology-mcp",
+        "python",
+        "run_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/ralfbecher/database-ontology-mcp"
+      }
+    }
+  }
+}

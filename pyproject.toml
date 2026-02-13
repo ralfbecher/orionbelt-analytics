@@ -1,0 +1,166 @@
+[project]
+name = "orionbelt-analytics"
+version = "0.4.0"
+description = "OrionBelt Analytics - the Ontology-based MCP server for your Text-2-SQL convenience"
+authors = [
+    {name = "Ralf Becher, RALFORION d.o.o.", email = "ralf.becher@web.de"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+keywords = ["mcp", "database", "ontology", "rdf", "schema-analysis", "postgresql", "snowflake", "clickhouse"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    # Core MCP Framework - latest version
+    "fastmcp>=2.14.5",
+    # Database connectivity - latest versions
+    "sqlalchemy>=2.0.46",
+    "psycopg2-binary>=2.9.11",
+    "snowflake-sqlalchemy>=1.8.2",
+    "snowflake-connector-python>=4.2.0",
+    # ClickHouse connectivity
+    "clickhouse-sqlalchemy>=0.3.2",
+    "clickhouse-driver>=0.2.10",
+    # Security dependencies
+    "cryptography>=46.0.5",
+    # Configuration and validation
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+    # Semantic web libraries
+    "rdflib>=7.5.0",
+    "owlrl>=7.1.4",
+    # Visualization libraries
+    "plotly>=6.5.2",
+    "kaleido>=1.2.0",
+    "pandas>=3.0.0",
+    "pillow>=12.1.1",
+    # Network and async
+    "aiohttp>=3.13.3",
+    # SQL parsing for OBQC validation
+    "sqlglot>=28.10.1",
+    "mcp-ui-server>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/database-ontology-mcp"
+Repository = "https://github.com/yourusername/database-ontology-mcp"
+Documentation = "https://github.com/yourusername/database-ontology-mcp#readme"
+Issues = "https://github.com/yourusername/database-ontology-mcp/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.version]
+path = "src/__init__.py"
+
+[tool.uv]
+dev-dependencies = [
+    # Testing framework
+    "pytest>=7.4.0,<8.0.0",
+    "pytest-asyncio>=0.21.0,<1.0.0",
+    "pytest-cov>=4.0.0,<5.0.0",
+    "pytest-mock>=3.12.0,<4.0.0",
+    "pytest-benchmark>=4.0.0,<5.0.0",
+    
+    # Code formatting and linting
+    "black>=23.12.0,<24.0.0",
+    "isort>=5.13.0,<6.0.0",
+    "flake8>=7.0.0,<8.0.0",
+    "mypy>=1.8.0,<2.0.0",
+    
+    # Security tools - NEW
+    "bandit>=1.7.5,<2.0.0",
+    "safety>=3.0.0,<4.0.0",
+    
+    # Git hooks and automation
+    "pre-commit>=3.6.0,<4.0.0",
+    
+    # Integration testing with real databases
+    "testcontainers>=3.7.0,<4.0.0",
+    
+    # Performance testing
+    "locust>=2.20.0,<3.0.0",
+]
+
+# Tool configurations
+[tool.black]
+line-length = 88
+target-version = ['py313']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --cov=src --cov-report=term-missing"
+testpaths = [
+    "tests",
+]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+
+# Security tools configuration
+[tool.bandit]
+exclude_dirs = ["tests", "venv", ".venv"]
+skips = ["B101"]  # Skip assert_used test
+
+[tool.bandit.assert_used]
+skips = ["*_test.py", "test_*.py"]
+
+# Safety configuration for vulnerability scanning
+[tool.safety]
+# Ignore specific vulnerabilities if needed (use with caution)
+ignore = []
