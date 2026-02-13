@@ -17,6 +17,8 @@
 
 This project provides a production-ready Python-based MCP (Model Context Protocol) server that analyzes relational database schemas (PostgreSQL, Snowflake, and Dremio) and automatically generates comprehensive ontologies in RDF/Turtle format with direct SQL mappings.
 
+> **Better Together:** Combine with [**OrionBelt Semantic Layer**](https://github.com/ralfbecher/orionbelt-semantic-layer) for a complete AI-powered analytics stack. The Semantic Layer compiles declarative YAML models into dialect-specific, optimized SQL — ensuring correct joins, aggregations, and fan-trap-free queries across Postgres, Snowflake, ClickHouse, Dremio, and Databricks. Run both MCP servers side-by-side in Claude Desktop for schema-aware ontology generation **and** guaranteed-correct SQL compilation.
+
 ## Key Philosophy: Automatic Ontology Integration
 
 Our main analysis tool `get_analysis_context()` automatically includes ontology generation, making semantic context readily available for every query.
