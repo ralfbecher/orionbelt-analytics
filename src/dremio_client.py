@@ -3,10 +3,13 @@
 import asyncio
 import logging
 import json
+import time
 from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 import aiohttp
 import pandas as pd
+
+from .constants import QUERY_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,17 @@ class DremioAuthError(Exception):
 class DremioQueryError(Exception):
     """Query execution error in Dremio."""
     pass
+
+
+def _sanitize_sql_for_logging(sql: str, max_length: int = 200) -> str:
+    """Sanitize SQL to avoid logging sensitive literals."""
+    import re
+
+    sanitized = re.sub(r"'[^']*'", "'***'", sql)
+    sanitized = re.sub(r'"[^"]*"', '"***"', sanitized)
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length] + "..."
+    return sanitized
 
 
 class DremioClient:
@@ -112,7 +126,7 @@ class DremioClient:
         """Execute SQL query and return results."""
         try:
             # Log the SQL query being executed
-            logger.info(f"🔍 DREMIO SQL QUERY: {sql}")
+            logger.info(f"🔍 DREMIO SQL QUERY: {_sanitize_sql_for_logging(sql)}")
             
             # Submit query
             query_data = {"sql": sql}
@@ -125,19 +139,24 @@ class DremioClient:
             logger.info(f"Submitted query with job ID: {job_id}")
             
             # Poll for completion
+            start_time = time.monotonic()
             while True:
                 job_status = await self._make_request("GET", f"/api/v3/job/{job_id}")
                 state = job_status.get("jobState")
-                
+
                 if state in ["COMPLETED"]:
                     break
                 elif state in ["FAILED", "CANCELED"]:
                     error = job_status.get("errorMessage", "Query failed")
                     raise DremioQueryError(f"Query {state.lower()}: {error}")
                 elif state in ["RUNNING", "STARTING", "PLANNING", "PENDING", "QUEUED", "METADATA_RETRIEVAL"]:
+                    if time.monotonic() - start_time > QUERY_TIMEOUT:
+                        raise DremioQueryError(f"Query timed out after {QUERY_TIMEOUT}s")
                     await asyncio.sleep(0.5)  # Poll every 500ms
                 else:
                     logger.warning(f"Unknown job state: {state}")
+                    if time.monotonic() - start_time > QUERY_TIMEOUT:
+                        raise DremioQueryError(f"Query timed out after {QUERY_TIMEOUT}s")
                     await asyncio.sleep(0.5)
             
             # Get results

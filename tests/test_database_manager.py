@@ -2,7 +2,7 @@
 
 import pytest
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 from sqlalchemy.exc import SQLAlchemyError, OperationalError
 
 from src.database_manager import DatabaseManager, TableInfo, ColumnInfo
@@ -288,6 +288,59 @@ class TestDatabaseManager(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             with self.db_manager.get_connection():
                 pass
+
+    def test_strip_leading_sql_comments_preserves_duplicates(self):
+        """Ensure comment stripping doesn't mis-handle duplicate lines."""
+        sql = "-- leading comment\nSELECT 1;\nSELECT 1;"
+        result = self.db_manager._strip_leading_sql_comments(sql)
+        self.assertEqual(result, "SELECT 1;\nSELECT 1;")
+
+    def test_escape_sql_literal(self):
+        """Test SQL literal escaping for Dremio helpers."""
+        self.assertEqual(self.db_manager._escape_sql_literal("a'b"), "a''b")
+
+    def test_quote_dremio_identifier(self):
+        """Test Dremio identifier quoting and escaping."""
+        quoted = self.db_manager._quote_dremio_identifier('My.Schema."Table"')
+        self.assertEqual(quoted, '"My"."Schema"."""Table"""')
+
+    @patch('src.dremio_client.create_dremio_client')
+    def test_dremio_health_check_pat(self, mock_create_client):
+        """Test Dremio health check for PAT connections."""
+        self.db_manager._dremio_rest_connection = {"uri": "https://dremio.example", "pat": "pat"}
+
+        mock_client = Mock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.test_connection = AsyncMock(return_value={"success": True})
+        mock_create_client.return_value = mock_client
+
+        self.assertTrue(self.db_manager._test_dremio_connection())
+
+    @patch('src.dremio_client.create_dremio_client')
+    def test_is_connected_uses_dremio_health_check(self, mock_create_client):
+        """Test is_connected for Dremio REST connections."""
+        self.db_manager._dremio_rest_connection = {"uri": "https://dremio.example", "pat": "pat"}
+
+        mock_client = Mock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.test_connection = AsyncMock(return_value={"success": True})
+        mock_create_client.return_value = mock_client
+
+        self.assertTrue(self.db_manager.is_connected())
+
+    def test_reconnect_dremio_pat(self):
+        """Reconnect should route through PAT when available."""
+        self.db_manager._last_connection_params = {
+            "type": "dremio",
+            "uri": "https://dremio.example",
+            "pat": "pat"
+        }
+
+        with patch.object(self.db_manager, "connect_dremio", return_value=True) as mock_connect:
+            self.db_manager._reconnect()
+            mock_connect.assert_called_once_with(uri="https://dremio.example", pat="pat")
 
 
 class TestClickHouseConnection(unittest.TestCase):

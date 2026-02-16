@@ -151,6 +151,41 @@ class DatabaseManager:
         except Exception as e:
             logger.warning(f"Connection health check failed: {e}")
             return False
+
+    def _test_dremio_connection(self) -> bool:
+        """Test if the current Dremio REST connection is healthy."""
+        if not self._dremio_rest_connection:
+            return False
+
+        from .dremio_client import create_dremio_client
+
+        async def test_dremio():
+            conn = self._dremio_rest_connection
+            if conn.get("uri") and conn.get("pat"):
+                async with await create_dremio_client(uri=conn["uri"], pat=conn["pat"]) as client:
+                    return await client.test_connection()
+            async with await create_dremio_client(
+                host=conn.get("host"),
+                port=conn.get("port"),
+                username=conn.get("username"),
+                password=conn.get("password"),
+                ssl=conn.get("ssl", False)
+            ) as client:
+                return await client.test_connection()
+
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, test_dremio())
+                result = future.result(timeout=CONNECTION_TIMEOUT)
+        except RuntimeError:
+            result = asyncio.run(test_dremio())
+        except Exception as e:
+            logger.warning(f"Dremio health check failed: {e}")
+            return False
+
+        return bool(result.get("success"))
     
     def _ensure_connection(self):
         """Ensure we have a healthy database connection, reconnecting if necessary."""
@@ -201,10 +236,16 @@ class DatabaseManager:
                 params.get("protocol", "http"), params.get("secure", False)
             )
         elif params["type"] == "dremio":
-            success = self.connect_dremio(
-                params["host"], params["port"], params["username"], params["password"],
-                params.get("ssl", True)
-            )
+            if params.get("uri") and params.get("pat"):
+                success = self.connect_dremio(uri=params["uri"], pat=params["pat"])
+            else:
+                success = self.connect_dremio(
+                    params.get("host"),
+                    params.get("port"),
+                    params.get("username"),
+                    params.get("password"),
+                    params.get("ssl", True)
+                )
         else:
             raise RuntimeError(f"Unsupported database type for reconnection: {params['type']}")
         
@@ -597,6 +638,7 @@ class DatabaseManager:
                 return False
             
             # Store connection info for Dremio REST API
+            api_port = 9047
             if uri and pat:
                 self.connection_info = {
                     "type": "dremio",
@@ -617,7 +659,6 @@ class DatabaseManager:
                 }
             else:
                 # Legacy connection info
-                api_port = 9047
                 self.connection_info = {
                     "type": "dremio", 
                     "host": host,
@@ -650,7 +691,10 @@ class DatabaseManager:
             self.engine = None
             self.metadata = None
             
-            logger.info(f"✅ Successfully connected to Dremio via REST API at {host}:{api_port}")
+            if uri and pat:
+                logger.info(f"✅ Successfully connected to Dremio via REST API at {uri}")
+            else:
+                logger.info(f"✅ Successfully connected to Dremio via REST API at {host}:{api_port}")
             return True
             
         except Exception as e:
@@ -869,7 +913,8 @@ class DatabaseManager:
                         query = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.\"TABLES\" WHERE TABLE_TYPE = 'TABLE'"
                     else:
                         # Get tables from specific schema
-                        query = f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.\"TABLES\" WHERE TABLE_SCHEMA = '{schema_name}' AND TABLE_TYPE = 'TABLE'"
+                        safe_schema = self._escape_sql_literal(schema_name)
+                        query = f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.\"TABLES\" WHERE TABLE_SCHEMA = '{safe_schema}' AND TABLE_TYPE = 'TABLE'"
                     
                     result = await client.execute_query(query)
                     
@@ -929,19 +974,28 @@ class DatabaseManager:
                     )
                 
                 async with client:
+                    # If schema_name isn't provided but table_name is qualified, split it.
+                    if not schema_name and "." in str(table_name):
+                        parts = str(table_name).split(".")
+                        schema_name = ".".join(parts[:-1]) if len(parts) > 1 else None
+                        table_name = parts[-1]
+
                     # Get column information
                     if schema_name:
+                        safe_schema = self._escape_sql_literal(schema_name)
+                        safe_table = self._escape_sql_literal(table_name)
                         column_query = f"""
                         SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, ORDINAL_POSITION
                         FROM INFORMATION_SCHEMA.COLUMNS
-                        WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_name}'
+                        WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{safe_schema}'
                         ORDER BY ORDINAL_POSITION
                         """
                     else:
+                        safe_table = self._escape_sql_literal(table_name)
                         column_query = f"""
                         SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, ORDINAL_POSITION
                         FROM INFORMATION_SCHEMA.COLUMNS
-                        WHERE TABLE_NAME = '{table_name}'
+                        WHERE TABLE_NAME = '{safe_table}'
                         ORDER BY ORDINAL_POSITION
                         """
                     
@@ -1441,11 +1495,10 @@ class DatabaseManager:
         lines = sql_query.split('\n')
         result_lines = []
         in_block_comment = False
-        
-        for line in lines:
-            original_line = line
-            line = line.strip()
-            
+
+        for idx, original_line in enumerate(lines):
+            line = original_line.strip()
+
             # Handle block comment continuation
             if in_block_comment:
                 if '*/' in line:
@@ -1455,15 +1508,15 @@ class DatabaseManager:
                     if after_comment:  # If there's SQL after the comment
                         result_lines.append(after_comment)
                 continue
-            
+
             # Skip empty lines
             if not line:
                 continue
-                
+
             # Handle line comments
             if line.startswith('--'):
                 continue
-                
+
             # Handle block comments
             if line.startswith('/*'):
                 if '*/' in line:
@@ -1476,16 +1529,31 @@ class DatabaseManager:
                     # Multi-line block comment starts
                     in_block_comment = True
                 continue
-            
+
             # This line contains actual SQL - add it and all remaining lines
             result_lines.append(original_line)
-            # Add all remaining lines without further comment processing
-            remaining_index = lines.index(original_line) + 1
+            remaining_index = idx + 1
             if remaining_index < len(lines):
                 result_lines.extend(lines[remaining_index:])
             break
-        
+
         return '\n'.join(result_lines).strip()
+
+    def _escape_sql_literal(self, value: str) -> str:
+        """Escape a value for safe use inside a single-quoted SQL literal."""
+        return value.replace("'", "''")
+
+    def _quote_dremio_identifier(self, identifier: str) -> str:
+        """Quote and escape a Dremio identifier or path safely."""
+        if identifier is None:
+            return ""
+
+        parts = [p for p in str(identifier).split('.') if p != ""]
+        if not parts:
+            return ""
+
+        escaped_parts = [part.replace('"', '""') for part in parts]
+        return ".".join(f'"{part}"' for part in escaped_parts)
     
     def get_table_relationships(self, schema_name: Optional[str] = None) -> Dict[str, List[Dict[str, str]]]:
         """Get relationships between tables in a schema."""
@@ -2093,9 +2161,9 @@ class DatabaseManager:
                     # Build the query
                     if schema_name:
                         # Use dot notation for Dremio paths
-                        full_table_name = f'"{schema_name}"."{table_name}"'
+                        full_table_name = f"{self._quote_dremio_identifier(schema_name)}.{self._quote_dremio_identifier(table_name)}"
                     else:
-                        full_table_name = f'"{table_name}"'
+                        full_table_name = self._quote_dremio_identifier(table_name)
                     
                     query = f'SELECT * FROM {full_table_name} LIMIT {limit}'
                     
@@ -2243,10 +2311,19 @@ class DatabaseManager:
     
     def is_connected(self) -> bool:
         """Check if database is currently connected and healthy."""
+        if self._dremio_rest_connection:
+            return self._test_dremio_connection()
         return self.has_engine() and self._test_connection()
     
     def get_connection_status(self) -> Dict[str, Any]:
         """Get detailed connection status information."""
+        if self._dremio_rest_connection:
+            return {
+                "connected": self._test_dremio_connection(),
+                "connection_info": self.connection_info.copy(),
+                "last_params_available": self._last_connection_params is not None
+            }
+
         if not self.engine:
             return {
                 "connected": False,
