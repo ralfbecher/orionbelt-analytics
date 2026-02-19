@@ -45,3 +45,5 @@ Thumbs.db
 
 # MCP connection state
 .mcp_db_connection.json
+.mcpregistry_github_token
+.mcpregistry_registry_token
