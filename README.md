@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.ralfbecher/orionbelt-analytics -->
 <p align="center">
   <img src="assets/ORIONBELT Logo.png" alt="OrionBelt Logo" width="400">
 </p>
