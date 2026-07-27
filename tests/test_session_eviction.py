@@ -1,6 +1,7 @@
 """Tests for session idle timeout and eviction."""
 
 import asyncio
+import contextlib
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -185,10 +186,8 @@ class TestEvictionLoop:
                 task = asyncio.create_task(state._eviction_loop())
                 await asyncio.sleep(0.3)  # Let it run a couple cycles
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
 
         await run_loop()
         assert "stale" not in state._sessions

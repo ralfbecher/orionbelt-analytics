@@ -1,5 +1,6 @@
 """Chart generation utilities for OrionBelt Analytics."""
 
+import contextlib
 import logging
 from collections.abc import Callable
 from typing import Any, cast
@@ -504,11 +505,9 @@ def create_plotly_chart(
         else:
             # Try to convert x_column to datetime if it looks like a date
             # This ensures proper chronological sorting
-            try:
+            # Not a datetime column -- use the values as-is.
+            with contextlib.suppress(ValueError, TypeError):
                 sorted_df[x_column] = pd.to_datetime(sorted_df[x_column])
-            except (ValueError, TypeError):
-                # Not a datetime column, use as-is
-                pass
 
             # Sort data by x-axis column (default) or specified column for proper line chart ordering
             sorted_df = sorted_df.sort_values(

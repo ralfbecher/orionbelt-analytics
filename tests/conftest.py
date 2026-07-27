@@ -4,6 +4,8 @@ Patches OUTPUT_DIR to use pytest's tmp_path for all tests, preventing
 test artifacts from polluting the real tmp/ directory.
 """
 
+import contextlib
+
 import pytest
 
 
@@ -35,9 +37,8 @@ def isolate_output_dir(tmp_path, monkeypatch):
         "src.graphrag.vector_store_chromadb",
     ]
     for mod in targets:
-        try:
+        # Module may not be imported yet -- nothing to patch in that case.
+        with contextlib.suppress(AttributeError):
             monkeypatch.setattr(f"{mod}.OUTPUT_DIR", test_output)
-        except AttributeError:
-            pass  # Module may not be imported yet
 
     return test_output

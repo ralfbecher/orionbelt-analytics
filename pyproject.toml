@@ -136,16 +136,8 @@ select = [
     "EXE",    # shebang correctness
     "PYI",    # stub/typing correctness
     "RUF",    # ruff-specific
-]
-
-ignore = [
-    # Deferred, NOT dismissed. Every SIM105 site is also an S110 site (blind
-    # `except Exception: pass` in the drivers). Rewriting them to
-    # contextlib.suppress would delete the S110 signal without anyone deciding
-    # whether swallowing is correct there -- suppression wearing a fix's
-    # clothing. These are handled in the error-handling audit that enables
-    # BLE/S110/G/DTZ/ASYNC, where each swallow is judged on merit.
-    "SIM105",
+    "ASYNC",  # blocking calls inside async functions
+    "S110",   # silently swallowed exceptions
 ]
 
 # Tests legitimately hold mutable class-level fixtures; that is noise there
