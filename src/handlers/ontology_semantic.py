@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-from datetime import datetime
 from typing import Any
 
 from fastmcp import Context
@@ -14,7 +13,7 @@ from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
-from ..utils import is_client_disconnect, safe_ctx_info, write_text_file
+from ..utils import is_client_disconnect, safe_ctx_info, utc_now, write_text_file
 from .ontology_generation import _build_minimal_graph_summary
 
 logger = logging.getLogger(__name__)
@@ -64,7 +63,7 @@ async def _maybe_sample_rename_suggestions(
         sum(len(v) for v in cryptic_props_by_table.values()),
         len(cryptic_relationships),
     )
-    started = datetime.now()
+    started = utc_now()
 
     prompt = _build_rename_prompt(items)
 
@@ -83,13 +82,13 @@ async def _maybe_sample_rename_suggestions(
         logger.warning(
             "MCP sampling unavailable or failed after %.2fs (%s: %s) — "
             "falling back to manual review path",
-            (datetime.now() - started).total_seconds(),
+            (utc_now() - started).total_seconds(),
             type(e).__name__,
             str(e)[:200],
         )
         return None
 
-    elapsed = (datetime.now() - started).total_seconds()
+    elapsed = (utc_now() - started).total_seconds()
     raw_text = getattr(result, "text", None) or ""
     parsed = _parse_rename_json(raw_text)
     suggestions = _normalize_structured_suggestions(parsed)
@@ -497,7 +496,7 @@ async def apply_semantic_names(
                                 "ontology_file": new_ontology_filename,
                                 "enriched": True,
                                 "persisted_to_rdf": False,
-                                "generated_at": datetime.now().isoformat(),
+                                "generated_at": utc_now().isoformat(),
                             },
                         )
                     except Exception as e:

@@ -2,7 +2,6 @@
 
 import logging
 import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +13,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import VersionMetadataManager
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir, get_models_dir
-from ..utils import read_json_file, write_text_file
+from ..utils import read_json_file, utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +411,7 @@ async def save_semantic_model(
         workspace = mgr.metadata.setdefault(
             "workspace",
             {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             },
         )
@@ -420,9 +419,9 @@ async def save_semantic_model(
         models[model_name] = {
             "file": model_filename,
             "schema_name": effective_schema,
-            "saved_at": datetime.now().isoformat(),
+            "saved_at": utc_now().isoformat(),
         }
-        workspace["updated_at"] = datetime.now().isoformat()
+        workspace["updated_at"] = utc_now().isoformat()
         mgr._save_metadata()
     except Exception as e:
         logger.warning(f"Failed to update workspace metadata for model: {e}")

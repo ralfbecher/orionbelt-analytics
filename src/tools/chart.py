@@ -1,10 +1,10 @@
 """Chart generation tool."""
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from ..chart_utils import create_plotly_chart
+from ..utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ def generate_chart(
                 title = f"Chart of {x_column}"
 
         # Create chart ID for file naming and logging
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         safe_title = "".join(
             c for c in title.replace(" ", "_") if c.isalnum() or c in "_-"
         )

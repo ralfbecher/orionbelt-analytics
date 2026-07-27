@@ -6,10 +6,10 @@ based on retention policies.
 """
 
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..utils import parse_timestamp, utc_now
 from .metadata import VersionMetadataManager
 
 logger = logging.getLogger(__name__)
@@ -71,9 +71,7 @@ class DataCleanupManager:
                         schema_name, version.version, "graphrag"
                     )
 
-                age_days = (
-                    datetime.now() - datetime.fromisoformat(version.created_at)
-                ).days
+                age_days = (utc_now() - parse_timestamp(version.created_at)).days
 
                 deleted.append(
                     {
@@ -145,9 +143,7 @@ class DataCleanupManager:
                         schema_name, version.version, "ontology"
                     )
 
-                age_days = (
-                    datetime.now() - datetime.fromisoformat(version.created_at)
-                ).days
+                age_days = (utc_now() - parse_timestamp(version.created_at)).days
 
                 deleted.append(
                     {

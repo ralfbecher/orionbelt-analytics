@@ -2,7 +2,6 @@
 
 import logging
 import os
-from datetime import datetime
 from typing import cast
 
 from fastmcp import Context
@@ -12,6 +11,7 @@ from ..exceptions import ConnectionError, ValidationError
 from ..handler_context import HandlerContext
 from ..lifecycle.metadata import VersionMetadataManager
 from ..paths import OUTPUT_DIR
+from ..utils import utc_now
 from ..workspace import detect_workspace, format_workspace_summary
 from .workspace import _format_restore_summary, _restore_workspace_core
 
@@ -313,7 +313,7 @@ async def connect_database(
             logger.info(f"Initial connection established: {new_conn_id[:8]}...")
 
         session.connection_id = new_conn_id
-        session.connected_at = datetime.now()
+        session.connected_at = utc_now()
         session.clear_schema_cache()
 
         await ctx.info(f"Connected to {db_type}: {db_name}")

@@ -2,7 +2,7 @@
 
 import types
 import unittest
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from src.database_manager import ColumnInfo, TableInfo
 from src.server_state import (
@@ -14,6 +14,7 @@ from src.server_state import (
     get_session_id,
 )
 from src.session import SessionData
+from src.utils import utc_now
 
 
 def _table():
@@ -92,7 +93,7 @@ class TestServerState(unittest.TestCase):
     def test_evict_idle_sessions(self):
         ss = ServerState()
         s = ss.get_session("old")
-        s.last_activity = datetime.now() - timedelta(hours=1)
+        s.last_activity = utc_now() - timedelta(hours=1)
         ss._evict_idle_sessions(idle_timeout=1)
         self.assertEqual(ss.session_count, 0)
 

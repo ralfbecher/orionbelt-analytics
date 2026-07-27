@@ -3,7 +3,6 @@
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Any, cast
 
 from fastmcp import Context
@@ -15,6 +14,7 @@ from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
+from ..utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ async def _auto_generate_ontology_background(
             else ensure_output_dir()
         )
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
         ontology_file.write_text(ontology_ttl, encoding="utf-8")
 
@@ -173,7 +173,7 @@ async def _auto_initialize_graphrag_background(
                         "table_count": len(tables_dict),
                         "embedding_count": stats.get("total_elements", 0),
                         "schemas": schemas,
-                        "initialized_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "initialized_at": utc_now().strftime("%Y-%m-%dT%H:%M:%S"),
                     },
                 )
             except Exception as e:
@@ -309,7 +309,7 @@ async def initialize_graphrag(
                         "table_count": len(tables_dict),
                         "embedding_count": stats.get("total_elements", 0),
                         "schemas": schemas,
-                        "initialized_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "initialized_at": utc_now().strftime("%Y-%m-%dT%H:%M:%S"),
                     },
                 )
             except Exception as e:

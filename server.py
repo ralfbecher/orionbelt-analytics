@@ -6,7 +6,7 @@ import json
 import shutil
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 # Add src directory to path for imports
@@ -19,7 +19,7 @@ from src import __name__ as SERVER_NAME  # noqa: E402
 from src import __version__  # noqa: E402
 from src.config import config_manager  # noqa: E402
 from src.main import cleanup_server, mcp  # noqa: E402
-from src.utils import setup_logging  # noqa: E402
+from src.utils import parse_timestamp, setup_logging, utc_now  # noqa: E402
 
 # Setup logging
 config = config_manager.get_server_config()
@@ -227,7 +227,7 @@ def cleanup_tmp_folder():
         f"Retention cleanup enabled (WORKSPACE_MAX_AGE_DAYS={max_age_days}), "
         f"scanning {len(workspace_dirs)} workspace(s)..."
     )
-    cutoff = datetime.now() - timedelta(days=max_age_days)
+    cutoff = utc_now() - timedelta(days=max_age_days)
     cleaned = 0
 
     for conn_dir in workspace_dirs:
@@ -251,11 +251,11 @@ def cleanup_tmp_folder():
             workspace = metadata.get("workspace", {})
             updated_at = workspace.get("updated_at")
             if updated_at:
-                last_update = datetime.fromisoformat(updated_at)
+                last_update = parse_timestamp(updated_at)
                 if last_update < cutoff:
                     shutil.rmtree(conn_dir)
                     cleaned += 1
-                    age_days = (datetime.now() - last_update).days
+                    age_days = (utc_now() - last_update).days
                     logger.info(
                         f"Removed stale workspace: {conn_dir.name} "
                         f"(last updated {age_days} days ago, max {max_age_days})"

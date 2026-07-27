@@ -2,22 +2,23 @@
 
 import asyncio
 import contextlib
-from datetime import datetime, timedelta
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.main import ServerState
 from src.session import SessionData
+from src.utils import utc_now
 
 
 class TestSessionDataActivity:
     """Tests for SessionData activity tracking."""
 
     def test_created_with_timestamps(self):
-        before = datetime.now()
+        before = utc_now()
         session = SessionData()
-        after = datetime.now()
+        after = utc_now()
 
         assert before <= session.created_at <= after
         assert before <= session.last_activity <= after
@@ -33,7 +34,7 @@ class TestSessionDataActivity:
     def test_touch_does_not_change_created_at(self):
         session = SessionData()
         created = session.created_at
-        session.last_activity = datetime.now() - timedelta(seconds=10)
+        session.last_activity = utc_now() - timedelta(seconds=10)
         session.touch()
         assert session.created_at == created
 
@@ -51,7 +52,7 @@ class TestServerStateEviction:
         state = self._make_state()
         session = state.get_session("s1")
         # Backdate and access again
-        session.last_activity = datetime.now() - timedelta(minutes=5)
+        session.last_activity = utc_now() - timedelta(minutes=5)
         before_touch = session.last_activity
         state.get_session("s1")
         assert session.last_activity > before_touch
@@ -61,7 +62,7 @@ class TestServerStateEviction:
         state.get_session("active")
         stale = state.get_session("stale")
         # Backdate the stale session
-        stale.last_activity = datetime.now() - timedelta(minutes=45)
+        stale.last_activity = utc_now() - timedelta(minutes=45)
 
         state._evict_idle_sessions(idle_timeout=1800)  # 30 min
 
@@ -81,7 +82,7 @@ class TestServerStateEviction:
         state = self._make_state()
         for name in ["a", "b", "c"]:
             s = state.get_session(name)
-            s.last_activity = datetime.now() - timedelta(hours=2)
+            s.last_activity = utc_now() - timedelta(hours=2)
 
         state._evict_idle_sessions(idle_timeout=1800)
 
@@ -174,7 +175,7 @@ class TestEvictionLoop:
         state = ServerState()
         state._ensure_eviction_task = lambda: None
         session = state.get_session("stale")
-        session.last_activity = datetime.now() - timedelta(hours=1)
+        session.last_activity = utc_now() - timedelta(hours=1)
 
         mock_config = MagicMock()
         mock_config.session_idle_timeout = 60

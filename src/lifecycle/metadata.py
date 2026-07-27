@@ -10,9 +10,10 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from ..utils import parse_timestamp, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -245,11 +246,11 @@ class VersionMetadataManager:
         to_check = sorted_versions[:-keep_count]  # Exclude latest N
 
         # Check age
-        now = datetime.now()
+        now = utc_now()
         to_delete = []
 
         for version in to_check:
-            created = datetime.fromisoformat(version.created_at)
+            created = parse_timestamp(version.created_at)
             age_days = (now - created).days
 
             if age_days > max_age_days:
@@ -324,7 +325,7 @@ class VersionMetadataManager:
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             }
 
@@ -334,7 +335,7 @@ class VersionMetadataManager:
             workspace.setdefault("schemas", {})[schema_name] = {}
 
         workspace["schemas"][schema_name][section] = data
-        workspace["updated_at"] = datetime.now().isoformat()
+        workspace["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
         logger.debug(
@@ -355,14 +356,14 @@ class VersionMetadataManager:
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             }
 
         workspace = self.metadata["workspace"]
         workspace["db_type"] = db_type
         workspace["db_name"] = db_name
-        workspace["updated_at"] = datetime.now().isoformat()
+        workspace["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
 
@@ -374,12 +375,12 @@ class VersionMetadataManager:
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             }
 
         self.metadata["workspace"]["rdf_store"] = data
-        self.metadata["workspace"]["updated_at"] = datetime.now().isoformat()
+        self.metadata["workspace"]["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
         logger.debug(f"Updated workspace.rdf_store (connection {self.connection_id})")

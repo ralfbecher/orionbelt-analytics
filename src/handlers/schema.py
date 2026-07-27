@@ -11,7 +11,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import update_workspace_section
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..r2rml_generator import R2RMLGenerator
-from ..utils import write_json_file, write_text_file
+from ..utils import utc_now, write_json_file, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -473,8 +473,6 @@ async def discover_schema(
     # Write workspace metadata for schema section
     if session.connection_id and schema_filename:
         try:
-            from datetime import datetime
-
             await update_workspace_section(
                 connection_id=session.connection_id,
                 output_dir=OUTPUT_DIR,
@@ -484,7 +482,7 @@ async def discover_schema(
                     "schema_file": schema_filename,
                     "r2rml_file": schema_result.get("r2rml_file"),
                     "table_count": len(table_info_objects),
-                    "analyzed_at": datetime.now().isoformat(),
+                    "analyzed_at": utc_now().isoformat(),
                 },
             )
         except Exception as e:

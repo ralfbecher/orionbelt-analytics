@@ -13,6 +13,8 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+from .utils import utc_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,12 +149,12 @@ class SessionData:
         self._current_schema: str | None = None
 
         # Activity tracking for idle eviction
-        self.created_at: datetime = datetime.now()
-        self.last_activity: datetime = datetime.now()
+        self.created_at: datetime = utc_now()
+        self.last_activity: datetime = utc_now()
 
     def touch(self) -> None:
         """Update last activity timestamp."""
-        self.last_activity = datetime.now()
+        self.last_activity = utc_now()
 
     # --- Multi-schema management ---
 

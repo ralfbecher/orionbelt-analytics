@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, cast
 
 from fastmcp import Context
@@ -26,6 +26,7 @@ from .ontology_generator import OntologyGenerator
 from .oxigraph_store import OXIGRAPH_AVAILABLE, OxigraphStoreManager
 from .paths import ensure_output_dir, get_connection_dir, get_oxigraph_store_dir
 from .session import SessionData
+from .utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +217,7 @@ class ServerState:
 
     def _evict_idle_sessions(self, idle_timeout: int) -> None:
         """Scan sessions and evict those idle beyond the timeout."""
-        now = datetime.now()
+        now = utc_now()
         cutoff = now - timedelta(seconds=idle_timeout)
 
         to_evict = []
@@ -314,7 +315,7 @@ def get_session_safe_filename(ctx: Context, prefix: str, suffix: str = "") -> st
         if session.connection_id and len(session.connection_id) >= 8
         else "default"
     )
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+    timestamp = utc_now().strftime("%Y%m%d_%H%M%S%f")
     if suffix:
         return f"{prefix}_{connection_prefix}_{suffix}_{timestamp}"
     return f"{prefix}_{connection_prefix}_{timestamp}"

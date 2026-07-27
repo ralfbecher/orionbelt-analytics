@@ -3,7 +3,7 @@
 import logging
 import os
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -210,7 +210,7 @@ async def load_my_ontology(
         datatype_props = len(list(graph.subjects(RDF.type, OWL.DatatypeProperty)))
         object_props = len(list(graph.subjects(RDF.type, OWL.ObjectProperty)))
 
-        modified_time = datetime.fromtimestamp(file_stat.st_mtime).strftime(
+        modified_time = datetime.fromtimestamp(file_stat.st_mtime, tz=UTC).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
 

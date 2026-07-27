@@ -4,9 +4,51 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+# ---------------------------------------------------------------------------
+# Timestamps
+#
+# Workspace metadata is persisted as ISO strings and later compared against the
+# current time to decide retention. Naive local timestamps make that comparison
+# wrong across DST shifts and meaningless if the workspace moves between
+# machines in different zones, so everything written from here on is
+# timezone-aware UTC.
+# ---------------------------------------------------------------------------
+
+
+def utc_now() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime.
+
+    Returns:
+        The current UTC time, with tzinfo set.
+    """
+    return datetime.now(UTC)
+
+
+def parse_timestamp(value: str) -> datetime:
+    """Parse a persisted ISO timestamp, treating naive values as UTC.
+
+    Workspaces written before timestamps became timezone-aware hold naive ISO
+    strings. Comparing one of those against an aware ``utc_now()`` raises
+    ``TypeError``, which would break retention cleanup on startup for every
+    existing workspace on disk. Naive inputs are therefore assumed to be UTC
+    rather than rejected.
+
+    Args:
+        value: ISO 8601 timestamp, with or without an offset.
+
+    Returns:
+        A timezone-aware datetime.
+    """
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
 
 # ---------------------------------------------------------------------------
 # Non-blocking file I/O

@@ -15,6 +15,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
+from ..utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +75,6 @@ async def store_ontology_in_rdf(
         # Update workspace: mark ontology as persisted + write rdf_store
         if session.connection_id:
             try:
-                from datetime import datetime
-
                 await update_workspace_section(
                     connection_id=session.connection_id,
                     output_dir=OUTPUT_DIR,
@@ -86,7 +85,7 @@ async def store_ontology_in_rdf(
                         "enriched": True,
                         "graph_uri": graph_uri,
                         "persisted_to_rdf": True,
-                        "generated_at": datetime.now().isoformat(),
+                        "generated_at": utc_now().isoformat(),
                     },
                 )
                 await update_workspace_rdf(
@@ -95,7 +94,7 @@ async def store_ontology_in_rdf(
                     data={
                         "initialized": True,
                         "graph_uris": [graph_uri],
-                        "initialized_at": datetime.now().isoformat(),
+                        "initialized_at": utc_now().isoformat(),
                     },
                 )
             except Exception as e:
