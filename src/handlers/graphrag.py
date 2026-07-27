@@ -191,9 +191,8 @@ async def _auto_initialize_graphrag_background(
             )
 
     except Exception as e:
-        logger.error(
+        logger.exception(
             f"GraphRAG auto-initialization failed: {type(e).__name__}: {e}",
-            exc_info=True,
         )
         session.graphrag_initialized = False
 
@@ -335,7 +334,7 @@ async def initialize_graphrag(
         )
 
     except Exception as e:
-        logger.error(f"GraphRAG initialization failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG initialization failed: {e}")
         return cast(
             str,
             services.create_error_response(
@@ -376,7 +375,7 @@ async def graphrag_search(
         }
 
     except Exception as e:
-        logger.error(f"GraphRAG search failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG search failed: {e}")
         err = services.create_error_response(
             f"GraphRAG search failed: {e!s}", "graphrag_error"
         )
@@ -422,7 +421,7 @@ async def graphrag_query_context(
         }
 
     except Exception as e:
-        logger.error(f"GraphRAG query context failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG query context failed: {e}")
         err = services.create_error_response(
             f"GraphRAG query context failed: {e!s}", "graphrag_error"
         )
@@ -478,7 +477,7 @@ async def graphrag_find_join_path(
         }
 
     except Exception as e:
-        logger.error(f"GraphRAG find join path failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG find join path failed: {e}")
         err = services.create_error_response(
             f"GraphRAG find join path failed: {e!s}", "graphrag_error"
         )
@@ -529,7 +528,7 @@ async def reachable_from(
         }
 
     except Exception as e:
-        logger.error(f"reachable_from failed: {e}", exc_info=True)
+        logger.exception(f"reachable_from failed: {e}")
         err = services.create_error_response(
             f"reachable_from failed: {e!s}", "graphrag_error"
         )
@@ -580,7 +579,7 @@ async def measurable_from(
         }
 
     except Exception as e:
-        logger.error(f"measurable_from failed: {e}", exc_info=True)
+        logger.exception(f"measurable_from failed: {e}")
         err = services.create_error_response(
             f"measurable_from failed: {e!s}", "graphrag_error"
         )
@@ -728,7 +727,7 @@ async def graphrag_overview(
         return {"success": True, "overview": overview}
 
     except Exception as e:
-        logger.error(f"GraphRAG overview failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG overview failed: {e}")
         err = services.create_error_response(
             f"GraphRAG overview failed: {e!s}", "graphrag_error"
         )

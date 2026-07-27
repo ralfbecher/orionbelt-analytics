@@ -212,7 +212,7 @@ class ServerState:
                 logger.info("Session eviction task cancelled")
                 break
             except Exception as e:
-                logger.error(f"Error in session eviction loop: {e}", exc_info=True)
+                logger.exception(f"Error in session eviction loop: {e}")
                 await asyncio.sleep(scan_interval)
 
     def _evict_idle_sessions(self, idle_timeout: int) -> None:

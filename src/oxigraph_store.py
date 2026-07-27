@@ -182,7 +182,7 @@ class OxigraphStoreManager:
             return triples_loaded
 
         except Exception as e:
-            logger.error(f"Failed to load ontology: {e}", exc_info=True)
+            logger.exception(f"Failed to load ontology: {e}")
             raise
 
     def query_sparql(
@@ -278,7 +278,7 @@ class OxigraphStoreManager:
             return results
 
         except Exception as e:
-            logger.error(f"SPARQL query failed: {e}", exc_info=True)
+            logger.exception(f"SPARQL query failed: {e}")
             raise
 
     def query_sparql_ask(self, sparql_query: str) -> bool:
@@ -307,7 +307,7 @@ class OxigraphStoreManager:
             # (older versions); both support bool().
             return bool(self.store.query(sparql_query))
         except Exception as e:
-            logger.error(f"SPARQL ASK query failed: {e}", exc_info=True)
+            logger.exception(f"SPARQL ASK query failed: {e}")
             raise
 
     def query_sparql_construct(self, sparql_query: str) -> str:
@@ -343,7 +343,7 @@ class OxigraphStoreManager:
             serialized = results.serialize(format=RdfFormat.TURTLE)
             return serialized.decode("utf-8") if serialized is not None else ""
         except Exception as e:
-            logger.error(f"SPARQL CONSTRUCT query failed: {e}", exc_info=True)
+            logger.exception(f"SPARQL CONSTRUCT query failed: {e}")
             raise
 
     def add_triple(
@@ -388,7 +388,7 @@ class OxigraphStoreManager:
             logger.debug(f"Added triple: <{subject}> <{predicate}> {object}")
 
         except Exception as e:
-            logger.error(f"Failed to add triple: {e}", exc_info=True)
+            logger.exception(f"Failed to add triple: {e}")
             raise
 
     def add_knowledge(
@@ -445,7 +445,7 @@ class OxigraphStoreManager:
             logger.info(f"Added knowledge: {subject} -> {predicate}")
 
         except Exception as e:
-            logger.error(f"Failed to add knowledge: {e}", exc_info=True)
+            logger.exception(f"Failed to add knowledge: {e}")
             raise
 
     def get_ontology_stats(self, graph_uri: str | None = None) -> dict[str, Any]:
@@ -495,7 +495,7 @@ class OxigraphStoreManager:
                 }
 
         except Exception as e:
-            logger.error(f"Failed to get stats: {e}", exc_info=True)
+            logger.exception(f"Failed to get stats: {e}")
             return {"error": str(e)}
 
     def list_tables_sparql(self, schema_graph: str) -> list[str]:
@@ -605,7 +605,7 @@ class OxigraphStoreManager:
             }
             logger.info(f"Deleted named graph <{graph_uri}>")
         except Exception as e:
-            logger.error(f"Failed to delete graph {graph_uri}: {e}", exc_info=True)
+            logger.exception(f"Failed to delete graph {graph_uri}: {e}")
             raise
 
     def close(self) -> None:

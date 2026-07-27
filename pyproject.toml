@@ -139,6 +139,7 @@ select = [
     "ASYNC",  # blocking calls inside async functions
     "S110",   # silently swallowed exceptions
     "DTZ",    # naive datetimes -- timestamps are persisted and compared
+    "G201",   # logger.error(exc_info=True) -> logger.exception
 ]
 
 # Tests legitimately hold mutable class-level fixtures; that is noise there

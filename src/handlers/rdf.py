@@ -110,7 +110,7 @@ async def store_ontology_in_rdf(
         )
 
     except Exception as e:
-        logger.error(f"Failed to store ontology in RDF: {e}", exc_info=True)
+        logger.exception(f"Failed to store ontology in RDF: {e}")
         return RDFError(f"Failed to store ontology: {e!s}").to_response()
 
 
@@ -176,7 +176,7 @@ async def query_sparql(
             }
 
     except Exception as e:
-        logger.error(f"SPARQL query failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL query failed: {e}")
         return RDFError(f"SPARQL query failed: {e!s}").to_response()
 
 
@@ -199,7 +199,7 @@ async def query_sparql_ask(
         return {"success": True, "result": result, "query": sparql_query}
 
     except Exception as e:
-        logger.error(f"SPARQL ASK query failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL ASK query failed: {e}")
         return RDFError(f"SPARQL ASK query failed: {e!s}").to_response()
 
 
@@ -236,7 +236,7 @@ async def add_rdf_knowledge(
         )
 
     except Exception as e:
-        logger.error(f"Failed to add knowledge: {e}", exc_info=True)
+        logger.exception(f"Failed to add knowledge: {e}")
         return RDFError(f"Failed to add knowledge: {e!s}").to_response()
 
 
@@ -271,7 +271,7 @@ async def list_tables_sparql(
         }
 
     except Exception as e:
-        logger.error(f"SPARQL table listing failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL table listing failed: {e}")
         return RDFError(f"Failed to list tables: {e!s}").to_response()
 
 
@@ -302,7 +302,7 @@ async def find_columns_by_type_sparql(
         }
 
     except Exception as e:
-        logger.error(f"SPARQL column search failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL column search failed: {e}")
         return RDFError(f"Failed to find columns: {e!s}").to_response()
 
 
@@ -324,5 +324,5 @@ async def get_rdf_store_stats(
         return {"success": True, "stats": stats}
 
     except Exception as e:
-        logger.error(f"Failed to get store stats: {e}", exc_info=True)
+        logger.exception(f"Failed to get store stats: {e}")
         return RDFError(f"Failed to get stats: {e!s}").to_response()
