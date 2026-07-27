@@ -15,7 +15,6 @@ This guide covers the development workflow for OrionBelt® Analytics -- prerequi
 Optional but recommended:
 
 - **pre-commit** -- runs formatting and linting checks before each commit (installed as a dev dependency)
-- **Docker** -- needed only if you want to run integration tests via `testcontainers`
 
 ---
 
