@@ -29,6 +29,20 @@ SRC = PROJECT_ROOT / "src"
 OFFLOAD_DISPATCHERS = ("to_thread", "mutate_workspace_metadata")
 
 BLOCKING_METHODS = {"read_text", "write_text", "read_bytes", "write_bytes"}
+
+# KNOWN GAP -- deliberately not enforced here yet.
+#
+# rdflib Graph.parse/serialize are the dominant loop stalls in this codebase:
+# roughly 876 ms for a 2.65 MB Turtle file, versus ~1.2 ms to read the same
+# bytes. So converting the read to read_text_file() while leaving parse() on the
+# loop fixes the cheap half. Adding "parse"/"serialize" to BLOCKING_METHODS
+# above immediately reports 11+ call sites (ontology_generation, ontology_io,
+# ontology_semantic, rdf, graphrag) -- all of which are byte-identical on main,
+# i.e. pre-existing rather than introduced here.
+#
+# Converting them is tracked separately rather than folded into this change.
+# This comment exists so the guard is not mistaken for proof that no blocking
+# work remains on the event loop: it covers file I/O, not CPU-bound parsing.
 BLOCKING_MODULE_CALLS = {
     ("json", "dump"),
     ("json", "load"),
@@ -134,15 +148,57 @@ def test_no_direct_blocking_io_in_async_functions():
     )
 
 
+def _dispatched_spans(func) -> list[tuple[int, int]]:
+    """Line spans of nested callables handed to an off-loop dispatcher.
+
+    ``asyncio.to_thread(_apply)`` / ``mutate_workspace_metadata(cid, d, _record)``
+    run ``_apply`` / ``_record`` in a worker thread, so blocking calls *inside
+    those* are fine. Everything else in the async body is not.
+    """
+    dispatched: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        label = (
+            callee.attr
+            if isinstance(callee, ast.Attribute)
+            else getattr(callee, "id", "")
+        )
+        if label not in OFFLOAD_DISPATCHERS:
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                dispatched.add(arg.id)
+
+    spans = []
+    for node in ast.walk(func):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in dispatched
+        ):
+            last = max(
+                getattr(child, "lineno", node.lineno) for child in ast.walk(node)
+            )
+            spans.append((node.lineno, last))
+    return spans
+
+
 def test_async_callers_do_not_invoke_blocking_sync_helpers():
-    """A sync helper doing file I/O must be reached via asyncio.to_thread.
+    """A sync helper doing file I/O must be reached via an off-loop dispatcher.
 
     This is the case ASYNC230 cannot see at all: the blocking call is one
     function away, so the lint rule reports nothing while the loop still
     stalls.
+
+    Exemption is per *call site*, not per function. An earlier version accepted
+    any async function that merely mentioned ``to_thread`` anywhere -- the
+    condition included ``name in source``, which is always true because ``name``
+    is the callee being examined. That exempted 16 of 93 async functions,
+    including every one this stack rewrote for off-loading.
     """
     functions = _index_functions()
-    # simple name -> called-from-async, for sync helpers that block
+
     blocking_helpers = {
         qualname.rsplit(".", 1)[-1]
         for (_p, qualname), (node, _path, is_async) in functions.items()
@@ -153,7 +209,7 @@ def test_async_callers_do_not_invoke_blocking_sync_helpers():
     for (_path, qualname), (node, path, is_async) in sorted(functions.items()):
         if not is_async:
             continue
-        source = ast.unparse(node)
+        exempt = _dispatched_spans(node)
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
@@ -167,9 +223,7 @@ def test_async_callers_do_not_invoke_blocking_sync_helpers():
             )
             if name not in blocking_helpers:
                 continue
-            # Accept it when the async function routes through a dispatcher
-            # that runs the work in a worker thread.
-            if any(d in source for d in OFFLOAD_DISPATCHERS) and name in source:
+            if any(lo <= call.lineno <= hi for lo, hi in exempt):
                 continue
             rel = path.relative_to(PROJECT_ROOT)
             offenders.append(f"{rel}:{call.lineno}  {name}()  from async {qualname}")
@@ -177,6 +231,44 @@ def test_async_callers_do_not_invoke_blocking_sync_helpers():
     assert not offenders, (
         "Async functions calling blocking sync helpers without "
         "asyncio.to_thread:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_dispatcher_exemption_is_per_call_site_not_per_function():
+    """Mentioning to_thread elsewhere must not excuse an un-dispatched call.
+
+    Regression for the tautological exemption: this function dispatches one
+    helper properly and calls another directly. Only the dispatched one is
+    inside an exempt span.
+    """
+    tree = ast.parse(
+        "async def handler(d):\n"
+        "    def _apply():\n"
+        "        blocking_helper(d)\n"
+        "    await asyncio.to_thread(_apply)\n"
+        "    leaked_helper(d)\n"
+    )
+    func = tree.body[0]
+    spans = _dispatched_spans(func)
+
+    inside = [
+        c
+        for c in ast.walk(func)
+        if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "blocking_helper"
+    ]
+    outside = [
+        c
+        for c in ast.walk(func)
+        if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "leaked_helper"
+    ]
+    assert inside and outside
+
+    assert any(
+        lo <= inside[0].lineno <= hi for lo, hi in spans
+    ), "the dispatched payload should be exempt"
+    assert not any(lo <= outside[0].lineno <= hi for lo, hi in spans), (
+        "an un-dispatched call must NOT be exempt just because the function "
+        "also uses to_thread"
     )
 
 

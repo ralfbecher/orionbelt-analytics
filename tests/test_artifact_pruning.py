@@ -348,3 +348,36 @@ def test_every_prune_call_sits_inside_a_family_lock():
         + "\n  ".join(offenders)
         + "\n\nWrap the produce -> record -> prune sequence in the family lock."
     )
+
+
+def test_enriched_ontologies_are_scoped_per_schema(tmp_path):
+    """apply_semantic_names must not prune across schemas.
+
+    Its filename slot used a bare "semantic" instead of the schema, so
+    family_key() collapsed every schema's enriched ontology into one
+    connection-wide family. With the default keep of 3, enriching a 4th schema
+    deleted the 1st schema's file while workspace metadata still named it.
+    """
+    families = {
+        schema: family_key(
+            f"ontology_{CONN}_{schema}_semantic_2026072{i}_120000000000.ttl"
+        )
+        for i, schema in enumerate(["sales", "hr", "finance", "ops"])
+    }
+    assert len(set(families.values())) == 4, f"schemas share a family: {families}"
+
+
+def test_enriching_many_schemas_keeps_every_recorded_file(tmp_path):
+    """End-to-end: keep+1 schemas enriched, every recorded artifact survives."""
+    recorded = {}
+    for i, schema in enumerate(["sales", "hr", "finance", "ops"]):
+        path = _write(
+            tmp_path,
+            f"ontology_{CONN}_{schema}_semantic_2026072{i}_120000000000.ttl",
+            mtime=i,
+        )
+        recorded[schema] = path
+        prune_superseded_sync(path, keep=3)
+
+    missing = [s for s, p in recorded.items() if not p.exists()]
+    assert not missing, f"metadata would dangle for: {missing}"

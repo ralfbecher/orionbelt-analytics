@@ -12,8 +12,57 @@ from .constants import DEFAULT_OUTPUT_DIR
 # Project root: parent of the src/ directory
 PROJECT_ROOT = Path(__file__).parent.parent
 
+
+def _resolve_output_dir() -> Path:
+    """Resolve OUTPUT_DIR, refusing values that would make cleanup destructive.
+
+    Startup cleanup deletes loose files directly under this directory, and with
+    AUTO_CLEANUP_ON_STARTUP=true it removes every subdirectory lacking a
+    metadata.json. That is safe for a dedicated output directory and
+    catastrophic for anything else: pathlib collapses "" and "." onto
+    PROJECT_ROOT, so a blanked-out ``OUTPUT_DIR=`` in .env would target the
+    installation itself -- unlinking .env and pyproject.toml, then removing
+    src/, tests/ and .git/.
+
+    Rejected at import rather than defaulted, because silently substituting a
+    different directory than the operator configured is its own surprise.
+
+    Returns:
+        The configured output directory.
+
+    Raises:
+        ValueError: If the value is blank, or resolves to PROJECT_ROOT or any
+            of its parents.
+    """
+    raw = os.getenv("OUTPUT_DIR")
+    if raw is None:
+        return PROJECT_ROOT / DEFAULT_OUTPUT_DIR
+
+    if not raw.strip():
+        raise ValueError(
+            "OUTPUT_DIR is set but empty. Remove it to use the default "
+            f"('{DEFAULT_OUTPUT_DIR}') or give it a real path; an empty value "
+            "resolves to the project root, which startup cleanup would delete."
+        )
+
+    candidate = Path(raw.strip())
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+    root = PROJECT_ROOT.resolve()
+
+    if resolved == root or resolved in root.parents:
+        raise ValueError(
+            f"OUTPUT_DIR={raw!r} resolves to {resolved}, which contains the "
+            "installation. Startup cleanup deletes loose files and unrecognized "
+            "directories there. Point it at a dedicated directory such as "
+            f"'{DEFAULT_OUTPUT_DIR}' or '/var/lib/orionbelt'."
+        )
+    return resolved
+
+
 # Output directory for generated files (configurable via OUTPUT_DIR env var)
-OUTPUT_DIR = PROJECT_ROOT / os.getenv("OUTPUT_DIR", DEFAULT_OUTPUT_DIR)
+OUTPUT_DIR = _resolve_output_dir()
 
 # Directories directly under OUTPUT_DIR that are NOT per-connection workspaces.
 # They hold satellite stores keyed by connection one level deeper

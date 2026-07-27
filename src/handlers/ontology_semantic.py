@@ -471,15 +471,32 @@ async def apply_semantic_names(
                     if session.connection_id
                     else ensure_output_dir()
                 )
+                # Scope the artifact family to the schema. Every other writer
+                # embeds schema_safe in the filename; this one used a bare
+                # "semantic" slot, so family_key() collapsed EVERY schema's
+                # enriched ontology into one connection-wide family and pruning
+                # deleted other schemas' files while metadata still named them.
+                enriched_schema = (
+                    session.current_schema
+                    or session.get_last_analyzed_schema()
+                    or "default"
+                )
+                enriched_schema_safe = enriched_schema.replace(" ", "_").replace(
+                    ".", "_"
+                )
+
                 # Serialize produce -> record -> prune for this family so an
                 # overlapping request cannot have its just-written ontology
                 # pruned as stale.
                 async with artifact_family_lock(
                     conn_dir,
-                    f"ontology_{session.connection_id or 'default'}_semantic",
+                    f"ontology_{session.connection_id or 'default'}"
+                    f"_{enriched_schema_safe}_semantic",
                 ):
                     new_ontology_filename = (
-                        services.get_session_safe_filename(ctx, "ontology", "semantic")
+                        services.get_session_safe_filename(
+                            ctx, "ontology", f"{enriched_schema_safe}_semantic"
+                        )
                         + ".ttl"
                     )
                     ontology_file_path = conn_dir / new_ontology_filename
@@ -495,9 +512,10 @@ async def apply_semantic_names(
                     # Update workspace: mark ontology as enriched
                     if session.connection_id:
                         try:
-                            schema_name = (
-                                session.get_last_analyzed_schema() or "default"
-                            )
+                            # Same schema the artifact family is scoped to --
+                            # these previously disagreed (current_schema here vs
+                            # get_last_analyzed_schema below).
+                            schema_name = enriched_schema
                             await update_workspace_section(
                                 connection_id=session.connection_id,
                                 output_dir=OUTPUT_DIR,

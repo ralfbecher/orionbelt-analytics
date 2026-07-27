@@ -369,13 +369,16 @@ async def generate_ontology(
                                 output_dir=OUTPUT_DIR,
                                 schema_name=schema_name or "default",
                                 section="ontology",
+                                # Merge: this follow-up write only reports RDF
+                                # persistence. Replacing the section would
+                                # re-stamp ontology_file with this request's
+                                # name even if a concurrent generation has
+                                # already superseded it.
                                 data={
-                                    "ontology_file": ontology_filename,
-                                    "enriched": False,
                                     "graph_uri": graph_uri,
                                     "persisted_to_rdf": True,
-                                    "generated_at": utc_now().isoformat(),
                                 },
+                                merge=True,
                             )
                             await update_workspace_rdf(
                                 connection_id=session.connection_id,

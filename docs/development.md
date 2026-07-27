@@ -98,17 +98,17 @@ Test files follow the `test_*.py` convention in the `tests/` directory, covering
 
 ```bash
 # Auto-format with black (line length 88, Python 3.13 target)
-black src/ tests/
+black src/ tests/ server.py
 
 # Sort imports (configured for black compatibility)
-isort src/ tests/
+isort src/ tests/ server.py
 ```
 
 ### Linting
 
 ```bash
 # Ruff -- fast linter and formatter
-ruff check src/ tests/
+ruff check src/ tests/ server.py
 
 # Flake8
 flake8 src/
@@ -361,9 +361,9 @@ docs: update configuration reference for BigQuery
 2. **Format and lint** your code:
 
    ```bash
-   black src/ tests/
-   isort src/ tests/
-   ruff check src/ tests/
+   black src/ tests/ server.py
+   isort src/ tests/ server.py
+   ruff check src/ tests/ server.py
    mypy src/
    ```
 

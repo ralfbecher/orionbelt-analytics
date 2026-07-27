@@ -138,6 +138,77 @@ def test_workspace_without_updated_at_is_kept(tmp_path, monkeypatch):
     assert ws.exists(), "workspace with no updated_at must not be deleted"
 
 
+async def _run_cleanup_workspace(tmp_path, monkeypatch, connection_id="conncleanup"):
+    """Drive the real cleanup_workspace tool against a temp output dir."""
+    from unittest.mock import AsyncMock, Mock
+
+    from src.handler_context import HandlerContext
+    from src.handlers import workspace as workspace_handler
+
+    monkeypatch.setattr("src.paths.OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(workspace_handler, "OUTPUT_DIR", tmp_path)
+
+    session = Mock()
+    session.connection_id = connection_id
+    session.oxigraph_store = None
+    ctx = Mock()
+    ctx.info = AsyncMock()
+
+    services = HandlerContext(get_session_data=lambda _ctx: session)
+    return await workspace_handler.cleanup_workspace(ctx, services)
+
+
+async def test_cleanup_workspace_removes_workspace_and_satellite_stores(
+    tmp_path, monkeypatch
+):
+    """The tool must delete all three directories, not just the workspace.
+
+    Behavioural: the earlier version of this test only asserted that the
+    source mentioned get_connection_store_dirs, which passed even when the
+    Oxigraph cleanup was deleted outright.
+    """
+    cid = "conncleanup"
+    (tmp_path / cid).mkdir(parents=True)
+    (tmp_path / cid / "metadata.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "chromadb" / cid).mkdir(parents=True)
+    (tmp_path / "oxigraph" / cid / "store").mkdir(parents=True)
+
+    result = await _run_cleanup_workspace(tmp_path, monkeypatch, cid)
+
+    assert not (tmp_path / cid).exists()
+    assert not (tmp_path / "chromadb" / cid).exists(), "ChromaDB store survived"
+    assert not (tmp_path / "oxigraph" / cid).exists(), "Oxigraph store survived"
+    assert "ChromaDB vector store" in str(result)
+    assert "Oxigraph RDF store" in str(result)
+
+
+async def test_cleanup_workspace_does_not_report_deletions_that_failed(
+    tmp_path, monkeypatch
+):
+    """Reporting must reflect what is actually gone.
+
+    rmtree(ignore_errors=True) never raises, so "it did not throw" proves
+    nothing -- a locked or read-only tree survives silently. Stubbing rmtree to
+    a no-op simulates exactly that: nothing is deleted, so nothing may be
+    reported as removed.
+    """
+    import shutil
+
+    cid = "conncleanup"
+    (tmp_path / cid).mkdir(parents=True)
+    (tmp_path / "chromadb" / cid).mkdir(parents=True)
+    (tmp_path / "oxigraph" / cid / "store").mkdir(parents=True)
+
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: None)
+
+    result = await _run_cleanup_workspace(tmp_path, monkeypatch, cid)
+
+    assert (tmp_path / cid).exists(), "precondition: rmtree was stubbed out"
+    assert "## Removed" not in str(
+        result
+    ), "cleanup_workspace claimed deletions that never happened"
+
+
 def test_cleanup_workspace_tool_covers_the_same_directories_as_startup():
     """The runtime cleanup tool and startup cleanup must delete the same set.
 
@@ -153,22 +224,4 @@ def test_cleanup_workspace_tool_covers_the_same_directories_as_startup():
     assert "get_connection_store_dirs" in source, (
         "cleanup_workspace must derive satellite store paths from "
         "get_connection_store_dirs() rather than hardcoding them"
-    )
-
-
-def test_cleanup_workspace_does_not_claim_failed_deletions(tmp_path, monkeypatch):
-    """rmtree(ignore_errors=True) never raises, so success must be verified.
-
-    A locked or read-only tree survives the call silently; reporting it as
-    removed tells the user their data is gone when it is not.
-    """
-    import inspect
-
-    from src.handlers import workspace as workspace_handler
-
-    source = inspect.getsource(workspace_handler.cleanup_workspace)
-    # The existence re-check is what makes the report truthful.
-    assert "if dir_path.exists():" in source, (
-        "cleanup_workspace must re-check existence after rmtree before "
-        "reporting a directory as removed"
     )

@@ -404,6 +404,7 @@ class VersionMetadataManager:
         schema_name: str,
         section: str,
         data: dict[str, Any],
+        merge: bool = False,
     ) -> None:
         """Update a workspace section for a schema.
 
@@ -411,6 +412,11 @@ class VersionMetadataManager:
             schema_name: Database schema name (e.g. "public")
             section: Section key ("schema", "ontology", "graphrag")
             data: Section data dict
+            merge: Update the existing section in place instead of replacing
+                it. Use this for follow-up writes that only report on part of
+                the section -- replacing would re-stamp fields the caller did
+                not intend to own, such as an ontology_file that a later
+                request has already superseded.
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
@@ -423,7 +429,10 @@ class VersionMetadataManager:
         if schema_name not in workspace.get("schemas", {}):
             workspace.setdefault("schemas", {})[schema_name] = {}
 
-        workspace["schemas"][schema_name][section] = data
+        if merge:
+            workspace["schemas"][schema_name].setdefault(section, {}).update(data)
+        else:
+            workspace["schemas"][schema_name][section] = data
         workspace["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
@@ -526,6 +535,7 @@ async def update_workspace_section(
     schema_name: str,
     section: str,
     data: dict[str, Any],
+    merge: bool = False,
 ) -> None:
     """Thread-safe workspace section update with per-connection locking.
 
@@ -543,7 +553,7 @@ async def update_workspace_section(
     await mutate_workspace_metadata(
         connection_id,
         output_dir,
-        lambda mgr: mgr.update_workspace(schema_name, section, data),
+        lambda mgr: mgr.update_workspace(schema_name, section, data, merge=merge),
     )
 
 
