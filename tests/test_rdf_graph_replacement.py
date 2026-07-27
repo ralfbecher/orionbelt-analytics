@@ -142,3 +142,55 @@ class TestFailedLoadPreservesPreviousGeneration:
         store.load_ontology(_ttl("Customers", "DroppedTable"), GRAPH, "public")
         store.load_ontology(_ttl("Customers"), GRAPH, "public")
         assert _classes(store) == {"Customers"}
+
+
+class TestCallerSuppliedGraphUris:
+    """graph_uri is a user-facing tool parameter and must not be string-surgeried.
+
+    Staging used to derive its IRI by appending "#__staging_..." to the
+    caller's graph_uri. Any URI that already carried a fragment -- perfectly
+    valid, and reachable through generate_ontology(graph_uri=...) -- then
+    produced two fragments, which pyoxigraph rejects outright with
+    "Invalid IRI code point '#'". The staging name now comes from a private
+    URN namespace and does not depend on the caller's URI at all.
+    """
+
+    @pytest.mark.parametrize(
+        "graph",
+        [
+            "http://example.com/schema/public",
+            "http://example.com/schema#public",
+            "http://example.com/schema?version=2",
+            "http://example.com/schema/public/",
+            "urn:example:schema:public",
+        ],
+    )
+    def test_valid_graph_uri_shapes_are_accepted(self, store, graph):
+        """Fragments, queries, trailing slashes and URNs must all load."""
+        assert store.load_ontology(_ttl("Customers"), graph, "public") == 1
+
+    def test_replacement_and_failure_handling_hold_for_fragment_uris(self, store):
+        """The staging guarantees must not be limited to path-style URIs."""
+        graph = "http://example.com/schema#public"
+        store.load_ontology(_ttl("Customers", "DroppedTable"), graph, "public")
+        store.load_ontology(_ttl("Customers"), graph, "public")
+        assert _classes(store, graph) == {"Customers"}
+
+        with pytest.raises(Exception):
+            store.load_ontology("@@@ broken", graph, "public")
+        assert _classes(store, graph) == {"Customers"}
+
+        graphs = [str(g) for g in store.store.named_graphs()]
+        assert not [g for g in graphs if "staging" in g], f"staging leaked: {graphs}"
+
+    def test_staging_iri_is_not_derived_from_the_caller_uri(self):
+        """A private URN namespace, so no caller URI shape can break it."""
+        from src.oxigraph_store import _STAGING_IRI_PREFIX
+
+        assert _STAGING_IRI_PREFIX.startswith("urn:")
+        assert "#" not in _STAGING_IRI_PREFIX
+
+    def test_malformed_caller_uri_is_rejected_not_silently_mangled(self, store):
+        """An invalid IRI from the caller must surface, not be patched over."""
+        with pytest.raises(ValueError):
+            store.load_ontology(_ttl("Customers"), "http://example.com/a#b#c", "public")

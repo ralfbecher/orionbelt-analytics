@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 # find (see issue: graph-URI mismatch).
 SCHEMA_GRAPH_PREFIX = "http://example.com/schema/"
 
+# Private namespace for the transient graphs load_ontology() stages replacements
+# in. Deliberately unrelated to any caller-supplied graph URI: deriving it from
+# one produced invalid IRIs for URIs that already contained a fragment.
+_STAGING_IRI_PREFIX = "urn:orionbelt:staging:"
+
 
 def schema_graph_uri(schema_name: str) -> str:
     """Return the canonical named-graph URI for a schema's RDF.
@@ -161,7 +166,15 @@ class OxigraphStoreManager:
         """
         try:
             target = NamedNode(graph_uri)
-            staging = NamedNode(f"{graph_uri}#__staging_{uuid4().hex}")
+            # Staging IRI comes from a private URN namespace rather than being
+            # derived from graph_uri. Appending "#..." to the caller's URI
+            # produced a second fragment for any graph URI that already had one
+            # -- e.g. http://example.com/schema#public, which is perfectly valid
+            # and reachable through the user-facing graph_uri tool parameter --
+            # and pyoxigraph rejects that with "Invalid IRI code point '#'".
+            # A uuid alone gives the uniqueness staging needs; the name never
+            # escapes this method.
+            staging = NamedNode(f"{_STAGING_IRI_PREFIX}{uuid4().hex}")
 
             def _clear(graph: NamedNode) -> None:
                 """Remove a graph's quads, leaving the graph itself in place."""
