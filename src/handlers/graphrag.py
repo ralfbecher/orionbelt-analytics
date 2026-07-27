@@ -11,6 +11,7 @@ from fastmcp import Context
 from ..exceptions import ConnectionError
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
+from ..lifecycle.artifacts import prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
@@ -84,6 +85,7 @@ async def _auto_generate_ontology_background(
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
         await write_text_file(ontology_file, ontology_ttl)
+        await prune_superseded_artifacts(ontology_file)
 
         # Write to the specific schema's state (not current schema)
         schema_state = session.get_or_create_schema_state(schema_name)

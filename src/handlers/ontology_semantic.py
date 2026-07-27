@@ -9,6 +9,7 @@ from fastmcp import Context
 
 from ..config import config_manager
 from ..handler_context import HandlerContext
+from ..lifecycle.artifacts import prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
@@ -477,6 +478,7 @@ async def apply_semantic_names(
                 ontology_file_path = conn_dir / new_ontology_filename
 
                 await write_text_file(ontology_file_path, updated_ontology)
+                await prune_superseded_artifacts(ontology_file_path)
 
                 logger.info(f"Saved semantic ontology to: {ontology_file_path}")
                 session.ontology_file = new_ontology_filename

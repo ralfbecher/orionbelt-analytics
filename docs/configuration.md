@@ -37,6 +37,14 @@ AUTO_GRAPHRAG=true
 # When enabled: ontology is automatically generated and stored in Oxigraph RDF store
 AUTO_ONTOLOGY=false
 
+# Superseded artifact pruning
+# Artifact filenames carry a timestamp, so every generate_ontology /
+# discover_schema writes a NEW file while metadata records only the latest.
+# This is how many generations of each artifact (per connection, per schema)
+# to keep; older ones are deleted as soon as a new one is written. Minimum 1
+# -- the file currently referenced is never a deletion candidate.
+ARTIFACT_KEEP_VERSIONS=3
+
 # Startup Workspace Cleanup
 # -------------------------
 # Runs on every startup regardless of the setting below:
@@ -200,6 +208,7 @@ DATABRICKS_SCHEMA=default
 | `LOG_LEVEL` | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `AUTO_GRAPHRAG` | `true` | Auto-initialize GraphRAG when schema is analyzed |
 | `AUTO_ONTOLOGY` | `false` | Auto-generate ontology after GraphRAG completes |
+| `ARTIFACT_KEEP_VERSIONS` | `3` | Generations of each ontology / schema / R2RML file to keep per schema. Older ones are pruned when a new one is written. Minimum 1 |
 | `AUTO_CLEANUP_ON_STARTUP` | `false` | Delete whole workspaces at startup: `false` (keep all), `true` (orphaned, or older than `WORKSPACE_MAX_AGE_DAYS`), `all` (delete every workspace). See [Startup workspace cleanup](#startup-workspace-cleanup) |
 | `WORKSPACE_MAX_AGE_DAYS` | `30` | Age threshold for `AUTO_CLEANUP_ON_STARTUP=true`, measured from the workspace's last update. Ignored in the other modes |
 | `ONTOLOGY_BASE_URI` | `http://example.com/ontology/` | Base URI for generated RDF ontologies |

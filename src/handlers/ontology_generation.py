@@ -10,6 +10,7 @@ from fastmcp import Context
 
 from ..database_manager import ColumnInfo, TableInfo
 from ..handler_context import HandlerContext
+from ..lifecycle.artifacts import prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
@@ -282,6 +283,7 @@ async def generate_ontology(
         ontology_file_path = conn_dir / ontology_filename
 
         await write_text_file(ontology_file_path, ontology_ttl)
+        await prune_superseded_artifacts(ontology_file_path)
 
         logger.info(
             f"Generated ontology for schema '{schema_name or 'default'}': {len(tables_info)} tables"
