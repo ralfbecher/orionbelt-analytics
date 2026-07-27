@@ -142,6 +142,19 @@ select = [
     "G201",   # logger.error(exc_info=True) -> logger.exception
 ]
 
+# BLE001 (blind `except Exception`) is intentionally NOT selected. All 167
+# sites were audited, not waved through: 153 log, 23 re-raise, and 23 fold the
+# message into the returned error payload. That breadth is required at the MCP
+# tool boundary -- a handler must convert failures into an error response
+# rather than leak an arbitrary exception into the protocol layer -- so
+# enabling the rule would mean 167 `noqa` comments and no added safety.
+#
+# The 4 handlers that genuinely discarded their exception were fixed. The
+# invariant that actually matters ("a broad handler must not throw the error
+# away") is enforced by tests/test_no_silent_exceptions.py, which walks the AST
+# and fails on any regression -- a stricter and more precise guarantee than the
+# lint rule provides.
+
 # Tests legitimately hold mutable class-level fixtures; that is noise there
 # rather than signal.
 [tool.ruff.lint.per-file-ignores]

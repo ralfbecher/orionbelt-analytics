@@ -261,7 +261,9 @@ def validate_uri(uri: str) -> bool:
         parsed = urlparse(uri)
         # Check scheme is http or https and has a netloc (domain)
         return parsed.scheme in ("http", "https") and bool(parsed.netloc)
-    except Exception:
+    except ValueError:
+        # urlparse raises ValueError on malformed input (e.g. a bad IPv6
+        # literal). Anything else is a caller bug and should surface.
         return False
 
 

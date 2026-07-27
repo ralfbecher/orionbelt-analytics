@@ -28,7 +28,10 @@ def shacl_available() -> bool:
         return False
     try:
         import pyshacl  # noqa: F401
-    except Exception:
+    except Exception as exc:
+        # Broad on purpose: a broken install can fail at import with more than
+        # ImportError. Logged so "SHACL silently unavailable" is diagnosable.
+        logger.debug("pyshacl unavailable (%s): %s", type(exc).__name__, exc)
         return False
     return True
 
@@ -56,7 +59,8 @@ def validate_ontology(ontology_ttl: str) -> dict[str, Any]:
 
     try:
         from pyshacl import validate as _pyshacl_validate
-    except Exception:
+    except Exception as exc:
+        logger.debug("pyshacl import failed (%s): %s", type(exc).__name__, exc)
         return {
             "available": False,
             "conforms": None,

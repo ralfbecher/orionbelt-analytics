@@ -569,7 +569,14 @@ class ChromaDBVectorStore:
                     where={"element_type": element_type}, include=[]
                 )
                 type_counts[element_type] = len(results["ids"])
-        except Exception:
+        except Exception as exc:
+            # Report zeros rather than failing the whole stats call, but say so
+            # -- a silent all-zero breakdown reads as "empty store".
+            logger.warning(
+                "ChromaDB type-distribution query failed (%s): %s; reporting zeros",
+                type(exc).__name__,
+                exc,
+            )
             type_counts = {"table": 0, "column": 0, "relationship": 0}
 
         return {
