@@ -1,9 +1,8 @@
 """Workspace restore, cleanup, and semantic model storage handler implementation."""
 
-import json
+import asyncio
 import logging
 import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +11,16 @@ from fastmcp import Context
 from ..database_manager import TableInfo
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
-from ..lifecycle.metadata import VersionMetadataManager
+from ..lifecycle.metadata import VersionMetadataManager, mutate_workspace_metadata
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
-from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir, get_models_dir
+from ..paths import (
+    OUTPUT_DIR,
+    ensure_output_dir,
+    get_connection_dir,
+    get_connection_store_dirs,
+    get_models_dir,
+)
+from ..utils import read_json_file, read_text_file, utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +90,7 @@ async def _restore_workspace_core(
             schema_path = conn_dir / schema_file
             if schema_path.exists():
                 try:
-                    with open(schema_path, encoding="utf-8") as f:
-                        schema_json = json.load(f)
+                    schema_json = await read_json_file(schema_path)
 
                     tables_raw = schema_json.get("tables", [])
                     tables_info = [TableInfo.from_dict(t) for t in tables_raw]
@@ -114,7 +119,7 @@ async def _restore_workspace_core(
                     enriched_tag = " (enriched)" if is_enriched else ""
                     restored.append(f"Ontology '{sname}'{enriched_tag}")
 
-                    ontology_content = ontology_path.read_text(encoding="utf-8")
+                    ontology_content = await read_text_file(ontology_path)
                     session.loaded_ontology = ontology_content
                     session.loaded_ontology_path = str(ontology_path)
                 except Exception as e:
@@ -154,7 +159,7 @@ async def _restore_workspace_core(
                         connection_id=connection_id,
                         schema_name=sname,
                     )
-                    if manager.load_state(ensure_output_dir()):
+                    if await asyncio.to_thread(manager.load_state, ensure_output_dir()):
                         session.graphrag_manager = manager
                         session.graphrag_initialized = True
                         stats = manager.vector_store.get_statistics()
@@ -308,20 +313,28 @@ async def cleanup_workspace(
     # Drop GraphRAG reference (connection-scoped, releases ChromaDB handle)
     session.graphrag_manager = None
 
-    # 2. Delete workspace directories
-    dirs_to_remove = [
-        (OUTPUT_DIR / connection_id, "workspace"),
-        (OUTPUT_DIR / "oxigraph" / connection_id, "Oxigraph RDF store"),
-        (OUTPUT_DIR / "chromadb" / connection_id, "ChromaDB vector store"),
+    # 2. Delete the workspace and the satellite stores keyed to this connection.
+    # The store paths come from get_connection_store_dirs() so this list cannot
+    # drift from the one the startup cleanup uses.
+    labels = {"chromadb": "ChromaDB vector store", "oxigraph": "Oxigraph RDF store"}
+    dirs_to_remove: list[tuple[Path, str]] = [(OUTPUT_DIR / connection_id, "workspace")]
+    dirs_to_remove += [
+        (store_dir, labels.get(store_dir.parent.name, store_dir.parent.name))
+        for store_dir in get_connection_store_dirs(connection_id)
     ]
+
     for dir_path, label in dirs_to_remove:
+        if not dir_path.exists():
+            continue
+        await asyncio.to_thread(shutil.rmtree, dir_path, ignore_errors=True)
+        # rmtree(ignore_errors=True) never raises, so success cannot be inferred
+        # from "it didn't throw" -- a locked or read-only tree silently survives.
+        # Check, so the response does not claim a deletion that did not happen.
         if dir_path.exists():
-            try:
-                shutil.rmtree(dir_path, ignore_errors=True)
-                removed.append(label)
-                logger.info(f"Cleaned up {label}: {dir_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove {label}: {e}")
+            logger.warning(f"Failed to remove {label}: {dir_path} still present")
+        else:
+            removed.append(label)
+            logger.info(f"Cleaned up {label}: {dir_path}")
 
     # 3. Clear all in-memory session state (keep connection alive)
     session.clear_schema_cache()
@@ -397,8 +410,7 @@ async def save_semantic_model(
     model_path = models_dir / model_filename
 
     try:
-        with open(model_path, "w", encoding="utf-8") as f:
-            f.write(model_yaml)
+        await write_text_file(model_path, model_yaml)
         logger.info(f"Saved semantic model '{model_name}' to: {model_path}")
     except Exception as e:
         logger.error(f"Failed to save semantic model: {e}")
@@ -408,13 +420,14 @@ async def save_semantic_model(
         )
         return err
 
-    # Update workspace metadata
-    try:
-        mgr = VersionMetadataManager(connection_id, OUTPUT_DIR)
+    # Update workspace metadata through the shared locked helper. Doing this
+    # read-modify-write outside the per-connection lock races every other
+    # workspace writer -- reproducibly dropping sections and tearing the file.
+    def _record_model(mgr: VersionMetadataManager) -> None:
         workspace = mgr.metadata.setdefault(
             "workspace",
             {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             },
         )
@@ -422,10 +435,13 @@ async def save_semantic_model(
         models[model_name] = {
             "file": model_filename,
             "schema_name": effective_schema,
-            "saved_at": datetime.now().isoformat(),
+            "saved_at": utc_now().isoformat(),
         }
-        workspace["updated_at"] = datetime.now().isoformat()
+        workspace["updated_at"] = utc_now().isoformat()
         mgr._save_metadata()
+
+    try:
+        await mutate_workspace_metadata(connection_id, OUTPUT_DIR, _record_model)
     except Exception as e:
         logger.warning(f"Failed to update workspace metadata for model: {e}")
 
@@ -504,7 +520,7 @@ async def get_semantic_model(
         return err
 
     try:
-        model_yaml = model_path.read_text(encoding="utf-8")
+        model_yaml = await read_text_file(model_path)
     except Exception as e:
         err = services.create_error_response(
             f"Failed to read model file: {e}",

@@ -1,5 +1,6 @@
 """Oxigraph RDF store and SPARQL handler implementations."""
 
+import asyncio
 import logging
 from typing import Any
 
@@ -15,6 +16,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
+from ..utils import read_text_file, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ async def store_ontology_in_rdf(
                 f"Ontology file not found: {session.ontology_file}"
             ).to_response()
 
-        ontology_ttl = ontology_path.read_text(encoding="utf-8")
+        ontology_ttl = await read_text_file(ontology_path)
 
         if not graph_uri:
             graph_uri = schema_graph_uri(effective_schema)
@@ -74,8 +76,6 @@ async def store_ontology_in_rdf(
         # Update workspace: mark ontology as persisted + write rdf_store
         if session.connection_id:
             try:
-                from datetime import datetime
-
                 await update_workspace_section(
                     connection_id=session.connection_id,
                     output_dir=OUTPUT_DIR,
@@ -86,7 +86,7 @@ async def store_ontology_in_rdf(
                         "enriched": True,
                         "graph_uri": graph_uri,
                         "persisted_to_rdf": True,
-                        "generated_at": datetime.now().isoformat(),
+                        "generated_at": utc_now().isoformat(),
                     },
                 )
                 await update_workspace_rdf(
@@ -95,7 +95,7 @@ async def store_ontology_in_rdf(
                     data={
                         "initialized": True,
                         "graph_uris": [graph_uri],
-                        "initialized_at": datetime.now().isoformat(),
+                        "initialized_at": utc_now().isoformat(),
                     },
                 )
             except Exception as e:
@@ -111,7 +111,7 @@ async def store_ontology_in_rdf(
         )
 
     except Exception as e:
-        logger.error(f"Failed to store ontology in RDF: {e}", exc_info=True)
+        logger.exception(f"Failed to store ontology in RDF: {e}")
         return RDFError(f"Failed to store ontology: {e!s}").to_response()
 
 
@@ -157,7 +157,7 @@ async def query_sparql(
                 "query": sparql_query,
             }
         elif query_type == "CONSTRUCT":
-            result = store.query_sparql_construct(sparql_query)
+            result = await asyncio.to_thread(store.query_sparql_construct, sparql_query)
             await ctx.info("SPARQL CONSTRUCT query completed")
             return {
                 "success": True,
@@ -177,7 +177,7 @@ async def query_sparql(
             }
 
     except Exception as e:
-        logger.error(f"SPARQL query failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL query failed: {e}")
         return RDFError(f"SPARQL query failed: {e!s}").to_response()
 
 
@@ -200,7 +200,7 @@ async def query_sparql_ask(
         return {"success": True, "result": result, "query": sparql_query}
 
     except Exception as e:
-        logger.error(f"SPARQL ASK query failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL ASK query failed: {e}")
         return RDFError(f"SPARQL ASK query failed: {e!s}").to_response()
 
 
@@ -237,7 +237,7 @@ async def add_rdf_knowledge(
         )
 
     except Exception as e:
-        logger.error(f"Failed to add knowledge: {e}", exc_info=True)
+        logger.exception(f"Failed to add knowledge: {e}")
         return RDFError(f"Failed to add knowledge: {e!s}").to_response()
 
 
@@ -272,7 +272,7 @@ async def list_tables_sparql(
         }
 
     except Exception as e:
-        logger.error(f"SPARQL table listing failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL table listing failed: {e}")
         return RDFError(f"Failed to list tables: {e!s}").to_response()
 
 
@@ -303,7 +303,7 @@ async def find_columns_by_type_sparql(
         }
 
     except Exception as e:
-        logger.error(f"SPARQL column search failed: {e}", exc_info=True)
+        logger.exception(f"SPARQL column search failed: {e}")
         return RDFError(f"Failed to find columns: {e!s}").to_response()
 
 
@@ -325,5 +325,5 @@ async def get_rdf_store_stats(
         return {"success": True, "stats": stats}
 
     except Exception as e:
-        logger.error(f"Failed to get store stats: {e}", exc_info=True)
+        logger.exception(f"Failed to get store stats: {e}")
         return RDFError(f"Failed to get stats: {e!s}").to_response()

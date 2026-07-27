@@ -73,7 +73,7 @@ async def main() -> None:
     print("OrionBelt Analytics Agent (type 'quit' to exit)\n")
     try:
         while True:
-            user_input = input("You: ").strip()
+            user_input = (await asyncio.to_thread(input, "You: ")).strip()
             if user_input.lower() in ("quit", "exit", "q"):
                 break
             if not user_input:

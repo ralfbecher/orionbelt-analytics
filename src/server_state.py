@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, cast
 
 from fastmcp import Context
@@ -26,6 +26,7 @@ from .ontology_generator import OntologyGenerator
 from .oxigraph_store import OXIGRAPH_AVAILABLE, OxigraphStoreManager
 from .paths import ensure_output_dir, get_connection_dir, get_oxigraph_store_dir
 from .session import SessionData
+from .utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -144,29 +145,86 @@ class ServerState:
         """Create a new ontology generator instance."""
         return OntologyGenerator(base_uri=base_uri)
 
+    def _cancel_init_tasks(self, session_id: str) -> list["asyncio.Task[Any]"]:
+        """Request cancellation of a session's background init tasks.
+
+        Cancellation is only *scheduled* here -- a cancelled task keeps running
+        until it next reaches a suspension point. Callers that can await should
+        use :meth:`aclose_session`, which waits before tearing down the
+        resources those tasks are still touching.
+
+        Args:
+            session_id: Session whose tasks should be cancelled.
+
+        Returns:
+            The tasks that were still running, for the caller to await.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return []
+
+        pending = [t for t in session.graphrag.init_tasks if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            logger.debug(
+                f"Cancelled {len(pending)} pending GraphRAG init task(s) "
+                f"for session {session_id}"
+            )
+        return pending
+
+    def _release_session(self, session_id: str) -> None:
+        """Close a session's resources and drop it. Assumes tasks are done."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+
+        if session.db_manager:
+            try:
+                session.db_manager.disconnect()
+            except Exception as e:
+                logger.warning(f"Error disconnecting db for session {session_id}: {e}")
+        if session.rdf_store.oxigraph_store:
+            try:
+                session.rdf_store.oxigraph_store.close()
+            except Exception as e:
+                logger.warning(f"Error closing Oxigraph for session {session_id}: {e}")
+
+        del self._sessions[session_id]
+        logger.debug(f"Cleaned up session: {session_id}")
+
+    async def aclose_session(self, session_id: str) -> None:
+        """Clean up a session, waiting for its background tasks to stop first.
+
+        Preferred over :meth:`cleanup_session` wherever a loop is running. A
+        background init task can be mid ``save_state`` or mid metadata write;
+        closing the Oxigraph store and dropping the session out from under it
+        is how a cancelled-but-not-yet-stopped task ends up writing to a closed
+        store.
+
+        Args:
+            session_id: Session to close.
+        """
+        pending = self._cancel_init_tasks(session_id)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._release_session(session_id)
+
     def cleanup_session(self, session_id: str) -> None:
-        """Clean up a specific session's resources."""
-        if session_id in self._sessions:
-            session = self._sessions[session_id]
-            if session.db_manager:
-                try:
-                    session.db_manager.disconnect()
-                except Exception as e:
-                    logger.warning(
-                        f"Error disconnecting db for session {session_id}: {e}"
-                    )
-            if session.rdf_store.oxigraph_store:
-                try:
-                    session.rdf_store.oxigraph_store.close()
-                except Exception as e:
-                    logger.warning(
-                        f"Error closing Oxigraph for session {session_id}: {e}"
-                    )
-            del self._sessions[session_id]
-            logger.debug(f"Cleaned up session: {session_id}")
+        """Clean up a session from synchronous context.
+
+        Best-effort: cancellation cannot be awaited here, so a background task
+        may still be running when the store closes. Used from the atexit hook,
+        where the loop is already gone. Prefer :meth:`aclose_session`.
+
+        Args:
+            session_id: Session to close.
+        """
+        self._cancel_init_tasks(session_id)
+        self._release_session(session_id)
 
     def cleanup(self) -> None:
-        """Clean up all resources."""
+        """Clean up all resources from synchronous context (atexit)."""
         if self._eviction_task and not self._eviction_task.done():
             self._eviction_task.cancel()
             logger.debug("Cancelled session eviction task")
@@ -206,17 +264,21 @@ class ServerState:
         while True:
             try:
                 await asyncio.sleep(scan_interval)
-                self._evict_idle_sessions(idle_timeout)
+                await self._evict_idle_sessions(idle_timeout)
             except asyncio.CancelledError:
                 logger.info("Session eviction task cancelled")
                 break
             except Exception as e:
-                logger.error(f"Error in session eviction loop: {e}", exc_info=True)
+                logger.exception(f"Error in session eviction loop: {e}")
                 await asyncio.sleep(scan_interval)
 
-    def _evict_idle_sessions(self, idle_timeout: int) -> None:
-        """Scan sessions and evict those idle beyond the timeout."""
-        now = datetime.now()
+    async def _evict_idle_sessions(self, idle_timeout: int) -> None:
+        """Scan sessions and evict those idle beyond the timeout.
+
+        Awaits each session's background tasks before releasing its resources,
+        so an in-flight GraphRAG init cannot outlive the store it writes to.
+        """
+        now = utc_now()
         cutoff = now - timedelta(seconds=idle_timeout)
 
         to_evict = []
@@ -238,7 +300,7 @@ class ServerState:
                 f"Evicting idle session {session_id} "
                 f"(idle {idle_secs:.0f}s, timeout={idle_timeout}s)"
             )
-            self.cleanup_session(session_id)
+            await self.aclose_session(session_id)
 
         if evicting > 0:
             logger.info(
@@ -314,7 +376,7 @@ def get_session_safe_filename(ctx: Context, prefix: str, suffix: str = "") -> st
         if session.connection_id and len(session.connection_id) >= 8
         else "default"
     )
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+    timestamp = utc_now().strftime("%Y%m%d_%H%M%S%f")
     if suffix:
         return f"{prefix}_{connection_prefix}_{suffix}_{timestamp}"
     return f"{prefix}_{connection_prefix}_{timestamp}"

@@ -5,10 +5,12 @@ Provides persistent RDF storage with SPARQL 1.1 query support using Oxigraph.
 Stores ontologies, schema metadata, and accumulated knowledge across sessions.
 """
 
+import contextlib
 import logging
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from pyoxigraph import (
@@ -42,6 +44,11 @@ logger = logging.getLogger(__name__)
 # all agree on this, or e.g. a manual store writes to a graph the export can't
 # find (see issue: graph-URI mismatch).
 SCHEMA_GRAPH_PREFIX = "http://example.com/schema/"
+
+# Private namespace for the transient graphs load_ontology() stages replacements
+# in. Deliberately unrelated to any caller-supplied graph URI: deriving it from
+# one produced invalid IRIs for URIs that already contained a fragment.
+_STAGING_IRI_PREFIX = "urn:orionbelt:staging:"
 
 
 def schema_graph_uri(schema_name: str) -> str:
@@ -130,47 +137,110 @@ class OxigraphStoreManager:
         """
         Load ontology into the store.
 
+        The named graph is **replaced**, not appended to. store.load() unions
+        into the target graph, so repeated generations accumulated: regenerate
+        after dropping a table and the dropped table stayed queryable forever,
+        because nothing ever removed its triples. A named graph represents one
+        schema's current ontology, so loading a new generation must supersede
+        the old one.
+
+        The replacement is staged. Clearing the target first meant a malformed
+        TTL destroyed the last good ontology: the clear had already happened
+        when the parser raised, leaving the graph empty and SPARQL answering
+        nothing. So the new data is parsed into a temporary graph and swapped
+        in only once it has loaded successfully -- a failed load leaves the
+        previous generation exactly as it was. pyoxigraph's Store has no
+        transaction API, so this is the available approximation.
+
         Args:
             ontology_ttl: Ontology in Turtle format
             graph_uri: Named graph URI for this ontology
             schema_name: Schema identifier
 
         Returns:
-            Number of triples loaded
+            Number of triples in the graph after loading.
+
+        Raises:
+            Exception: Whatever the parser raises for malformed input. The
+                existing graph is left untouched in that case.
         """
         try:
-            # Parse and load into named graph
-            triples_before = len(self.store)
+            target = NamedNode(graph_uri)
+            # Staging IRI comes from a private URN namespace rather than being
+            # derived from graph_uri. Appending "#..." to the caller's URI
+            # produced a second fragment for any graph URI that already had one
+            # -- e.g. http://example.com/schema#public, which is perfectly valid
+            # and reachable through the user-facing graph_uri tool parameter --
+            # and pyoxigraph rejects that with "Invalid IRI code point '#'".
+            # A uuid alone gives the uniqueness staging needs; the name never
+            # escapes this method.
+            staging = NamedNode(f"{_STAGING_IRI_PREFIX}{uuid4().hex}")
 
-            # Use RdfFormat.TURTLE for newer versions, fall back to strings for older versions
+            def _clear(graph: NamedNode) -> None:
+                """Remove a graph's quads, leaving the graph itself in place."""
+                for quad in list(self.store.quads_for_pattern(None, None, None, graph)):
+                    self.store.remove(quad)
+
+            def _drop_staging() -> None:
+                """Remove the staging graph entirely.
+
+                Emptying it is not enough: pyoxigraph tracks graph existence
+                separately from its contents, so a cleared staging graph still
+                appears in named_graphs() and one would accumulate per load.
+                """
+                _clear(staging)
+                with contextlib.suppress(Exception):
+                    self.store.remove_graph(staging)
+
+            # Parse into staging first; a failure here must not touch target.
             try:
-                # Try with RdfFormat object (pyoxigraph >= 0.4.0)
-                self.store.load(
-                    ontology_ttl.encode("utf-8"),
-                    format=RdfFormat.TURTLE,
-                    base_iri=graph_uri,
-                    to_graph=NamedNode(graph_uri),
-                )
-            except (TypeError, AttributeError):
-                # Fallback for older pyoxigraph versions
+                # Use RdfFormat.TURTLE for newer versions, fall back to strings
+                # for older versions
                 try:
+                    # Try with RdfFormat object (pyoxigraph >= 0.4.0)
                     self.store.load(
                         ontology_ttl.encode("utf-8"),
-                        format="text/turtle",  # type: ignore[arg-type]
+                        format=RdfFormat.TURTLE,
                         base_iri=graph_uri,
-                        to_graph=NamedNode(graph_uri),
+                        to_graph=staging,
                     )
-                except TypeError:
-                    # Final fallback for very old versions using mime_type
-                    self.store.load(  # type: ignore[call-arg]
-                        ontology_ttl.encode("utf-8"),
-                        mime_type="text/turtle",
-                        base_iri=graph_uri,
-                        to_graph=NamedNode(graph_uri),
-                    )
+                except (TypeError, AttributeError):
+                    # Fallback for older pyoxigraph versions
+                    try:
+                        self.store.load(
+                            ontology_ttl.encode("utf-8"),
+                            format="text/turtle",  # type: ignore[arg-type]
+                            base_iri=graph_uri,
+                            to_graph=staging,
+                        )
+                    except TypeError:
+                        # Final fallback for very old versions using mime_type
+                        self.store.load(  # type: ignore[call-arg]
+                            ontology_ttl.encode("utf-8"),
+                            mime_type="text/turtle",
+                            base_iri=graph_uri,
+                            to_graph=staging,
+                        )
+            except Exception:
+                _drop_staging()
+                logger.warning(
+                    f"Ontology load failed for graph <{graph_uri}>; "
+                    "previous generation left in place"
+                )
+                raise
 
-            triples_after = len(self.store)
-            triples_loaded = triples_after - triples_before
+            # Swap: the new generation parsed cleanly, so it may supersede.
+            staged = list(self.store.quads_for_pattern(None, None, None, staging))
+            try:
+                _clear(target)
+                for quad in staged:
+                    self.store.add(
+                        Quad(quad.subject, quad.predicate, quad.object, target)
+                    )
+            finally:
+                _drop_staging()
+
+            triples_loaded = len(staged)
 
             self._loaded_ontologies[schema_name] = graph_uri
 
@@ -182,7 +252,7 @@ class OxigraphStoreManager:
             return triples_loaded
 
         except Exception as e:
-            logger.error(f"Failed to load ontology: {e}", exc_info=True)
+            logger.exception(f"Failed to load ontology: {e}")
             raise
 
     def query_sparql(
@@ -278,7 +348,7 @@ class OxigraphStoreManager:
             return results
 
         except Exception as e:
-            logger.error(f"SPARQL query failed: {e}", exc_info=True)
+            logger.exception(f"SPARQL query failed: {e}")
             raise
 
     def query_sparql_ask(self, sparql_query: str) -> bool:
@@ -307,7 +377,7 @@ class OxigraphStoreManager:
             # (older versions); both support bool().
             return bool(self.store.query(sparql_query))
         except Exception as e:
-            logger.error(f"SPARQL ASK query failed: {e}", exc_info=True)
+            logger.exception(f"SPARQL ASK query failed: {e}")
             raise
 
     def query_sparql_construct(self, sparql_query: str) -> str:
@@ -343,7 +413,7 @@ class OxigraphStoreManager:
             serialized = results.serialize(format=RdfFormat.TURTLE)
             return serialized.decode("utf-8") if serialized is not None else ""
         except Exception as e:
-            logger.error(f"SPARQL CONSTRUCT query failed: {e}", exc_info=True)
+            logger.exception(f"SPARQL CONSTRUCT query failed: {e}")
             raise
 
     def add_triple(
@@ -388,7 +458,7 @@ class OxigraphStoreManager:
             logger.debug(f"Added triple: <{subject}> <{predicate}> {object}")
 
         except Exception as e:
-            logger.error(f"Failed to add triple: {e}", exc_info=True)
+            logger.exception(f"Failed to add triple: {e}")
             raise
 
     def add_knowledge(
@@ -445,7 +515,7 @@ class OxigraphStoreManager:
             logger.info(f"Added knowledge: {subject} -> {predicate}")
 
         except Exception as e:
-            logger.error(f"Failed to add knowledge: {e}", exc_info=True)
+            logger.exception(f"Failed to add knowledge: {e}")
             raise
 
     def get_ontology_stats(self, graph_uri: str | None = None) -> dict[str, Any]:
@@ -495,7 +565,7 @@ class OxigraphStoreManager:
                 }
 
         except Exception as e:
-            logger.error(f"Failed to get stats: {e}", exc_info=True)
+            logger.exception(f"Failed to get stats: {e}")
             return {"error": str(e)}
 
     def list_tables_sparql(self, schema_graph: str) -> list[str]:
@@ -605,7 +675,7 @@ class OxigraphStoreManager:
             }
             logger.info(f"Deleted named graph <{graph_uri}>")
         except Exception as e:
-            logger.error(f"Failed to delete graph {graph_uri}: {e}", exc_info=True)
+            logger.exception(f"Failed to delete graph {graph_uri}: {e}")
             raise
 
     def close(self) -> None:

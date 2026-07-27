@@ -1,9 +1,9 @@
 """GraphRAG initialization and search handler implementations."""
 
+import asyncio
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Any, cast
 
 from fastmcp import Context
@@ -11,10 +11,12 @@ from fastmcp import Context
 from ..exceptions import ConnectionError
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
+from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
+from ..utils import utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +74,9 @@ async def _auto_generate_ontology_background(
         base_uri = config.ontology_base_uri
 
         ontology_generator = OntologyGenerator(base_uri=base_uri)
-        ontology_ttl = ontology_generator.generate_from_schema(tables_info)
+        ontology_ttl = await asyncio.to_thread(
+            ontology_generator.generate_from_schema, tables_info
+        )
 
         conn_dir = (
             get_connection_dir(session.connection_id)
@@ -80,31 +84,43 @@ async def _auto_generate_ontology_background(
             else ensure_output_dir()
         )
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
-        ontology_file.write_text(ontology_ttl, encoding="utf-8")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
+        # Serialize produce -> record -> prune for this family; a concurrent
+        # generation for the same schema must not have its file pruned as stale.
+        async with artifact_family_lock(conn_dir, f"ontology_{schema_name}"):
+            ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
+            await write_text_file(ontology_file, ontology_ttl)
 
-        # Write to the specific schema's state (not current schema)
-        schema_state = session.get_or_create_schema_state(schema_name)
-        schema_state.ontology.ontology_file = ontology_file.name
+            # Write to the specific schema's state (not current schema)
+            schema_state = session.get_or_create_schema_state(schema_name)
+            previous_ontology_file = schema_state.ontology.ontology_file
+            schema_state.ontology.ontology_file = ontology_file.name
 
-        if OXIGRAPH_AVAILABLE:
-            try:
-                # Direct store access for background task (connection-scoped)
-                if session.oxigraph_store:
-                    graph_uri = f"{base_uri}{schema_name}"
-                    triple_count = session.oxigraph_store.load_ontology(
-                        ontology_ttl, graph_uri, schema_name
-                    )
-                    logger.info(
-                        f"Stored {triple_count} triples in RDF store (graph: {graph_uri})"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to store in RDF: {e}")
+            if OXIGRAPH_AVAILABLE:
+                try:
+                    # Direct store access for background task (connection-scoped)
+                    if session.oxigraph_store:
+                        graph_uri = f"{base_uri}{schema_name}"
+                        triple_count = session.oxigraph_store.load_ontology(
+                            ontology_ttl, graph_uri, schema_name
+                        )
+                        logger.info(
+                            f"Stored {triple_count} triples in RDF store (graph: {graph_uri})"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to store in RDF: {e}")
 
-        elapsed = time.time() - start_time
-        logger.info(f"Ontology auto-generated successfully ({elapsed:.2f}s)")
-        logger.info(f"Saved to: {ontology_file.name}")
+            elapsed = time.time() - start_time
+            logger.info(f"Ontology auto-generated successfully ({elapsed:.2f}s)")
+            logger.info(f"Saved to: {ontology_file.name}")
+
+            # Pruned last, and never touching what the session previously
+            # pointed at: this path writes no persisted metadata, so the
+            # in-memory reference is the only record the older file is in use.
+            await prune_superseded_artifacts(
+                ontology_file,
+                protect=[previous_ontology_file] if previous_ontology_file else [],
+            )
 
     except Exception as e:
         logger.error(f"Ontology auto-generation failed: {type(e).__name__}: {e}")
@@ -147,7 +163,7 @@ async def _auto_initialize_graphrag_background(
             )
 
         output_dir = ensure_output_dir()
-        session.graphrag_manager.save_state(output_dir)
+        await asyncio.to_thread(session.graphrag_manager.save_state, output_dir)
 
         elapsed = time.time() - start_time
         session.graphrag_initialized = True
@@ -173,7 +189,7 @@ async def _auto_initialize_graphrag_background(
                         "table_count": len(tables_dict),
                         "embedding_count": stats.get("total_elements", 0),
                         "schemas": schemas,
-                        "initialized_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "initialized_at": utc_now().isoformat(),
                     },
                 )
             except Exception as e:
@@ -191,9 +207,8 @@ async def _auto_initialize_graphrag_background(
             )
 
     except Exception as e:
-        logger.error(
+        logger.exception(
             f"GraphRAG auto-initialization failed: {type(e).__name__}: {e}",
-            exc_info=True,
         )
         session.graphrag_initialized = False
 
@@ -290,7 +305,7 @@ async def initialize_graphrag(
         session.graphrag_initialized = True
 
         output_dir = ensure_output_dir()
-        session.graphrag_manager.save_state(output_dir)
+        await asyncio.to_thread(session.graphrag_manager.save_state, output_dir)
 
         total_tables = session.graphrag_manager.graph_retriever.graph.number_of_nodes()
         schemas = session.graphrag_manager._schema_names
@@ -309,7 +324,7 @@ async def initialize_graphrag(
                         "table_count": len(tables_dict),
                         "embedding_count": stats.get("total_elements", 0),
                         "schemas": schemas,
-                        "initialized_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "initialized_at": utc_now().isoformat(),
                     },
                 )
             except Exception as e:
@@ -335,7 +350,7 @@ async def initialize_graphrag(
         )
 
     except Exception as e:
-        logger.error(f"GraphRAG initialization failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG initialization failed: {e}")
         return cast(
             str,
             services.create_error_response(
@@ -376,7 +391,7 @@ async def graphrag_search(
         }
 
     except Exception as e:
-        logger.error(f"GraphRAG search failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG search failed: {e}")
         err = services.create_error_response(
             f"GraphRAG search failed: {e!s}", "graphrag_error"
         )
@@ -422,7 +437,7 @@ async def graphrag_query_context(
         }
 
     except Exception as e:
-        logger.error(f"GraphRAG query context failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG query context failed: {e}")
         err = services.create_error_response(
             f"GraphRAG query context failed: {e!s}", "graphrag_error"
         )
@@ -478,7 +493,7 @@ async def graphrag_find_join_path(
         }
 
     except Exception as e:
-        logger.error(f"GraphRAG find join path failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG find join path failed: {e}")
         err = services.create_error_response(
             f"GraphRAG find join path failed: {e!s}", "graphrag_error"
         )
@@ -529,7 +544,7 @@ async def reachable_from(
         }
 
     except Exception as e:
-        logger.error(f"reachable_from failed: {e}", exc_info=True)
+        logger.exception(f"reachable_from failed: {e}")
         err = services.create_error_response(
             f"reachable_from failed: {e!s}", "graphrag_error"
         )
@@ -580,7 +595,7 @@ async def measurable_from(
         }
 
     except Exception as e:
-        logger.error(f"measurable_from failed: {e}", exc_info=True)
+        logger.exception(f"measurable_from failed: {e}")
         err = services.create_error_response(
             f"measurable_from failed: {e!s}", "graphrag_error"
         )
@@ -728,7 +743,7 @@ async def graphrag_overview(
         return {"success": True, "overview": overview}
 
     except Exception as e:
-        logger.error(f"GraphRAG overview failed: {e}", exc_info=True)
+        logger.exception(f"GraphRAG overview failed: {e}")
         err = services.create_error_response(
             f"GraphRAG overview failed: {e!s}", "graphrag_error"
         )

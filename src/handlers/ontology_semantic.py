@@ -1,20 +1,21 @@
 """Semantic-naming handlers: suggest and apply business-friendly names."""
 
+import asyncio
 import json
 import logging
 import re
-from datetime import datetime
 from typing import Any
 
 from fastmcp import Context
 
 from ..config import config_manager
 from ..handler_context import HandlerContext
+from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
-from ..utils import is_client_disconnect, safe_ctx_info
+from ..utils import is_client_disconnect, safe_ctx_info, utc_now, write_text_file
 from .ontology_generation import _build_minimal_graph_summary
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ async def _maybe_sample_rename_suggestions(
         sum(len(v) for v in cryptic_props_by_table.values()),
         len(cryptic_relationships),
     )
-    started = datetime.now()
+    started = utc_now()
 
     prompt = _build_rename_prompt(items)
 
@@ -83,13 +84,13 @@ async def _maybe_sample_rename_suggestions(
         logger.warning(
             "MCP sampling unavailable or failed after %.2fs (%s: %s) — "
             "falling back to manual review path",
-            (datetime.now() - started).total_seconds(),
+            (utc_now() - started).total_seconds(),
             type(e).__name__,
             str(e)[:200],
         )
         return None
 
-    elapsed = (datetime.now() - started).total_seconds()
+    elapsed = (utc_now() - started).total_seconds()
     raw_text = getattr(result, "text", None) or ""
     parsed = _parse_rename_json(raw_text)
     suggestions = _normalize_structured_suggestions(parsed)
@@ -295,7 +296,7 @@ async def suggest_semantic_names(
                         "hint": "Check the filename from generate_ontology response",
                     }
                 generator = OntologyGenerator()
-                generator.load_from_file(str(ontology_path))
+                await asyncio.to_thread(generator.load_from_file, str(ontology_path))
                 source_filename = ontology_file
                 logger.info(f"Loaded ontology from provided file: {ontology_file}")
             else:
@@ -430,7 +431,7 @@ async def apply_semantic_names(
                     )
                     return err
                 generator = OntologyGenerator()
-                generator.load_from_file(str(ontology_path))
+                await asyncio.to_thread(generator.load_from_file, str(ontology_path))
                 logger.info(f"Loaded ontology from provided file: {ontology_file}")
             else:
                 generator, _ = services.load_ontology_from_session(ctx)
@@ -461,7 +462,9 @@ async def apply_semantic_names(
             )
             return err
 
-        updated_ontology = generator.apply_semantic_names(name_suggestions)
+        updated_ontology = await asyncio.to_thread(
+            generator.apply_semantic_names, name_suggestions
+        )
 
         new_ontology_filename = None
         if save_to_file:
@@ -471,38 +474,74 @@ async def apply_semantic_names(
                     if session.connection_id
                     else ensure_output_dir()
                 )
-                new_ontology_filename = (
-                    services.get_session_safe_filename(ctx, "ontology", "semantic")
-                    + ".ttl"
+                # Scope the artifact family to the schema. Every other writer
+                # embeds schema_safe in the filename; this one used a bare
+                # "semantic" slot, so family_key() collapsed EVERY schema's
+                # enriched ontology into one connection-wide family and pruning
+                # deleted other schemas' files while metadata still named them.
+                enriched_schema = (
+                    session.current_schema
+                    or session.get_last_analyzed_schema()
+                    or "default"
                 )
-                ontology_file_path = conn_dir / new_ontology_filename
+                enriched_schema_safe = enriched_schema.replace(" ", "_").replace(
+                    ".", "_"
+                )
 
-                with open(ontology_file_path, "w", encoding="utf-8") as f:
-                    f.write(updated_ontology)
-
-                logger.info(f"Saved semantic ontology to: {ontology_file_path}")
-                session.ontology_file = new_ontology_filename
-                session.ontology_enriched = True
-                session.obqc_validator = None
-
-                # Update workspace: mark ontology as enriched
-                if session.connection_id:
-                    try:
-                        schema_name = session.get_last_analyzed_schema() or "default"
-                        await update_workspace_section(
-                            connection_id=session.connection_id,
-                            output_dir=OUTPUT_DIR,
-                            schema_name=schema_name,
-                            section="ontology",
-                            data={
-                                "ontology_file": new_ontology_filename,
-                                "enriched": True,
-                                "persisted_to_rdf": False,
-                                "generated_at": datetime.now().isoformat(),
-                            },
+                # Serialize produce -> record -> prune for this family so an
+                # overlapping request cannot have its just-written ontology
+                # pruned as stale.
+                async with artifact_family_lock(
+                    conn_dir,
+                    f"ontology_{session.connection_id or 'default'}"
+                    f"_{enriched_schema_safe}_semantic",
+                ):
+                    new_ontology_filename = (
+                        services.get_session_safe_filename(
+                            ctx, "ontology", f"{enriched_schema_safe}_semantic"
                         )
-                    except Exception as e:
-                        logger.warning(f"Failed to write workspace metadata: {e}")
+                        + ".ttl"
+                    )
+                    ontology_file_path = conn_dir / new_ontology_filename
+
+                    await write_text_file(ontology_file_path, updated_ontology)
+
+                    logger.info(f"Saved semantic ontology to: {ontology_file_path}")
+                    previous_ontology_file = session.ontology_file
+                    session.ontology_file = new_ontology_filename
+                    session.ontology_enriched = True
+                    session.obqc_validator = None
+
+                    # Update workspace: mark ontology as enriched
+                    if session.connection_id:
+                        try:
+                            # Same schema the artifact family is scoped to --
+                            # these previously disagreed (current_schema here vs
+                            # get_last_analyzed_schema below).
+                            schema_name = enriched_schema
+                            await update_workspace_section(
+                                connection_id=session.connection_id,
+                                output_dir=OUTPUT_DIR,
+                                schema_name=schema_name,
+                                section="ontology",
+                                data={
+                                    "ontology_file": new_ontology_filename,
+                                    "enriched": True,
+                                    "persisted_to_rdf": False,
+                                    "generated_at": utc_now().isoformat(),
+                                },
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to write workspace metadata: {e}")
+
+                    # Prune only after metadata names the new file, protecting the
+                    # one it referenced until now.
+                    await prune_superseded_artifacts(
+                        ontology_file_path,
+                        protect=(
+                            [previous_ontology_file] if previous_ontology_file else []
+                        ),
+                    )
             except Exception as e:
                 logger.warning(f"Failed to save ontology to file: {e}")
 
@@ -548,7 +587,9 @@ async def apply_semantic_names(
 
         if not persisted:
             # Without Oxigraph, return a minimal graph summary instead of full TTL
-            result += _build_minimal_graph_summary(updated_ontology)
+            result += await asyncio.to_thread(
+                _build_minimal_graph_summary, updated_ontology
+            )
 
         return result
 

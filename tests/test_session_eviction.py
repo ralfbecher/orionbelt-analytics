@@ -1,22 +1,24 @@
 """Tests for session idle timeout and eviction."""
 
 import asyncio
-from datetime import datetime, timedelta
+import contextlib
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.main import ServerState
 from src.session import SessionData
+from src.utils import utc_now
 
 
 class TestSessionDataActivity:
     """Tests for SessionData activity tracking."""
 
     def test_created_with_timestamps(self):
-        before = datetime.now()
+        before = utc_now()
         session = SessionData()
-        after = datetime.now()
+        after = utc_now()
 
         assert before <= session.created_at <= after
         assert before <= session.last_activity <= after
@@ -32,7 +34,7 @@ class TestSessionDataActivity:
     def test_touch_does_not_change_created_at(self):
         session = SessionData()
         created = session.created_at
-        session.last_activity = datetime.now() - timedelta(seconds=10)
+        session.last_activity = utc_now() - timedelta(seconds=10)
         session.touch()
         assert session.created_at == created
 
@@ -50,39 +52,39 @@ class TestServerStateEviction:
         state = self._make_state()
         session = state.get_session("s1")
         # Backdate and access again
-        session.last_activity = datetime.now() - timedelta(minutes=5)
+        session.last_activity = utc_now() - timedelta(minutes=5)
         before_touch = session.last_activity
         state.get_session("s1")
         assert session.last_activity > before_touch
 
-    def test_evict_idle_sessions_removes_stale(self):
+    async def test_evict_idle_sessions_removes_stale(self):
         state = self._make_state()
         state.get_session("active")
         stale = state.get_session("stale")
         # Backdate the stale session
-        stale.last_activity = datetime.now() - timedelta(minutes=45)
+        stale.last_activity = utc_now() - timedelta(minutes=45)
 
-        state._evict_idle_sessions(idle_timeout=1800)  # 30 min
+        await state._evict_idle_sessions(idle_timeout=1800)  # 30 min
 
         assert "active" in state._sessions
         assert "stale" not in state._sessions
 
-    def test_evict_idle_sessions_keeps_all_when_fresh(self):
+    async def test_evict_idle_sessions_keeps_all_when_fresh(self):
         state = self._make_state()
         state.get_session("s1")
         state.get_session("s2")
 
-        state._evict_idle_sessions(idle_timeout=1800)
+        await state._evict_idle_sessions(idle_timeout=1800)
 
         assert state.session_count == 2
 
-    def test_evict_idle_sessions_removes_all_stale(self):
+    async def test_evict_idle_sessions_removes_all_stale(self):
         state = self._make_state()
         for name in ["a", "b", "c"]:
             s = state.get_session(name)
-            s.last_activity = datetime.now() - timedelta(hours=2)
+            s.last_activity = utc_now() - timedelta(hours=2)
 
-        state._evict_idle_sessions(idle_timeout=1800)
+        await state._evict_idle_sessions(idle_timeout=1800)
 
         assert state.session_count == 0
 
@@ -173,7 +175,7 @@ class TestEvictionLoop:
         state = ServerState()
         state._ensure_eviction_task = lambda: None
         session = state.get_session("stale")
-        session.last_activity = datetime.now() - timedelta(hours=1)
+        session.last_activity = utc_now() - timedelta(hours=1)
 
         mock_config = MagicMock()
         mock_config.session_idle_timeout = 60
@@ -185,10 +187,8 @@ class TestEvictionLoop:
                 task = asyncio.create_task(state._eviction_loop())
                 await asyncio.sleep(0.3)  # Let it run a couple cycles
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
 
         await run_loop()
         assert "stale" not in state._sessions
@@ -202,3 +202,95 @@ class TestEvictionLoop:
         state.cleanup()
 
         mock_task.cancel.assert_called_once()
+
+
+class TestBackgroundTaskTeardown:
+    """Every in-flight init task must be stopped before the session is released.
+
+    Two defects this pins:
+      * a single `_init_task` slot lost earlier tasks whenever discover_schema
+        overlapped, leaving them running against a released session;
+      * teardown only *scheduled* cancellation, then closed the Oxigraph store
+        and dropped the session in the same synchronous block -- so a cancelled
+        task could still be mid save_state when its store closed.
+    """
+
+    async def test_all_init_tasks_are_tracked_not_just_the_newest(self):
+        """Overlapping background inits must all be retained."""
+        state = ServerState()
+        session = state.get_session("s1")
+
+        async def noop() -> None:
+            await asyncio.sleep(3600)
+
+        tasks = [asyncio.create_task(noop()) for _ in range(3)]
+        for task in tasks:
+            session.graphrag.track_init_task(task)
+
+        assert len(session.graphrag.init_tasks) == 3, "earlier tasks were dropped"
+
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_finished_tasks_stop_being_tracked(self):
+        """The set must not grow without bound over a long-lived session."""
+        state = ServerState()
+        session = state.get_session("s1")
+
+        async def quick() -> None:
+            return None
+
+        task = asyncio.create_task(quick())
+        session.graphrag.track_init_task(task)
+        await task
+        await asyncio.sleep(0)  # let the done-callback run
+
+        assert session.graphrag.init_tasks == set()
+
+    async def test_aclose_waits_for_tasks_before_releasing_resources(self):
+        """The store must not close while a background task is still running."""
+        state = ServerState()
+        session = state.get_session("s1")
+
+        store_closed = False
+        still_running_at_close = False
+
+        class FakeStore:
+            def close(self) -> None:
+                nonlocal store_closed
+                store_closed = True
+
+        session.rdf_store.oxigraph_store = FakeStore()
+
+        started = asyncio.Event()
+
+        async def slow_init() -> None:
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                nonlocal still_running_at_close
+                # If teardown did not await us, the store is already closed by
+                # the time this cleanup runs.
+                still_running_at_close = store_closed
+                raise
+
+        task = asyncio.create_task(slow_init())
+        session.graphrag.track_init_task(task)
+        await started.wait()
+
+        await state.aclose_session("s1")
+
+        assert task.done(), "teardown returned with the task still running"
+        assert store_closed, "store was never closed"
+        assert (
+            not still_running_at_close
+        ), "Oxigraph store closed while a background task was still running"
+        assert state.session_count == 0
+
+    async def test_aclose_is_safe_for_an_unknown_session(self):
+        """Closing twice, or closing something evicted already, must not raise."""
+        state = ServerState()
+        await state.aclose_session("never-existed")
+        assert state.session_count == 0

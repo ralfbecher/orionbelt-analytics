@@ -13,6 +13,8 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+from .utils import utc_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,12 +93,25 @@ class SchemaCache:
 
 
 class GraphRAGState:
-    """GraphRAG integration state with Future-based init tracking."""
+    """GraphRAG integration state with background init tracking."""
 
     def __init__(self) -> None:
         self.graphrag_manager: Any | None = None  # GraphRAGManager
         self.graphrag_initialized: bool = False
-        self._init_task: asyncio.Task[Any] | None = None
+        # Every in-flight background init, not just the newest. A single slot
+        # lost earlier tasks whenever discover_schema overlapped -- normal in
+        # the accumulative multi-schema flow -- leaving them running against a
+        # session that teardown had already finished with.
+        self.init_tasks: set[asyncio.Task[Any]] = set()
+
+    def track_init_task(self, task: "asyncio.Task[Any]") -> None:
+        """Register a background init task and forget it once it finishes.
+
+        Args:
+            task: The task to track until completion.
+        """
+        self.init_tasks.add(task)
+        task.add_done_callback(self.init_tasks.discard)
 
 
 class RDFStoreState:
@@ -147,12 +162,12 @@ class SessionData:
         self._current_schema: str | None = None
 
         # Activity tracking for idle eviction
-        self.created_at: datetime = datetime.now()
-        self.last_activity: datetime = datetime.now()
+        self.created_at: datetime = utc_now()
+        self.last_activity: datetime = utc_now()
 
     def touch(self) -> None:
         """Update last activity timestamp."""
-        self.last_activity = datetime.now()
+        self.last_activity = utc_now()
 
     # --- Multi-schema management ---
 

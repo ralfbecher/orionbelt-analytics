@@ -6,18 +6,37 @@ based on retention policies.
 """
 
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..utils import parse_timestamp, utc_now
 from .metadata import VersionMetadataManager
 
 logger = logging.getLogger(__name__)
 
 
 class DataCleanupManager:
-    """
-    Manages cleanup of old GraphRAG and RDF data based on retention policies.
+    """Manages cleanup of old GraphRAG and RDF data based on retention policies.
+
+    Currently unwired. This is the per-version retention design from Phase 3B,
+    whose entry points (``cleanup_all``, ``cleanup_all_connections``) were
+    removed as dead code once ``AUTO_CLEANUP_ON_STARTUP`` shipped separately in
+    ``server.py`` as simpler whole-workspace-age retention. Nothing instantiates
+    this class today.
+
+    .. warning::
+       Reviving it requires a concurrency fix first. The methods below mutate
+       metadata.json through ``metadata_mgr.mark_version_deleted()``, which
+       bypasses the per-connection lock in ``lifecycle/metadata.py``. That is
+       only harmless while the API stays synchronous and uncalled -- and the
+       original design invoked it from async paths (startup, post-analysis, and
+       an MCP tool), which is exactly where it would race. An unserialized
+       read-modify-write of metadata.json reproducibly drops other writers'
+       sections and can leave the file unparseable.
+
+       Route the writes through ``mutate_workspace_metadata()`` before calling
+       any of this from async code, and drop the matching exemption in
+       ``tests/test_metadata_concurrency.py`` at the same time.
     """
 
     def __init__(self, connection_id: str, output_dir: Path):
@@ -71,9 +90,7 @@ class DataCleanupManager:
                         schema_name, version.version, "graphrag"
                     )
 
-                age_days = (
-                    datetime.now() - datetime.fromisoformat(version.created_at)
-                ).days
+                age_days = (utc_now() - parse_timestamp(version.created_at)).days
 
                 deleted.append(
                     {
@@ -145,9 +162,7 @@ class DataCleanupManager:
                         schema_name, version.version, "ontology"
                     )
 
-                age_days = (
-                    datetime.now() - datetime.fromisoformat(version.created_at)
-                ).days
+                age_days = (utc_now() - parse_timestamp(version.created_at)).days
 
                 deleted.append(
                     {

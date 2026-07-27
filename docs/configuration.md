@@ -37,21 +37,27 @@ AUTO_GRAPHRAG=true
 # When enabled: ontology is automatically generated and stored in Oxigraph RDF store
 AUTO_ONTOLOGY=false
 
-# Phase 3B: Data Lifecycle - Retention Policies
-# ----------------------------------------------
-# Control how many versions to keep and for how long
+# Superseded artifact pruning
+# Artifact filenames carry a timestamp, so every generate_ontology /
+# discover_schema writes a NEW file while metadata records only the latest.
+# This is how many generations of each artifact (per connection, per schema)
+# to keep; older ones are deleted as soon as a new one is written. Minimum 1
+# -- the file currently referenced is never a deletion candidate.
+ARTIFACT_KEEP_VERSIONS=3
 
-# GraphRAG Retention
-GRAPHRAG_KEEP_VERSIONS=3          # Keep last 3 versions
-GRAPHRAG_MAX_AGE_DAYS=30          # Delete versions older than 30 days
-
-# Ontology Retention (keep longer than GraphRAG - more expensive to regenerate)
-ONTOLOGY_KEEP_VERSIONS=5          # Keep last 5 versions
-ONTOLOGY_MAX_AGE_DAYS=60          # Delete versions older than 60 days
-
-# Cleanup Triggers
-# Options: false (default), true (retention-based), all (remove everything)
+# Startup Workspace Cleanup
+# -------------------------
+# Runs on every startup regardless of the setting below:
+#   - stale loose files directly under the output dir are deleted
+#   - each workspace's charts/ directory is deleted (chart images are ephemeral)
+#
+# AUTO_CLEANUP_ON_STARTUP then controls whether whole workspaces are deleted.
+# See "Startup workspace cleanup" below for the exact semantics.
 AUTO_CLEANUP_ON_STARTUP=false
+
+# Age threshold for AUTO_CLEANUP_ON_STARTUP=true, measured from the workspace's
+# last update (not file mtime). Ignored for the false and all modes.
+WORKSPACE_MAX_AGE_DAYS=30
 
 # MCP Sampling
 # ------------
@@ -111,7 +117,7 @@ R2RML_BASE_IRI=http://mycompany.com/
 # - Use a persistent directory (e.g., /var/lib/orionbelt, /data/orionbelt)
 # - Mount as a volume in containerized environments
 # - Ensure proper backup of OUTPUT_DIR
-# - Consider retention policies (see Phase 3B settings above)
+# - Consider AUTO_CLEANUP_ON_STARTUP / WORKSPACE_MAX_AGE_DAYS (see above)
 #
 OUTPUT_DIR=tmp
 
@@ -202,12 +208,9 @@ DATABRICKS_SCHEMA=default
 | `LOG_LEVEL` | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `AUTO_GRAPHRAG` | `true` | Auto-initialize GraphRAG when schema is analyzed |
 | `AUTO_ONTOLOGY` | `false` | Auto-generate ontology after GraphRAG completes |
-| `GRAPHRAG_KEEP_VERSIONS` | `3` | Number of GraphRAG versions to retain |
-| `GRAPHRAG_MAX_AGE_DAYS` | `30` | Maximum age in days for GraphRAG versions |
-| `ONTOLOGY_KEEP_VERSIONS` | `5` | Number of ontology versions to retain |
-| `ONTOLOGY_MAX_AGE_DAYS` | `60` | Maximum age in days for ontology versions |
-| `AUTO_CLEANUP_ON_STARTUP` | `false` | Startup cleanup: `false` (none), `true` (retention-based), `all` (remove all workspaces) |
-| `WORKSPACE_MAX_AGE_DAYS` | `30` | Maximum age in days for workspace directories |
+| `ARTIFACT_KEEP_VERSIONS` | `3` | Generations of each ontology / schema / R2RML file to keep per schema. Older ones are pruned when a new one is written. Minimum 1 |
+| `AUTO_CLEANUP_ON_STARTUP` | `false` | Delete whole workspaces at startup: `false` (keep all), `true` (orphaned, or older than `WORKSPACE_MAX_AGE_DAYS`), `all` (delete every workspace). See [Startup workspace cleanup](#startup-workspace-cleanup) |
+| `WORKSPACE_MAX_AGE_DAYS` | `30` | Age threshold for `AUTO_CLEANUP_ON_STARTUP=true`, measured from the workspace's last update. Ignored in the other modes |
 | `ONTOLOGY_BASE_URI` | `http://example.com/ontology/` | Base URI for generated RDF ontologies |
 | `R2RML_BASE_IRI` | `http://mycompany.com/` | Base IRI for R2RML subject templates |
 | `OUTPUT_DIR` | `tmp` | Directory for generated files (relative to project root) |
@@ -218,6 +221,37 @@ DATABRICKS_SCHEMA=default
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `1800` | Idle timeout before session eviction (0 to disable) |
 | `SESSION_SCAN_INTERVAL_SECONDS` | `60` | How often to scan for idle sessions |
 | `MCP_MASTER_PASSWORD` | *(unset)* | Master password for encrypting credentials in memory |
+
+### Startup workspace cleanup
+
+`AUTO_CLEANUP_ON_STARTUP` controls how much of the output directory survives a restart. It operates on **whole workspaces** -- one per database connection, under `OUTPUT_DIR/{connection_id}/` -- and honours a custom `OUTPUT_DIR`.
+
+**Always runs, whatever the setting is:**
+
+- stale loose files sitting directly in `OUTPUT_DIR` (not inside a connection directory) are deleted
+- every workspace's `charts/` directory is deleted -- chart images are ephemeral and are regenerated on demand
+
+Workspace data itself is only touched by the modes below.
+
+| Mode | What is deleted |
+|------|-----------------|
+| `false` *(default)* | Nothing beyond the two steps above. Every workspace is kept, so auto-restore works after a restart. |
+| `true` | A workspace is deleted if it has **no `metadata.json`** (orphaned directory), or if its recorded `workspace.updated_at` is older than `WORKSPACE_MAX_AGE_DAYS`. A workspace whose metadata exists but has no `updated_at` is **kept**. |
+| `all` | Every workspace directory, unconditionally -- a full fresh start. |
+
+**Deletion is all-or-nothing per connection.** Removing a workspace removes its schema cache, ontology TTL, R2RML mapping, saved semantic models, *and* the satellite stores held outside the workspace directory:
+
+```
+OUTPUT_DIR/{connection_id}/            # workspace: metadata.json, schema, ontology, models/
+OUTPUT_DIR/chromadb/{connection_id}/   # GraphRAG vectors
+OUTPUT_DIR/oxigraph/{connection_id}/   # RDF / SPARQL store
+```
+
+There is no partial or per-artifact cleanup. The `chromadb/` and `oxigraph/` parent directories are shared across connections and are never themselves treated as workspaces.
+
+**Age comes from metadata, not the filesystem.** The `true` mode reads `workspace.updated_at` out of `metadata.json` rather than looking at file modification times, so touching files on disk does not keep a workspace alive.
+
+> **Note on per-version retention.** An earlier design kept the last *N* versions of GraphRAG and ontology data per schema, configured by `GRAPHRAG_KEEP_VERSIONS`, `GRAPHRAG_MAX_AGE_DAYS`, `ONTOLOGY_KEEP_VERSIONS` and `ONTOLOGY_MAX_AGE_DAYS`. That mechanism is **not wired up** -- those four variables are read nowhere in the code and setting them has no effect, so they are intentionally absent from `.env.template`. The retention policy defaults are still recorded in each workspace's `metadata.json`, and `DataCleanupManager` still implements the logic, but nothing invokes it. Only the whole-workspace cleanup described above actually runs.
 
 ### Security Notes
 

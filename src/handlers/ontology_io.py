@@ -1,9 +1,10 @@
 """Ontology import/load handlers: load custom .ttl ontologies."""
 
+import asyncio
 import logging
 import os
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from ..constants import OBA_NAMESPACE
 from ..handler_context import HandlerContext
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import PROJECT_ROOT
+from ..utils import read_text_file, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +156,7 @@ async def load_my_ontology(
 
             folder_path.mkdir(parents=True, exist_ok=True)
             saved_path = folder_path / effective_name
-            with open(saved_path, "w", encoding="utf-8") as f:
-                f.write(ontology_content)
+            await write_text_file(saved_path, ontology_content)
 
             newest_file = saved_path
             file_stat = saved_path.stat()
@@ -190,14 +191,13 @@ async def load_my_ontology(
             ttl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
             newest_file = ttl_files[0]
 
-            with open(newest_file, encoding="utf-8") as f:
-                ontology_content = f.read()
+            ontology_content = await read_text_file(newest_file)
 
             file_stat = newest_file.stat()
 
         graph = Graph()
         try:
-            graph.parse(data=ontology_content, format="turtle")
+            await asyncio.to_thread(graph.parse, data=ontology_content, format="turtle")
         except Exception as parse_error:
             return {
                 "success": False,
@@ -211,7 +211,7 @@ async def load_my_ontology(
         datatype_props = len(list(graph.subjects(RDF.type, OWL.DatatypeProperty)))
         object_props = len(list(graph.subjects(RDF.type, OWL.ObjectProperty)))
 
-        modified_time = datetime.fromtimestamp(file_stat.st_mtime).strftime(
+        modified_time = datetime.fromtimestamp(file_stat.st_mtime, tz=UTC).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
 

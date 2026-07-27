@@ -136,17 +136,24 @@ select = [
     "EXE",    # shebang correctness
     "PYI",    # stub/typing correctness
     "RUF",    # ruff-specific
+    "ASYNC",  # blocking calls inside async functions
+    "S110",   # silently swallowed exceptions
+    "DTZ",    # naive datetimes -- timestamps are persisted and compared
+    "G201",   # logger.error(exc_info=True) -> logger.exception
 ]
 
-ignore = [
-    # Deferred, NOT dismissed. Every SIM105 site is also an S110 site (blind
-    # `except Exception: pass` in the drivers). Rewriting them to
-    # contextlib.suppress would delete the S110 signal without anyone deciding
-    # whether swallowing is correct there -- suppression wearing a fix's
-    # clothing. These are handled in the error-handling audit that enables
-    # BLE/S110/G/DTZ/ASYNC, where each swallow is judged on merit.
-    "SIM105",
-]
+# BLE001 (blind `except Exception`) is intentionally NOT selected. All 167
+# sites were audited, not waved through: 153 log, 23 re-raise, and 23 fold the
+# message into the returned error payload. That breadth is required at the MCP
+# tool boundary -- a handler must convert failures into an error response
+# rather than leak an arbitrary exception into the protocol layer -- so
+# enabling the rule would mean 167 `noqa` comments and no added safety.
+#
+# The 4 handlers that genuinely discarded their exception were fixed. The
+# invariant that actually matters ("a broad handler must not throw the error
+# away") is enforced by tests/test_no_silent_exceptions.py, which walks the AST
+# and fails on any regression -- a stricter and more precise guarantee than the
+# lint rule provides.
 
 # Tests legitimately hold mutable class-level fixtures; that is noise there
 # rather than signal.

@@ -1,9 +1,128 @@
 """Utility functions for OrionBelt Analytics."""
 
+import asyncio
+import json
 import logging
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+# ---------------------------------------------------------------------------
+# Timestamps
+#
+# Workspace metadata is persisted as ISO strings and later compared against the
+# current time to decide retention. Naive local timestamps make that comparison
+# wrong across DST shifts and meaningless if the workspace moves between
+# machines in different zones, so everything written from here on is
+# timezone-aware UTC.
+# ---------------------------------------------------------------------------
+
+
+def utc_now() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime.
+
+    Returns:
+        The current UTC time, with tzinfo set.
+    """
+    return datetime.now(UTC)
+
+
+def parse_timestamp(value: str) -> datetime:
+    """Parse a persisted ISO timestamp, treating naive values as UTC.
+
+    Workspaces written before timestamps became timezone-aware hold naive ISO
+    strings. Comparing one of those against an aware ``utc_now()`` raises
+    ``TypeError``, which would break retention cleanup on startup for every
+    existing workspace on disk. Naive inputs are therefore assumed to be UTC
+    rather than rejected.
+
+    Args:
+        value: ISO 8601 timestamp, with or without an offset.
+
+    Returns:
+        A timezone-aware datetime.
+    """
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking file I/O
+#
+# Handlers run on the event loop, and the artifacts they touch (ontology TTL,
+# schema JSON) are routinely megabytes on a large schema. A plain open()/read()
+# there stalls the loop for every concurrent session, so these helpers push the
+# whole operation -- including JSON encode/decode, which is CPU-bound in its own
+# right -- into a worker thread. Exceptions propagate exactly as the blocking
+# calls would.
+# ---------------------------------------------------------------------------
+
+
+async def read_text_file(path: Path | str, encoding: str = "utf-8") -> str:
+    """Read a text file without blocking the event loop.
+
+    Args:
+        path: File to read.
+        encoding: Text encoding.
+
+    Returns:
+        The file's contents.
+    """
+    return await asyncio.to_thread(Path(path).read_text, encoding=encoding)
+
+
+async def write_text_file(
+    path: Path | str, content: str, encoding: str = "utf-8"
+) -> None:
+    """Write a text file without blocking the event loop.
+
+    Args:
+        path: File to write.
+        content: Text to write.
+        encoding: Text encoding.
+    """
+    await asyncio.to_thread(Path(path).write_text, content, encoding=encoding)
+
+
+async def read_json_file(path: Path | str, encoding: str = "utf-8") -> Any:
+    """Read and parse a JSON file without blocking the event loop.
+
+    Args:
+        path: File to read.
+        encoding: Text encoding.
+
+    Returns:
+        The decoded JSON payload.
+    """
+
+    def _read() -> Any:
+        return json.loads(Path(path).read_text(encoding=encoding))
+
+    return await asyncio.to_thread(_read)
+
+
+async def write_json_file(
+    path: Path | str, data: Any, encoding: str = "utf-8", indent: int = 2
+) -> None:
+    """Serialize data to a JSON file without blocking the event loop.
+
+    Args:
+        path: File to write.
+        data: JSON-serializable payload.
+        encoding: Text encoding.
+        indent: Indentation passed to :func:`json.dumps`.
+    """
+
+    def _write() -> None:
+        Path(path).write_text(
+            json.dumps(data, indent=indent, ensure_ascii=False), encoding=encoding
+        )
+
+    await asyncio.to_thread(_write)
 
 
 async def safe_ctx_info(ctx: Any, message: str) -> None:
@@ -142,7 +261,9 @@ def validate_uri(uri: str) -> bool:
         parsed = urlparse(uri)
         # Check scheme is http or https and has a netloc (domain)
         return parsed.scheme in ("http", "https") and bool(parsed.netloc)
-    except Exception:
+    except ValueError:
+        # urlparse raises ValueError on malformed input (e.g. a bad IPv6
+        # literal). Anything else is a caller bug and should surface.
         return False
 
 

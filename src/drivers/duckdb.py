@@ -369,8 +369,13 @@ class DuckDBDriver(DatabaseDriver):
                             logger.error(f"Error fetching results: {fetch_error}")
                             try:
                                 result.close()
-                            except Exception:
-                                pass
+                            except Exception as close_error:
+                                # Swallowed on purpose: a cursor-close failure must never
+                                # mask the real error being raised. Logged so it stays
+                                # diagnosable instead of vanishing.
+                                logger.debug(
+                                    f"Ignoring cursor close failure: {close_error}"
+                                )
                             raise
 
                         result_data["data"] = serialize_rows(
@@ -382,8 +387,11 @@ class DuckDBDriver(DatabaseDriver):
                 finally:
                     try:
                         result.close()
-                    except Exception:
-                        pass
+                    except Exception as close_error:
+                        # Swallowed on purpose: a cursor-close failure must never
+                        # mask the real error being raised. Logged so it stays
+                        # diagnosable instead of vanishing.
+                        logger.debug(f"Ignoring cursor close failure: {close_error}")
 
                 end_time = time_mod.time()
                 result_data["execution_time_ms"] = round(

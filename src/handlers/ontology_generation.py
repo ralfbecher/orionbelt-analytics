@@ -1,18 +1,25 @@
 """Ontology generation handler: build OWL/RDF from a database schema."""
 
+import asyncio
 import json
 import logging
 import os
-from datetime import datetime
 from typing import Any
 
 from fastmcp import Context
 
 from ..database_manager import ColumnInfo, TableInfo
 from ..handler_context import HandlerContext
-from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
+from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
+from ..lifecycle.metadata import (
+    mark_ontology_persisted,
+    ontology_is_current,
+    update_workspace_rdf,
+    update_workspace_section,
+)
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
+from ..utils import utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +247,9 @@ async def generate_ontology(
         return err
 
     generator = services.server_state.get_ontology_generator(base_uri=base_uri)
-    ontology_ttl = generator.generate_from_schema(tables_info)
+    # rdflib work is CPU-bound (~876 ms per 2.65 MB of Turtle); off the loop
+    # so it does not freeze every concurrent session.
+    ontology_ttl = await asyncio.to_thread(generator.generate_from_schema, tables_info)
 
     # Optional SHACL conformance check (Phase 4). Default on, gated by setting;
     # never hard-fails generation — surfaces violations as a warning only.
@@ -248,7 +257,7 @@ async def generate_ontology(
         try:
             from ..shacl_validator import validate_ontology
 
-            shacl = validate_ontology(ontology_ttl)
+            shacl = await asyncio.to_thread(validate_ontology, ontology_ttl)
             if shacl["available"] and not shacl["conforms"]:
                 logger.warning(
                     "SHACL: generated ontology has %d violation(s):\n%s",
@@ -275,40 +284,57 @@ async def generate_ontology(
         )
 
         schema_safe = (schema_name or "default").replace(" ", "_").replace(".", "_")
-        ontology_filename = (
-            services.get_session_safe_filename(ctx, "ontology", schema_safe) + ".ttl"
-        )
-        ontology_file_path = conn_dir / ontology_filename
 
-        with open(ontology_file_path, "w", encoding="utf-8") as f:
-            f.write(ontology_ttl)
+        # Serialize the whole produce -> record -> prune sequence for this
+        # family. Two overlapping generate_ontology calls for one schema would
+        # otherwise each write a file, and the loser's prune would delete the
+        # winner's just-written artifact.
+        async with artifact_family_lock(
+            conn_dir, f"ontology_{session.connection_id or 'default'}_{schema_safe}"
+        ):
+            ontology_filename = (
+                services.get_session_safe_filename(ctx, "ontology", schema_safe)
+                + ".ttl"
+            )
+            ontology_file_path = conn_dir / ontology_filename
 
-        logger.info(
-            f"Generated ontology for schema '{schema_name or 'default'}': {len(tables_info)} tables"
-        )
-        logger.info(f"Saved ontology to: {ontology_file_path}")
+            await write_text_file(ontology_file_path, ontology_ttl)
 
-        session.ontology_file = ontology_filename
-        session.obqc_validator = None
+            logger.info(
+                f"Generated ontology for schema '{schema_name or 'default'}': {len(tables_info)} tables"
+            )
+            logger.info(f"Saved ontology to: {ontology_file_path}")
 
-        # Write workspace metadata for ontology section
-        if session.connection_id:
-            try:
-                await update_workspace_section(
-                    connection_id=session.connection_id,
-                    output_dir=OUTPUT_DIR,
-                    schema_name=schema_name or "default",
-                    section="ontology",
-                    data={
-                        "ontology_file": ontology_filename,
-                        "enriched": False,
-                        "graph_uri": graph_uri,
-                        "persisted_to_rdf": False,
-                        "generated_at": datetime.now().isoformat(),
-                    },
-                )
-            except Exception as e:
-                logger.warning(f"Failed to write workspace metadata: {e}")
+            previous_ontology_file = session.ontology_file
+            session.ontology_file = ontology_filename
+            session.obqc_validator = None
+
+            # Write workspace metadata for ontology section
+            if session.connection_id:
+                try:
+                    await update_workspace_section(
+                        connection_id=session.connection_id,
+                        output_dir=OUTPUT_DIR,
+                        schema_name=schema_name or "default",
+                        section="ontology",
+                        data={
+                            "ontology_file": ontology_filename,
+                            "enriched": False,
+                            "graph_uri": graph_uri,
+                            "persisted_to_rdf": False,
+                            "generated_at": utc_now().isoformat(),
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write workspace metadata: {e}")
+
+            # Prune only once metadata durably names the new file; the previously
+            # referenced one is protected so a failed metadata write cannot leave
+            # restore chasing a deleted artifact.
+            await prune_superseded_artifacts(
+                ontology_file_path,
+                protect=[previous_ontology_file] if previous_ontology_file else [],
+            )
 
         await ctx.info(
             "Ontology generation complete; next call should be suggest_semantic_names to improve cryptic names"
@@ -316,7 +342,9 @@ async def generate_ontology(
 
         # Analyze for cryptic names
         generator = services.server_state.get_ontology_generator(base_uri=base_uri)
-        generator.graph.parse(data=ontology_ttl, format="turtle")
+        await asyncio.to_thread(
+            generator.graph.parse, data=ontology_ttl, format="turtle"
+        )
         generator.graph.bind("ns", generator.base_uri)
         generator.graph.bind("oba", generator.oba_ns)
         name_analysis = generator.extract_names_for_review()
@@ -327,7 +355,17 @@ async def generate_ontology(
             + name_analysis["summary"]["relationships_needing_review"]
         )
 
-        # Auto-persist to RDF store
+        # Auto-persist to RDF store.
+        #
+        # Serialized per schema and gated on still being the current
+        # generation, because load_ontology() *replaces* the named graph: a
+        # stale request that reached this point would overwrite a newer
+        # generation's triples. Guarding only the metadata flag left the flag
+        # honest while the graph held the wrong ontology.
+        #
+        # The lock is taken here rather than extending the artifact family lock
+        # over the whole handler: the Oxigraph load is the expensive part and
+        # only conflicts with other loads into the same schema graph.
         if auto_persist and OXIGRAPH_AVAILABLE:
             try:
                 store = services.get_oxigraph_store(ctx)
@@ -335,36 +373,63 @@ async def generate_ontology(
                     if not graph_uri:
                         graph_uri = schema_graph_uri(schema_name or "default")
 
-                    triple_count = store.load_ontology(
-                        ontology_ttl, graph_uri, schema_name or "default"
-                    )
-                    logger.info(
-                        f"Auto-persisted ontology to Oxigraph: {triple_count} triples in graph <{graph_uri}>"
-                    )
+                    persist_schema = schema_name or "default"
+                    async with artifact_family_lock(
+                        conn_dir,
+                        f"rdf_{session.connection_id or 'default'}"
+                        f"_{persist_schema}",
+                    ):
+                        still_current = not session.connection_id or (
+                            await ontology_is_current(
+                                session.connection_id,
+                                OUTPUT_DIR,
+                                persist_schema,
+                                ontology_filename,
+                            )
+                        )
+                        if still_current:
+                            triple_count = await asyncio.to_thread(
+                                store.load_ontology,
+                                ontology_ttl,
+                                graph_uri,
+                                persist_schema,
+                            )
+                            logger.info(
+                                f"Auto-persisted ontology to Oxigraph: "
+                                f"{triple_count} triples in graph <{graph_uri}>"
+                            )
+                        else:
+                            logger.info(
+                                "Skipped RDF auto-persist: a newer ontology "
+                                f"generation superseded {ontology_filename}"
+                            )
 
                     # Update workspace: mark ontology as persisted + write rdf_store
-                    if session.connection_id:
+                    if still_current and session.connection_id:
                         try:
-                            await update_workspace_section(
+                            # Re-checked inside the helper: the currency test
+                            # above happened before the load, and a newer
+                            # generation can land while it runs.
+                            marked = await mark_ontology_persisted(
                                 connection_id=session.connection_id,
                                 output_dir=OUTPUT_DIR,
                                 schema_name=schema_name or "default",
-                                section="ontology",
-                                data={
-                                    "ontology_file": ontology_filename,
-                                    "enriched": False,
-                                    "graph_uri": graph_uri,
-                                    "persisted_to_rdf": True,
-                                    "generated_at": datetime.now().isoformat(),
-                                },
+                                ontology_file=ontology_filename,
+                                graph_uri=graph_uri,
                             )
+                            if not marked:
+                                logger.info(
+                                    "Skipped persisted_to_rdf flag: a newer "
+                                    "ontology generation superseded "
+                                    f"{ontology_filename}"
+                                )
                             await update_workspace_rdf(
                                 connection_id=session.connection_id,
                                 output_dir=OUTPUT_DIR,
                                 data={
                                     "initialized": True,
                                     "graph_uris": [graph_uri],
-                                    "initialized_at": datetime.now().isoformat(),
+                                    "initialized_at": utc_now().isoformat(),
                                 },
                             )
                         except Exception as e:
@@ -408,7 +473,7 @@ To improve ontology for business users:
         # Fallback: return minimal graph summary instead of full TTL
         result = f"Ontology generated and saved to file: {ontology_filename}\n"
         result += f"Schema: {schema_name or 'default'}, Tables: {len(tables_info)}\n"
-        result += _build_minimal_graph_summary(ontology_ttl)
+        result += await asyncio.to_thread(_build_minimal_graph_summary, ontology_ttl)
 
         if cryptic_count > 0:
             result += "\n\nSEMANTIC NAME RESOLUTION RECOMMENDED"
@@ -426,4 +491,4 @@ To improve ontology for business users:
         await ctx.info(
             "Ontology file save failed but ontology generated; next call should be suggest_semantic_names to improve cryptic names"
         )
-        return _build_minimal_graph_summary(ontology_ttl)
+        return await asyncio.to_thread(_build_minimal_graph_summary, ontology_ttl)

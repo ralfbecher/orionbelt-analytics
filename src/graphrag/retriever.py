@@ -5,6 +5,7 @@ Provides intelligent schema navigation using the graph structure
 of foreign key relationships and semantic similarity.
 """
 
+import contextlib
 import logging
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -138,19 +139,15 @@ class GraphRetriever:
             path_backward = None
             path_undirected = None
 
-            try:
+            with contextlib.suppress(nx.NetworkXNoPath):
                 path_forward = nx.shortest_path(
                     self.graph, source=from_table, target=to_table
                 )
-            except nx.NetworkXNoPath:
-                pass
 
-            try:
+            with contextlib.suppress(nx.NetworkXNoPath):
                 path_backward = nx.shortest_path(
                     self.graph, source=to_table, target=from_table
                 )
-            except nx.NetworkXNoPath:
-                pass
 
             # Try undirected view for mixed-direction paths
             try:

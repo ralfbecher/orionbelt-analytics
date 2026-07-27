@@ -2,7 +2,7 @@
 
 import types
 import unittest
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from src.database_manager import ColumnInfo, TableInfo
 from src.server_state import (
@@ -14,6 +14,7 @@ from src.server_state import (
     get_session_id,
 )
 from src.session import SessionData
+from src.utils import utc_now
 
 
 def _table():
@@ -89,11 +90,11 @@ class TestServerState(unittest.TestCase):
         gen = ServerState().get_ontology_generator(base_uri="http://x/")
         self.assertTrue(hasattr(gen, "generate_from_schema"))
 
-    def test_evict_idle_sessions(self):
+    async def test_evict_idle_sessions(self):
         ss = ServerState()
         s = ss.get_session("old")
-        s.last_activity = datetime.now() - timedelta(hours=1)
-        ss._evict_idle_sessions(idle_timeout=1)
+        s.last_activity = utc_now() - timedelta(hours=1)
+        await ss._evict_idle_sessions(idle_timeout=1)
         self.assertEqual(ss.session_count, 0)
 
     def test_cleanup_all(self):

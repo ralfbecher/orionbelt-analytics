@@ -6,7 +6,7 @@ import json
 import shutil
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 # Add src directory to path for imports
@@ -19,7 +19,7 @@ from src import __name__ as SERVER_NAME  # noqa: E402
 from src import __version__  # noqa: E402
 from src.config import config_manager  # noqa: E402
 from src.main import cleanup_server, mcp  # noqa: E402
-from src.utils import setup_logging  # noqa: E402
+from src.utils import parse_timestamp, setup_logging, utc_now  # noqa: E402
 
 # Setup logging
 config = config_manager.get_server_config()
@@ -143,27 +143,51 @@ def print_startup_info():
 
 
 def cleanup_tmp_folder():
-    """Clean up stale top-level files from tmp/, preserving workspace data.
+    """Clean the output directory at startup, preserving live workspace data.
 
-    Connection-scoped directories (tmp/{connection_id}/) contain workspace
-    artifacts (metadata.json, schema JSON, ontology TTL, Oxigraph store,
-    ChromaDB) that must survive server restarts for workspace auto-restore to work.
+    Always runs, whatever AUTO_CLEANUP_ON_STARTUP is set to:
+    - deletes stale loose files sitting directly in OUTPUT_DIR
+    - deletes every workspace's charts/ directory (chart images are ephemeral)
 
-    Only removes top-level files that are not inside a connection directory.
+    AUTO_CLEANUP_ON_STARTUP then decides whether whole workspaces go:
+    - "false" (default): none; every workspace is kept so auto-restore works
+    - "true": deletes a workspace with no metadata.json (orphaned), or whose
+      workspace.updated_at is older than WORKSPACE_MAX_AGE_DAYS. A workspace
+      whose metadata has no updated_at is kept.
+    - "all": deletes every workspace (fresh start)
 
-    AUTO_CLEANUP_ON_STARTUP controls workspace cleanup:
-    - "false" (default): no workspace cleanup, only top-level files and charts
-    - "true": retention-based — removes workspaces older than WORKSPACE_MAX_AGE_DAYS
-    - "all": removes ALL workspace directories (fresh start)
+    Deleting a workspace also deletes the satellite stores keyed to that
+    connection -- chromadb/{id} and oxigraph/{id} live beside the workspace, not
+    inside it, so they would otherwise be stranded on disk forever. The
+    chromadb/ and oxigraph/ parents are shared across connections and are never
+    themselves treated as workspaces (they carry no metadata.json, so doing so
+    would delete every connection's vectors and triples).
     """
     import os
 
-    tmp_dir = Path(__file__).parent / "tmp"
+    from src.paths import NON_WORKSPACE_DIRS, OUTPUT_DIR, get_connection_store_dirs
+
+    tmp_dir = OUTPUT_DIR
 
     if not tmp_dir.exists():
-        tmp_dir.mkdir(exist_ok=True)
-        logger.info("Created tmp directory for output files")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created output directory for generated files: {tmp_dir}")
         return
+
+    def _remove_workspace(conn_dir: Path) -> None:
+        """Remove a workspace and the satellite stores keyed to it.
+
+        chromadb/{id} and oxigraph/{id} live outside the workspace directory,
+        so deleting only conn_dir would strand them on disk forever.
+        """
+        shutil.rmtree(conn_dir)
+        for store_dir in get_connection_store_dirs(conn_dir.name):
+            if store_dir.exists():
+                try:
+                    shutil.rmtree(store_dir)
+                    logger.debug(f"Removed satellite store: {store_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove {store_dir}: {e}")
 
     # Phase 1: Remove stale top-level files (always)
     removed = 0
@@ -174,7 +198,11 @@ def cleanup_tmp_folder():
                 item.unlink()
                 removed += 1
                 logger.debug(f"Removed stale file: {item.name}")
-            elif item.is_dir():
+            elif item.is_dir() and item.name not in NON_WORKSPACE_DIRS:
+                # chromadb/ and oxigraph/ hold per-connection stores one level
+                # deeper. They carry no metadata.json, so counting them as
+                # workspaces makes them look orphaned -- which deleted every
+                # connection's vectors and triples on the first retention run.
                 workspace_dirs.append(item)
     except Exception as e:
         logger.warning(f"Failed to clean tmp directory: {e}")
@@ -213,7 +241,7 @@ def cleanup_tmp_folder():
         cleaned = 0
         for conn_dir in workspace_dirs:
             try:
-                shutil.rmtree(conn_dir)
+                _remove_workspace(conn_dir)
                 cleaned += 1
                 logger.info(f"Removed workspace: {conn_dir.name}")
             except Exception as e:
@@ -227,7 +255,7 @@ def cleanup_tmp_folder():
         f"Retention cleanup enabled (WORKSPACE_MAX_AGE_DAYS={max_age_days}), "
         f"scanning {len(workspace_dirs)} workspace(s)..."
     )
-    cutoff = datetime.now() - timedelta(days=max_age_days)
+    cutoff = utc_now() - timedelta(days=max_age_days)
     cleaned = 0
 
     for conn_dir in workspace_dirs:
@@ -235,7 +263,7 @@ def cleanup_tmp_folder():
         if not metadata_file.exists():
             # No metadata — orphaned directory, remove it
             try:
-                shutil.rmtree(conn_dir)
+                _remove_workspace(conn_dir)
                 cleaned += 1
                 logger.info(f"Removed orphaned workspace directory: {conn_dir.name}")
             except Exception as e:
@@ -251,11 +279,11 @@ def cleanup_tmp_folder():
             workspace = metadata.get("workspace", {})
             updated_at = workspace.get("updated_at")
             if updated_at:
-                last_update = datetime.fromisoformat(updated_at)
+                last_update = parse_timestamp(updated_at)
                 if last_update < cutoff:
-                    shutil.rmtree(conn_dir)
+                    _remove_workspace(conn_dir)
                     cleaned += 1
-                    age_days = (datetime.now() - last_update).days
+                    age_days = (utc_now() - last_update).days
                     logger.info(
                         f"Removed stale workspace: {conn_dir.name} "
                         f"(last updated {age_days} days ago, max {max_age_days})"

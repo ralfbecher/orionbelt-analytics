@@ -7,17 +7,86 @@ Also manages workspace state for session restore across reconnections.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
+import tempfile
+import threading
+import weakref
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..utils import parse_timestamp, utc_now
+
 logger = logging.getLogger(__name__)
 
-# Module-level lock dict for serializing concurrent metadata writes per connection
-_metadata_locks: dict[str, asyncio.Lock] = {}
+# Metadata writes are serialized in two tiers, because neither lock type alone
+# is sufficient.
+#
+# Tier 1 -- asyncio.Lock, per (event loop, connection). An asyncio.Lock binds to
+# whichever loop first awaits it and raises RuntimeError if reused from another,
+# and this process does run more than one loop (get_registered_tool_names in
+# main.py calls asyncio.run), so these cannot be shared across loops. Their job
+# is to keep a single loop from queueing many worker threads on the same file.
+# The WeakKeyDictionary lets a finished loop's locks be collected.
+#
+# Tier 2 -- threading.Lock, per connection, process-wide, taken inside the
+# worker thread. This is what actually guarantees mutual exclusion: tier 1 locks
+# in different loops know nothing about each other, so without this two loops
+# would read-modify-write the same metadata.json concurrently and lose updates.
+_metadata_locks: "weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+#
+# Neither registry is evicted. Keys are connection fingerprints (a truncated
+# sha256 of type/host/port/database/schema), so the count is bounded by the
+# distinct databases this server connects to, at roughly 100 bytes each. Adding
+# eviction would risk handing two writers different locks for one connection --
+# reintroducing precisely the race these exist to prevent -- for a saving of
+# well under a megabyte. Left deliberately.
+_metadata_thread_locks: dict[str, threading.Lock] = {}
+_thread_lock_registry_guard = threading.Lock()
+
+
+def _get_metadata_lock(connection_id: str) -> asyncio.Lock:
+    """Return the per-loop write lock for *connection_id*.
+
+    Args:
+        connection_id: Database connection fingerprint.
+
+    Returns:
+        An asyncio.Lock scoped to the current loop and connection.
+    """
+    loop = asyncio.get_running_loop()
+    per_loop = _metadata_locks.setdefault(loop, {})
+    lock = per_loop.get(connection_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        per_loop[connection_id] = lock
+    return lock
+
+
+def _get_metadata_thread_lock(connection_id: str) -> threading.Lock:
+    """Return the process-wide write lock for *connection_id*.
+
+    Held inside the worker thread so writers on different event loops -- whose
+    asyncio locks are independent -- still serialize against each other.
+
+    Args:
+        connection_id: Database connection fingerprint.
+
+    Returns:
+        A threading.Lock shared by every writer in this process.
+    """
+    with _thread_lock_registry_guard:
+        lock = _metadata_thread_locks.get(connection_id)
+        if lock is None:
+            lock = threading.Lock()
+            _metadata_thread_locks[connection_id] = lock
+        return lock
 
 
 @dataclass
@@ -108,13 +177,34 @@ class VersionMetadataManager:
         }
 
     def _save_metadata(self) -> None:
-        """Save metadata to disk."""
+        """Save metadata to disk atomically.
+
+        Written to a sibling temp file and moved into place with os.replace,
+        which is atomic on POSIX and Windows. A plain open(..., "w") truncates
+        first, so a concurrent or interrupted write leaves a torn file -- in
+        practice a short write over a longer one, whose leftover tail makes the
+        JSON unparseable ("Extra data"). Readers now see either the old file or
+        the new one, never a mixture.
+        """
+        # mkstemp gives every writer its own temp path. A shared name (e.g. one
+        # derived from the pid) means concurrent writers replace and unlink each
+        # other's file, which produced a storm of "No such file or directory"
+        # failures and lost nearly every update.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self.connection_dir, prefix="metadata.json.", suffix=".tmp"
+        )
+        tmp_file = Path(tmp_name)
         try:
-            with open(self.metadata_file, "w") as f:
+            with os.fdopen(fd, "w") as f:
                 json.dump(self.metadata, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.metadata_file)
             logger.debug(f"Saved metadata for connection {self.connection_id}")
         except Exception as e:
             logger.error(f"Failed to save metadata: {e}")
+            with contextlib.suppress(OSError):
+                tmp_file.unlink()
 
     def get_schema_metadata(self, schema_name: str) -> dict[str, Any] | None:
         """Get metadata for a specific schema."""
@@ -245,11 +335,11 @@ class VersionMetadataManager:
         to_check = sorted_versions[:-keep_count]  # Exclude latest N
 
         # Check age
-        now = datetime.now()
+        now = utc_now()
         to_delete = []
 
         for version in to_check:
-            created = datetime.fromisoformat(version.created_at)
+            created = parse_timestamp(version.created_at)
             age_days = (now - created).days
 
             if age_days > max_age_days:
@@ -324,7 +414,7 @@ class VersionMetadataManager:
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             }
 
@@ -334,7 +424,7 @@ class VersionMetadataManager:
             workspace.setdefault("schemas", {})[schema_name] = {}
 
         workspace["schemas"][schema_name][section] = data
-        workspace["updated_at"] = datetime.now().isoformat()
+        workspace["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
         logger.debug(
@@ -355,14 +445,14 @@ class VersionMetadataManager:
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             }
 
         workspace = self.metadata["workspace"]
         workspace["db_type"] = db_type
         workspace["db_name"] = db_name
-        workspace["updated_at"] = datetime.now().isoformat()
+        workspace["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
 
@@ -374,15 +464,60 @@ class VersionMetadataManager:
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now().isoformat(),
                 "schemas": {},
             }
 
         self.metadata["workspace"]["rdf_store"] = data
-        self.metadata["workspace"]["updated_at"] = datetime.now().isoformat()
+        self.metadata["workspace"]["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
         logger.debug(f"Updated workspace.rdf_store (connection {self.connection_id})")
+
+
+async def mutate_workspace_metadata(
+    connection_id: str,
+    output_dir: Path,
+    mutate: Callable[["VersionMetadataManager"], None],
+) -> None:
+    """Run a metadata.json read-modify-write serialized per connection, off-loop.
+
+    Every writer must go through here. metadata.json is a single file holding
+    all workspace sections, so two unserialized read-modify-write cycles either
+    drop one another's section (last writer wins on a stale read) or interleave
+    into an unparseable file. Both were reproducible before this existed.
+
+    The mutation runs in a worker thread -- the file can be large and the loop
+    must not stall -- under two locks held across the whole load/modify/save
+    cycle, not just the save: the per-loop asyncio lock, and the process-wide
+    threading lock that actually provides mutual exclusion between event loops.
+
+    Scope: this serializes writers **within one process**, which is sufficient
+    because two processes cannot share an OUTPUT_DIR in the first place --
+    Oxigraph's store is RocksDB-backed and takes an exclusive OS lock on its
+    directory, so a second server fails to open it outright ("IO error: While
+    lock file"). A cross-process file lock here would guard metadata.json while
+    the RDF store remained unusable, so it is deliberately not implemented.
+
+    The save is atomic regardless (unique temp file plus os.replace), so even an
+    unexpected concurrent writer cannot corrupt or tear metadata.json -- the
+    worst case is a lost update from a stale read.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory (usually OUTPUT_DIR).
+        mutate: Callback applied to a freshly loaded manager. It is responsible
+            for persisting, which every ``update_*`` method already does.
+    """
+
+    def _apply() -> None:
+        # Process-wide lock, held for the whole load/modify/save cycle. The
+        # asyncio lock below only covers writers on this event loop.
+        with _get_metadata_thread_lock(connection_id):
+            mutate(VersionMetadataManager(connection_id, output_dir))
+
+    async with _get_metadata_lock(connection_id):
+        await asyncio.to_thread(_apply)
 
 
 async def update_workspace_section(
@@ -404,10 +539,105 @@ async def update_workspace_section(
         section: Section key ("schema", "ontology", "graphrag")
         data: Section data dict
     """
-    lock = _metadata_locks.setdefault(connection_id, asyncio.Lock())
-    async with lock:
+
+    await mutate_workspace_metadata(
+        connection_id,
+        output_dir,
+        lambda mgr: mgr.update_workspace(schema_name, section, data),
+    )
+
+
+async def ontology_is_current(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+    ontology_file: str,
+) -> bool:
+    """True if *ontology_file* is still the generation metadata records.
+
+    Checked before loading into the RDF store, not only before flipping the
+    persisted flag. load_ontology() replaces the schema's named graph, so a
+    stale request that got as far as loading would overwrite a newer
+    generation's triples -- and guarding only the flag left exactly that hole:
+    the flag stayed honest while the graph held the wrong ontology.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema to check.
+        ontology_file: The generation the caller holds.
+
+    Returns:
+        True if the caller's generation is still current.
+    """
+
+    def _read() -> bool:
         mgr = VersionMetadataManager(connection_id, output_dir)
-        mgr.update_workspace(schema_name, section, data)
+        section = (
+            mgr.metadata.get("workspace", {})
+            .get("schemas", {})
+            .get(schema_name, {})
+            .get("ontology")
+        )
+        # Nothing recorded yet means this caller is the first -- proceed.
+        if not section or "ontology_file" not in section:
+            return True
+        return bool(section["ontology_file"] == ontology_file)
+
+    async with _get_metadata_lock(connection_id):
+        return await asyncio.to_thread(_read)
+
+
+async def mark_ontology_persisted(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+    ontology_file: str,
+    graph_uri: str,
+) -> bool:
+    """Flag an ontology as persisted to RDF, only while it is still current.
+
+    The RDF load happens outside the artifact family lock -- it is expensive,
+    and holding the lock across it would serialize generation for the schema.
+    That leaves a window: two overlapping generate_ontology calls can record
+    A.ttl then B.ttl, and A's slower auto-persist can land last. A blind merge
+    would then mark B.ttl as persisted on the strength of A's RDF load.
+
+    So the check and the write happen together under the metadata lock: the
+    flag is set only if the recorded ontology_file is still the generation that
+    was actually loaded.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema whose ontology section to update.
+        ontology_file: The generation this caller persisted.
+        graph_uri: Named graph it was loaded into.
+
+    Returns:
+        True if the flag was set, False if a newer generation had superseded
+        this one.
+    """
+    applied = False
+
+    def _mutate(mgr: VersionMetadataManager) -> None:
+        nonlocal applied
+        section = (
+            mgr.metadata.get("workspace", {})
+            .get("schemas", {})
+            .get(schema_name, {})
+            .get("ontology")
+        )
+        if not section or section.get("ontology_file") != ontology_file:
+            return
+        section["graph_uri"] = graph_uri
+        section["persisted_to_rdf"] = True
+        mgr.metadata["workspace"]["updated_at"] = utc_now().isoformat()
+        mgr._save_metadata()
+        applied = True
+
+    await mutate_workspace_metadata(connection_id, output_dir, _mutate)
+    return applied
 
 
 async def update_workspace_rdf(
@@ -422,7 +652,9 @@ async def update_workspace_rdf(
         output_dir: Base output directory
         data: RDF store state dict
     """
-    lock = _metadata_locks.setdefault(connection_id, asyncio.Lock())
-    async with lock:
-        mgr = VersionMetadataManager(connection_id, output_dir)
-        mgr.update_workspace_rdf_store(data)
+
+    await mutate_workspace_metadata(
+        connection_id,
+        output_dir,
+        lambda mgr: mgr.update_workspace_rdf_store(data),
+    )
