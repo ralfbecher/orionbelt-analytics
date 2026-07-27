@@ -113,6 +113,23 @@ dev = [
 ]
 
 # Tool configurations
+[tool.ruff]
+line-length = 88
+# target-version is inferred from requires-python (>=3.13); left implicit so it
+# tracks that single source of truth.
+
+[tool.ruff.lint]
+# Pinned explicitly rather than relying on ruff's built-in defaults, which are
+# not stable across releases: 0.16.0 widened the default set from 118 rules to
+# 826 (adding UP, BLE, DTZ, RUF, ...) and simultaneously dropped E401/E402/E7xx.
+# That turned every routine ruff bump into 1300+ unrelated lint failures and
+# blocked otherwise-fine dependency PRs. This selection reproduces the rule set
+# the codebase was already passing under 0.15.10.
+#
+# Widening this list is a deliberate, separate decision -- add prefixes here and
+# fix the resulting findings in their own PR, not as a side effect of a bump.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.black]
 line-length = 88
 # Highest syntax level the pinned black (>=23.12,<24) understands. The runtime
