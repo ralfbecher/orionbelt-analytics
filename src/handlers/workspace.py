@@ -13,7 +13,13 @@ from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
 from ..lifecycle.metadata import VersionMetadataManager, mutate_workspace_metadata
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
-from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir, get_models_dir
+from ..paths import (
+    OUTPUT_DIR,
+    ensure_output_dir,
+    get_connection_dir,
+    get_connection_store_dirs,
+    get_models_dir,
+)
 from ..utils import read_json_file, read_text_file, utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
@@ -307,20 +313,28 @@ async def cleanup_workspace(
     # Drop GraphRAG reference (connection-scoped, releases ChromaDB handle)
     session.graphrag_manager = None
 
-    # 2. Delete workspace directories
-    dirs_to_remove = [
-        (OUTPUT_DIR / connection_id, "workspace"),
-        (OUTPUT_DIR / "oxigraph" / connection_id, "Oxigraph RDF store"),
-        (OUTPUT_DIR / "chromadb" / connection_id, "ChromaDB vector store"),
+    # 2. Delete the workspace and the satellite stores keyed to this connection.
+    # The store paths come from get_connection_store_dirs() so this list cannot
+    # drift from the one the startup cleanup uses.
+    labels = {"chromadb": "ChromaDB vector store", "oxigraph": "Oxigraph RDF store"}
+    dirs_to_remove: list[tuple[Path, str]] = [(OUTPUT_DIR / connection_id, "workspace")]
+    dirs_to_remove += [
+        (store_dir, labels.get(store_dir.parent.name, store_dir.parent.name))
+        for store_dir in get_connection_store_dirs(connection_id)
     ]
+
     for dir_path, label in dirs_to_remove:
+        if not dir_path.exists():
+            continue
+        await asyncio.to_thread(shutil.rmtree, dir_path, ignore_errors=True)
+        # rmtree(ignore_errors=True) never raises, so success cannot be inferred
+        # from "it didn't throw" -- a locked or read-only tree silently survives.
+        # Check, so the response does not claim a deletion that did not happen.
         if dir_path.exists():
-            try:
-                await asyncio.to_thread(shutil.rmtree, dir_path, ignore_errors=True)
-                removed.append(label)
-                logger.info(f"Cleaned up {label}: {dir_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove {label}: {e}")
+            logger.warning(f"Failed to remove {label}: {dir_path} still present")
+        else:
+            removed.append(label)
+            logger.info(f"Cleaned up {label}: {dir_path}")
 
     # 3. Clear all in-memory session state (keep connection alive)
     session.clear_schema_cache()

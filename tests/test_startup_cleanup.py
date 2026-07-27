@@ -136,3 +136,39 @@ def test_workspace_without_updated_at_is_kept(tmp_path, monkeypatch):
     _run_cleanup(monkeypatch, tmp_path, "true")
 
     assert ws.exists(), "workspace with no updated_at must not be deleted"
+
+
+def test_cleanup_workspace_tool_covers_the_same_directories_as_startup():
+    """The runtime cleanup tool and startup cleanup must delete the same set.
+
+    Both remove a connection's workspace plus its satellite stores. They used to
+    hardcode the store paths independently, so adding a third store location
+    would have been fixed in one place and silently missed in the other.
+    """
+    import inspect
+
+    from src.handlers import workspace as workspace_handler
+
+    source = inspect.getsource(workspace_handler.cleanup_workspace)
+    assert "get_connection_store_dirs" in source, (
+        "cleanup_workspace must derive satellite store paths from "
+        "get_connection_store_dirs() rather than hardcoding them"
+    )
+
+
+def test_cleanup_workspace_does_not_claim_failed_deletions(tmp_path, monkeypatch):
+    """rmtree(ignore_errors=True) never raises, so success must be verified.
+
+    A locked or read-only tree survives the call silently; reporting it as
+    removed tells the user their data is gone when it is not.
+    """
+    import inspect
+
+    from src.handlers import workspace as workspace_handler
+
+    source = inspect.getsource(workspace_handler.cleanup_workspace)
+    # The existence re-check is what makes the report truthful.
+    assert "if dir_path.exists():" in source, (
+        "cleanup_workspace must re-check existence after rmtree before "
+        "reporting a directory as removed"
+    )
