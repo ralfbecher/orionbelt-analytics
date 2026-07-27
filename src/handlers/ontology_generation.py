@@ -13,6 +13,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import (
     mark_ontology_persisted,
+    ontology_is_current,
     update_workspace_rdf,
     update_workspace_section,
 )
@@ -354,7 +355,17 @@ async def generate_ontology(
             + name_analysis["summary"]["relationships_needing_review"]
         )
 
-        # Auto-persist to RDF store
+        # Auto-persist to RDF store.
+        #
+        # Serialized per schema and gated on still being the current
+        # generation, because load_ontology() *replaces* the named graph: a
+        # stale request that reached this point would overwrite a newer
+        # generation's triples. Guarding only the metadata flag left the flag
+        # honest while the graph held the wrong ontology.
+        #
+        # The lock is taken here rather than extending the artifact family lock
+        # over the whole handler: the Oxigraph load is the expensive part and
+        # only conflicts with other loads into the same schema graph.
         if auto_persist and OXIGRAPH_AVAILABLE:
             try:
                 store = services.get_oxigraph_store(ctx)
@@ -362,23 +373,43 @@ async def generate_ontology(
                     if not graph_uri:
                         graph_uri = schema_graph_uri(schema_name or "default")
 
-                    triple_count = store.load_ontology(
-                        ontology_ttl, graph_uri, schema_name or "default"
-                    )
-                    logger.info(
-                        f"Auto-persisted ontology to Oxigraph: {triple_count} triples in graph <{graph_uri}>"
-                    )
+                    persist_schema = schema_name or "default"
+                    async with artifact_family_lock(
+                        conn_dir,
+                        f"rdf_{session.connection_id or 'default'}"
+                        f"_{persist_schema}",
+                    ):
+                        still_current = not session.connection_id or (
+                            await ontology_is_current(
+                                session.connection_id,
+                                OUTPUT_DIR,
+                                persist_schema,
+                                ontology_filename,
+                            )
+                        )
+                        if still_current:
+                            triple_count = await asyncio.to_thread(
+                                store.load_ontology,
+                                ontology_ttl,
+                                graph_uri,
+                                persist_schema,
+                            )
+                            logger.info(
+                                f"Auto-persisted ontology to Oxigraph: "
+                                f"{triple_count} triples in graph <{graph_uri}>"
+                            )
+                        else:
+                            logger.info(
+                                "Skipped RDF auto-persist: a newer ontology "
+                                f"generation superseded {ontology_filename}"
+                            )
 
                     # Update workspace: mark ontology as persisted + write rdf_store
-                    if session.connection_id:
+                    if still_current and session.connection_id:
                         try:
-                            # Generation-guarded: this runs outside the
-                            # artifact family lock, so a concurrent generation
-                            # may already have recorded a newer TTL. Marking
-                            # that one persisted on the strength of *this*
-                            # request's RDF load would be a lie, so the helper
-                            # sets the flag only while our file is still the
-                            # recorded one.
+                            # Re-checked inside the helper: the currency test
+                            # above happened before the load, and a newer
+                            # generation can land while it runs.
                             marked = await mark_ontology_persisted(
                                 connection_id=session.connection_id,
                                 output_dir=OUTPUT_DIR,

@@ -130,17 +130,32 @@ class OxigraphStoreManager:
         """
         Load ontology into the store.
 
+        The named graph is **replaced**, not appended to. store.load() unions
+        into the target graph, so repeated generations accumulated: regenerate
+        after dropping a table and the dropped table stayed queryable forever,
+        because nothing ever removed its triples. A named graph represents one
+        schema's current ontology, so loading a new generation must supersede
+        the old one.
+
         Args:
             ontology_ttl: Ontology in Turtle format
             graph_uri: Named graph URI for this ontology
             schema_name: Schema identifier
 
         Returns:
-            Number of triples loaded
+            Number of triples in the graph after loading.
         """
         try:
-            # Parse and load into named graph
-            triples_before = len(self.store)
+            target = NamedNode(graph_uri)
+
+            # Drop the previous generation before loading this one.
+            existing = list(self.store.quads_for_pattern(None, None, None, target))
+            for quad in existing:
+                self.store.remove(quad)
+            if existing:
+                logger.debug(
+                    f"Replaced {len(existing)} triple(s) in graph <{graph_uri}>"
+                )
 
             # Use RdfFormat.TURTLE for newer versions, fall back to strings for older versions
             try:
@@ -149,7 +164,7 @@ class OxigraphStoreManager:
                     ontology_ttl.encode("utf-8"),
                     format=RdfFormat.TURTLE,
                     base_iri=graph_uri,
-                    to_graph=NamedNode(graph_uri),
+                    to_graph=target,
                 )
             except (TypeError, AttributeError):
                 # Fallback for older pyoxigraph versions
@@ -158,7 +173,7 @@ class OxigraphStoreManager:
                         ontology_ttl.encode("utf-8"),
                         format="text/turtle",  # type: ignore[arg-type]
                         base_iri=graph_uri,
-                        to_graph=NamedNode(graph_uri),
+                        to_graph=target,
                     )
                 except TypeError:
                     # Final fallback for very old versions using mime_type
@@ -166,11 +181,14 @@ class OxigraphStoreManager:
                         ontology_ttl.encode("utf-8"),
                         mime_type="text/turtle",
                         base_iri=graph_uri,
-                        to_graph=NamedNode(graph_uri),
+                        to_graph=target,
                     )
 
-            triples_after = len(self.store)
-            triples_loaded = triples_after - triples_before
+            # Count the graph, not the store delta: a replacement can shrink
+            # the store, and the old delta reported 0 for an unchanged reload.
+            triples_loaded = sum(
+                1 for _ in self.store.quads_for_pattern(None, None, None, target)
+            )
 
             self._loaded_ontologies[schema_name] = graph_uri
 

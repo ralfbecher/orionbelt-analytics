@@ -547,6 +547,47 @@ async def update_workspace_section(
     )
 
 
+async def ontology_is_current(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+    ontology_file: str,
+) -> bool:
+    """True if *ontology_file* is still the generation metadata records.
+
+    Checked before loading into the RDF store, not only before flipping the
+    persisted flag. load_ontology() replaces the schema's named graph, so a
+    stale request that got as far as loading would overwrite a newer
+    generation's triples -- and guarding only the flag left exactly that hole:
+    the flag stayed honest while the graph held the wrong ontology.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema to check.
+        ontology_file: The generation the caller holds.
+
+    Returns:
+        True if the caller's generation is still current.
+    """
+
+    def _read() -> bool:
+        mgr = VersionMetadataManager(connection_id, output_dir)
+        section = (
+            mgr.metadata.get("workspace", {})
+            .get("schemas", {})
+            .get(schema_name, {})
+            .get("ontology")
+        )
+        # Nothing recorded yet means this caller is the first -- proceed.
+        if not section or "ontology_file" not in section:
+            return True
+        return bool(section["ontology_file"] == ontology_file)
+
+    async with _get_metadata_lock(connection_id):
+        return await asyncio.to_thread(_read)
+
+
 async def mark_ontology_persisted(
     connection_id: str,
     output_dir: Path,
