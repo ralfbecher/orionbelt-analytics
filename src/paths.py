@@ -15,6 +15,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # Output directory for generated files (configurable via OUTPUT_DIR env var)
 OUTPUT_DIR = PROJECT_ROOT / os.getenv("OUTPUT_DIR", DEFAULT_OUTPUT_DIR)
 
+# Directories directly under OUTPUT_DIR that are NOT per-connection workspaces.
+# They hold satellite stores keyed by connection one level deeper
+# (chromadb/{connection_id}, oxigraph/{connection_id}/store), plus the legacy
+# global Oxigraph store. Anything walking OUTPUT_DIR looking for workspaces must
+# skip these -- they have no metadata.json, so treating them as workspaces makes
+# them look orphaned and gets every connection's vectors and triples deleted.
+NON_WORKSPACE_DIRS = frozenset({"chromadb", "oxigraph", "oxigraph_store"})
+
 
 def ensure_output_dir() -> Path:
     """Get the output directory, creating it if needed."""
@@ -55,6 +63,25 @@ def get_oxigraph_store_dir(connection_id: str | None = None) -> Path:
         store_dir = OUTPUT_DIR / "oxigraph_store"
     store_dir.mkdir(parents=True, exist_ok=True)
     return store_dir
+
+
+def get_connection_store_dirs(connection_id: str) -> list[Path]:
+    """Satellite store directories belonging to a single connection.
+
+    These live outside the connection's workspace directory, so removing a
+    workspace does not remove them -- they have to be cleaned explicitly or the
+    vectors and triples for a deleted connection linger forever.
+
+    Args:
+        connection_id: Database connection fingerprint.
+
+    Returns:
+        Paths that may or may not exist, one per satellite store.
+    """
+    return [
+        OUTPUT_DIR / "chromadb" / connection_id,
+        OUTPUT_DIR / "oxigraph" / connection_id,
+    ]
 
 
 def get_connection_dir(connection_id: str) -> Path:
