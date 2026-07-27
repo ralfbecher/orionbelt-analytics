@@ -31,11 +31,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
 METADATA_MODULE = SRC / "lifecycle" / "metadata.py"
 
-# DataCleanupManager exposes a *synchronous* API and is currently not
-# instantiated anywhere in src/, tests/, or server.py -- so it cannot take the
-# asyncio lock and cannot presently race anything. Exempted deliberately and
-# narrowly rather than async-ifying dead code on speculation. cleanup.py carries
-# a matching warning; wiring it into an async path means routing it through
+# DataCleanupManager is the unwired remnant of the Phase 3B per-version
+# retention design -- its entry points were removed as dead code once
+# AUTO_CLEANUP_ON_STARTUP shipped separately in server.py. Its API is
+# synchronous and nothing instantiates it, so it cannot take the asyncio lock
+# and cannot presently race anything. Exempted deliberately and narrowly rather
+# than async-ifying dead code on speculation -- but note the original design
+# called it from async paths, which is precisely where it would race. cleanup.py
+# carries the matching warning; reviving it means routing through
 # mutate_workspace_metadata first, and deleting this exemption.
 UNWIRED_SYNC_MODULES = {SRC / "lifecycle" / "cleanup.py"}
 
