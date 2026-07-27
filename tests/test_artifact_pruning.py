@@ -13,7 +13,7 @@ import pytest
 
 from src.lifecycle.artifacts import (
     DEFAULT_KEEP_VERSIONS,
-    family_glob,
+    family_key,
     get_keep_versions,
     prune_superseded_artifacts,
     prune_superseded_sync,
@@ -36,27 +36,38 @@ def _generation(schema: str, stamp: str, kind: str = "ontology", ext: str = ".tt
     return f"{kind}_{CONN}_{schema}_{stamp}{ext}"
 
 
-class TestFamilyGlob:
-    """The glob must isolate one artifact kind, connection and schema."""
+class TestFamilyKey:
+    """The key must isolate one artifact kind, connection and schema."""
 
     def test_strips_the_full_timestamp_including_its_underscore(self):
         """The timestamp is %Y%m%d_%H%M%S%f -- it contains an underscore."""
-        assert (
-            family_glob("ontology_ab12cd34_public_20260727_132056962941.ttl")
-            == "ontology_ab12cd34_public_*.ttl"
+        assert family_key("ontology_ab12cd34_public_20260727_132056962941.ttl") == (
+            "ontology_ab12cd34_public",
+            ".ttl",
         )
 
     def test_handles_the_shorter_background_timestamp(self):
         """The background ontology path uses %Y%m%d_%H%M%S (no microseconds)."""
-        assert (
-            family_glob("ontology_public_20260727_132056.ttl")
-            == "ontology_public_*.ttl"
+        assert family_key("ontology_public_20260727_132056.ttl") == (
+            "ontology_public",
+            ".ttl",
         )
 
     def test_returns_none_when_there_is_no_timestamp(self):
         """Unrecognized names must not be pruned against."""
-        assert family_glob("ontology_upload.ttl") is None
-        assert family_glob("metadata.json") is None
+        assert family_key("ontology_upload.ttl") is None
+        assert family_key("metadata.json") is None
+
+    def test_schema_names_with_glob_metacharacters_stay_distinct(self):
+        """Schema names may contain *, ? or [ -- they must not match siblings.
+
+        schema_safe only replaces spaces and dots, so these survive into the
+        filename. A glob built from such a name matched other schemas: a prune
+        for "sales*" deleted "sales_eu"'s artifacts. Keys compare exactly.
+        """
+        star = family_key("ontology_ab12cd34_sales*_20260727_132056962941.ttl")
+        sibling = family_key("ontology_ab12cd34_sales_eu_20260727_132056962941.ttl")
+        assert star != sibling
 
 
 class TestPruning:
@@ -126,6 +137,56 @@ class TestPruning:
 
         assert keep_json.exists()
         assert keep_r2rml.exists()
+
+    def test_glob_metacharacters_in_schema_do_not_match_siblings(self, tmp_path):
+        """Regression: pruning schema "sales*" must not delete "sales_eu".
+
+        Reproduced against the previous glob-based implementation.
+        """
+        victim = _write(
+            tmp_path, _generation("sales_eu", "20260101_120000000000"), mtime=1
+        )
+        for i in range(4):
+            _write(tmp_path, _generation("sales*", f"2026010{i}_120000000000"), mtime=i)
+        current = tmp_path / _generation("sales*", "20260103_120000000000")
+
+        removed = prune_superseded_sync(current, keep=1)
+
+        assert victim.exists(), "another schema's artifact was pruned"
+        assert victim not in removed
+
+    def test_protected_names_are_never_deleted(self, tmp_path):
+        """Whatever metadata still references must survive any prune.
+
+        Pruning runs after the metadata write, but if that write failed the old
+        filename is still the one on disk that restore will look for.
+        """
+        still_referenced = _write(
+            tmp_path, _generation("public", "20260101_120000000000"), mtime=1
+        )
+        for i in range(2, 5):
+            _write(tmp_path, _generation("public", f"2026010{i}_120000000000"), mtime=i)
+        current = tmp_path / _generation("public", "20260104_120000000000")
+
+        removed = prune_superseded_sync(
+            current, keep=1, protect=[still_referenced.name]
+        )
+
+        assert still_referenced.exists(), "the referenced artifact was pruned"
+        assert still_referenced not in removed
+
+    def test_protect_accepts_paths_as_well_as_names(self, tmp_path):
+        """Callers hold either form; both must work."""
+        referenced = _write(
+            tmp_path, _generation("public", "20260101_120000000000"), mtime=1
+        )
+        current = _write(
+            tmp_path, _generation("public", "20260102_120000000000"), mtime=2
+        )
+
+        prune_superseded_sync(current, keep=1, protect=[referenced])
+
+        assert referenced.exists()
 
     def test_unrecognized_name_prunes_nothing(self, tmp_path):
         """Without a parseable timestamp the function must be inert."""

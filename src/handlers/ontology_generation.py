@@ -283,13 +283,13 @@ async def generate_ontology(
         ontology_file_path = conn_dir / ontology_filename
 
         await write_text_file(ontology_file_path, ontology_ttl)
-        await prune_superseded_artifacts(ontology_file_path)
 
         logger.info(
             f"Generated ontology for schema '{schema_name or 'default'}': {len(tables_info)} tables"
         )
         logger.info(f"Saved ontology to: {ontology_file_path}")
 
+        previous_ontology_file = session.ontology_file
         session.ontology_file = ontology_filename
         session.obqc_validator = None
 
@@ -311,6 +311,14 @@ async def generate_ontology(
                 )
             except Exception as e:
                 logger.warning(f"Failed to write workspace metadata: {e}")
+
+        # Prune only once metadata durably names the new file; the previously
+        # referenced one is protected so a failed metadata write cannot leave
+        # restore chasing a deleted artifact.
+        await prune_superseded_artifacts(
+            ontology_file_path,
+            protect=[previous_ontology_file] if previous_ontology_file else [],
+        )
 
         await ctx.info(
             "Ontology generation complete; next call should be suggest_semantic_names to improve cryptic names"

@@ -478,9 +478,9 @@ async def apply_semantic_names(
                 ontology_file_path = conn_dir / new_ontology_filename
 
                 await write_text_file(ontology_file_path, updated_ontology)
-                await prune_superseded_artifacts(ontology_file_path)
 
                 logger.info(f"Saved semantic ontology to: {ontology_file_path}")
+                previous_ontology_file = session.ontology_file
                 session.ontology_file = new_ontology_filename
                 session.ontology_enriched = True
                 session.obqc_validator = None
@@ -503,6 +503,15 @@ async def apply_semantic_names(
                         )
                     except Exception as e:
                         logger.warning(f"Failed to write workspace metadata: {e}")
+
+                # Prune only after metadata names the new file, protecting the
+                # one it referenced until now.
+                await prune_superseded_artifacts(
+                    ontology_file_path,
+                    protect=(
+                        [previous_ontology_file] if previous_ontology_file else []
+                    ),
+                )
             except Exception as e:
                 logger.warning(f"Failed to save ontology to file: {e}")
 

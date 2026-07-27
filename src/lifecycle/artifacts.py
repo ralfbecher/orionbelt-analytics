@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,28 +52,39 @@ def get_keep_versions() -> int:
         return DEFAULT_KEEP_VERSIONS
 
 
-def family_glob(filename: str) -> str | None:
-    """Return a glob matching every generation of *filename*'s artifact family.
+def family_key(filename: str) -> tuple[str, str] | None:
+    """Identify the artifact family *filename* belongs to.
 
-    ``ontology_ab12cd34_public_20260727_132056962941.ttl`` becomes
-    ``ontology_ab12cd34_public_*.ttl`` -- same kind, connection and schema, any
-    timestamp.
+    ``ontology_ab12cd34_public_20260727_132056962941.ttl`` maps to
+    ``("ontology_ab12cd34_public", ".ttl")`` -- same kind, connection and
+    schema, any timestamp.
+
+    Deliberately not a glob. Schema names may legally contain ``*``, ``?`` or
+    ``[``, and those survive the ``schema_safe`` sanitizing (which only
+    replaces spaces and dots). A glob built from such a name matches sibling
+    schemas: a prune for ``sales*`` would delete ``sales_eu``'s artifacts.
+    Comparing parsed keys removes that class of bug entirely rather than
+    relying on escaping.
 
     Args:
-        filename: Base name of a freshly written artifact.
+        filename: Base name of an artifact.
 
     Returns:
-        A glob pattern, or None if the name has no recognizable timestamp, in
-        which case the caller must not prune.
+        ``(family, extension)``, or None if the name carries no recognizable
+        timestamp, in which case the caller must not prune.
     """
     path = Path(filename)
     stem, suffix = path.stem, path.suffix
     if not _TIMESTAMP_SUFFIX.search(stem):
         return None
-    return f"{_TIMESTAMP_SUFFIX.sub('', stem)}_*{suffix}"
+    return _TIMESTAMP_SUFFIX.sub("", stem), suffix
 
 
-def prune_superseded_sync(current_file: Path, keep: int | None = None) -> list[Path]:
+def prune_superseded_sync(
+    current_file: Path,
+    keep: int | None = None,
+    protect: Iterable[Path | str] = (),
+) -> list[Path]:
     """Delete older artifacts superseded by *current_file*.
 
     Args:
@@ -80,28 +92,38 @@ def prune_superseded_sync(current_file: Path, keep: int | None = None) -> list[P
             modification time says.
         keep: Generations to retain including *current_file*. Defaults to
             :func:`get_keep_versions`.
+        protect: Additional names never to delete -- in particular whatever
+            workspace metadata still points at. Until metadata durably names
+            the new file, deleting the old one would leave restore chasing a
+            file that no longer exists.
 
     Returns:
         The paths actually deleted.
     """
     keep = get_keep_versions() if keep is None else max(1, keep)
-    pattern = family_glob(current_file.name)
-    if pattern is None:
+    key = family_key(current_file.name)
+    if key is None:
         logger.debug(f"No timestamp in {current_file.name}; skipping prune")
         return []
 
     directory = current_file.parent
+    protected = {Path(p).name for p in protect} | {current_file.name}
     try:
-        siblings = [p for p in directory.glob(pattern) if p.is_file()]
+        siblings = [
+            entry
+            for entry in directory.iterdir()
+            if entry.is_file()
+            and entry.name not in protected
+            and family_key(entry.name) == key
+        ]
     except OSError as e:
         logger.warning(f"Could not scan {directory} for superseded artifacts: {e}")
         return []
 
     # Newest first, with the current file pinned to the front so it survives
     # even if another generation has a newer mtime.
-    others = [p for p in siblings if p != current_file]
-    others.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    ordered = [current_file, *others]
+    siblings.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    ordered = [current_file, *siblings]
 
     removed: list[Path] = []
     for stale in ordered[keep:]:
@@ -113,14 +135,16 @@ def prune_superseded_sync(current_file: Path, keep: int | None = None) -> list[P
 
     if removed:
         logger.info(
-            f"Pruned {len(removed)} superseded artifact(s) matching {pattern} "
-            f"(keeping {keep})"
+            f"Pruned {len(removed)} superseded artifact(s) from family "
+            f"{key[0]}{key[1]} (keeping {keep})"
         )
     return removed
 
 
 async def prune_superseded_artifacts(
-    current_file: Path, keep: int | None = None
+    current_file: Path,
+    keep: int | None = None,
+    protect: Iterable[Path | str] = (),
 ) -> list[Path]:
     """Async wrapper for :func:`prune_superseded_sync`.
 
@@ -130,8 +154,10 @@ async def prune_superseded_artifacts(
     Args:
         current_file: The artifact just written.
         keep: Generations to retain including *current_file*.
+        protect: Additional names never to delete (e.g. the artifact workspace
+            metadata still references).
 
     Returns:
         The paths actually deleted.
     """
-    return await asyncio.to_thread(prune_superseded_sync, current_file, keep)
+    return await asyncio.to_thread(prune_superseded_sync, current_file, keep, protect)

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import Context
@@ -313,8 +314,14 @@ async def discover_schema(
     session = services.get_session_data(ctx)
     session.cache_schema_analysis(schema_name or "", table_info_objects)
 
-    # Save schema analysis to connection-scoped output folder
+    # Save schema analysis to connection-scoped output folder.
+    # Paths and the previously-referenced names are captured for the prune that
+    # runs only after workspace metadata durably names the new files.
     schema_filename = None
+    schema_file_path: Path | None = None
+    r2rml_file_path: Path | None = None
+    previous_schema_file: str | None = None
+    previous_r2rml_file: str | None = None
     try:
         conn_dir = (
             get_connection_dir(session.connection_id)
@@ -328,10 +335,11 @@ async def discover_schema(
         schema_file_path = conn_dir / schema_filename
 
         await write_json_file(schema_file_path, full_schema_data)
-        await prune_superseded_artifacts(schema_file_path)
 
         logger.info(f"Saved schema analysis to: {schema_file_path}")
-        services.get_session_data(ctx).schema_file = schema_filename
+        session_data = services.get_session_data(ctx)
+        previous_schema_file = session_data.schema_file
+        session_data.schema_file = schema_filename
     except Exception as e:
         logger.warning(f"Failed to save schema analysis to file: {e}")
 
@@ -394,10 +402,11 @@ async def discover_schema(
             r2rml_file_path = conn_dir / r2rml_filename
 
             await write_text_file(r2rml_file_path, r2rml_content)
-            await prune_superseded_artifacts(r2rml_file_path)
 
             logger.info(f"Generated R2RML mapping: {r2rml_file_path}")
-            services.get_session_data(ctx).r2rml_file = r2rml_filename
+            r2rml_session = services.get_session_data(ctx)
+            previous_r2rml_file = r2rml_session.r2rml_file
+            r2rml_session.r2rml_file = r2rml_filename
             schema_result["r2rml_file"] = r2rml_filename
             schema_result["r2rml_base_iri"] = base_iri
 
@@ -488,6 +497,17 @@ async def discover_schema(
                     "analyzed_at": utc_now().isoformat(),
                 },
             )
+            # Prune only after metadata durably names the new files. Doing it
+            # earlier means a crash in this gap leaves metadata pointing at an
+            # artifact that has already been deleted.
+            for written, previous in (
+                (schema_file_path, previous_schema_file),
+                (r2rml_file_path, previous_r2rml_file),
+            ):
+                if written is not None:
+                    await prune_superseded_artifacts(
+                        written, protect=[previous] if previous else []
+                    )
         except Exception as e:
             logger.warning(f"Failed to write workspace metadata: {e}")
 

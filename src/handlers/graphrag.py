@@ -85,10 +85,10 @@ async def _auto_generate_ontology_background(
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
         await write_text_file(ontology_file, ontology_ttl)
-        await prune_superseded_artifacts(ontology_file)
 
         # Write to the specific schema's state (not current schema)
         schema_state = session.get_or_create_schema_state(schema_name)
+        previous_ontology_file = schema_state.ontology.ontology_file
         schema_state.ontology.ontology_file = ontology_file.name
 
         if OXIGRAPH_AVAILABLE:
@@ -108,6 +108,14 @@ async def _auto_generate_ontology_background(
         elapsed = time.time() - start_time
         logger.info(f"Ontology auto-generated successfully ({elapsed:.2f}s)")
         logger.info(f"Saved to: {ontology_file.name}")
+
+        # Pruned last, and never touching what the session previously pointed
+        # at: this path writes no persisted metadata, so the in-memory
+        # reference is the only record that the older file is still in use.
+        await prune_superseded_artifacts(
+            ontology_file,
+            protect=[previous_ontology_file] if previous_ontology_file else [],
+        )
 
     except Exception as e:
         logger.error(f"Ontology auto-generation failed: {type(e).__name__}: {e}")
