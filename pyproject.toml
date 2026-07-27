@@ -106,8 +106,6 @@ dev = [
     "safety>=3.0.0,<4.0.0",
     # Git hooks and automation
     "pre-commit>=3.6.0,<5.0.0",
-    # Integration testing with real databases
-    "testcontainers>=3.7.0,<5.0.0",
     # Performance testing
     "locust>=2.20.0,<3.0.0",
     "ruff>=0.15.10",
