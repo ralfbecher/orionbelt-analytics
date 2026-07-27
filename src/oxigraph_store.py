@@ -5,10 +5,12 @@ Provides persistent RDF storage with SPARQL 1.1 query support using Oxigraph.
 Stores ontologies, schema metadata, and accumulated knowledge across sessions.
 """
 
+import contextlib
 import logging
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from pyoxigraph import (
@@ -137,6 +139,14 @@ class OxigraphStoreManager:
         schema's current ontology, so loading a new generation must supersede
         the old one.
 
+        The replacement is staged. Clearing the target first meant a malformed
+        TTL destroyed the last good ontology: the clear had already happened
+        when the parser raised, leaving the graph empty and SPARQL answering
+        nothing. So the new data is parsed into a temporary graph and swapped
+        in only once it has loaded successfully -- a failed load leaves the
+        previous generation exactly as it was. pyoxigraph's Store has no
+        transaction API, so this is the available approximation.
+
         Args:
             ontology_ttl: Ontology in Turtle format
             graph_uri: Named graph URI for this ontology
@@ -144,51 +154,80 @@ class OxigraphStoreManager:
 
         Returns:
             Number of triples in the graph after loading.
+
+        Raises:
+            Exception: Whatever the parser raises for malformed input. The
+                existing graph is left untouched in that case.
         """
         try:
             target = NamedNode(graph_uri)
+            staging = NamedNode(f"{graph_uri}#__staging_{uuid4().hex}")
 
-            # Drop the previous generation before loading this one.
-            existing = list(self.store.quads_for_pattern(None, None, None, target))
-            for quad in existing:
-                self.store.remove(quad)
-            if existing:
-                logger.debug(
-                    f"Replaced {len(existing)} triple(s) in graph <{graph_uri}>"
-                )
+            def _clear(graph: NamedNode) -> None:
+                """Remove a graph's quads, leaving the graph itself in place."""
+                for quad in list(self.store.quads_for_pattern(None, None, None, graph)):
+                    self.store.remove(quad)
 
-            # Use RdfFormat.TURTLE for newer versions, fall back to strings for older versions
+            def _drop_staging() -> None:
+                """Remove the staging graph entirely.
+
+                Emptying it is not enough: pyoxigraph tracks graph existence
+                separately from its contents, so a cleared staging graph still
+                appears in named_graphs() and one would accumulate per load.
+                """
+                _clear(staging)
+                with contextlib.suppress(Exception):
+                    self.store.remove_graph(staging)
+
+            # Parse into staging first; a failure here must not touch target.
             try:
-                # Try with RdfFormat object (pyoxigraph >= 0.4.0)
-                self.store.load(
-                    ontology_ttl.encode("utf-8"),
-                    format=RdfFormat.TURTLE,
-                    base_iri=graph_uri,
-                    to_graph=target,
-                )
-            except (TypeError, AttributeError):
-                # Fallback for older pyoxigraph versions
+                # Use RdfFormat.TURTLE for newer versions, fall back to strings
+                # for older versions
                 try:
+                    # Try with RdfFormat object (pyoxigraph >= 0.4.0)
                     self.store.load(
                         ontology_ttl.encode("utf-8"),
-                        format="text/turtle",  # type: ignore[arg-type]
+                        format=RdfFormat.TURTLE,
                         base_iri=graph_uri,
-                        to_graph=target,
+                        to_graph=staging,
                     )
-                except TypeError:
-                    # Final fallback for very old versions using mime_type
-                    self.store.load(  # type: ignore[call-arg]
-                        ontology_ttl.encode("utf-8"),
-                        mime_type="text/turtle",
-                        base_iri=graph_uri,
-                        to_graph=target,
-                    )
+                except (TypeError, AttributeError):
+                    # Fallback for older pyoxigraph versions
+                    try:
+                        self.store.load(
+                            ontology_ttl.encode("utf-8"),
+                            format="text/turtle",  # type: ignore[arg-type]
+                            base_iri=graph_uri,
+                            to_graph=staging,
+                        )
+                    except TypeError:
+                        # Final fallback for very old versions using mime_type
+                        self.store.load(  # type: ignore[call-arg]
+                            ontology_ttl.encode("utf-8"),
+                            mime_type="text/turtle",
+                            base_iri=graph_uri,
+                            to_graph=staging,
+                        )
+            except Exception:
+                _drop_staging()
+                logger.warning(
+                    f"Ontology load failed for graph <{graph_uri}>; "
+                    "previous generation left in place"
+                )
+                raise
 
-            # Count the graph, not the store delta: a replacement can shrink
-            # the store, and the old delta reported 0 for an unchanged reload.
-            triples_loaded = sum(
-                1 for _ in self.store.quads_for_pattern(None, None, None, target)
-            )
+            # Swap: the new generation parsed cleanly, so it may supersede.
+            staged = list(self.store.quads_for_pattern(None, None, None, staging))
+            try:
+                _clear(target)
+                for quad in staged:
+                    self.store.add(
+                        Quad(quad.subject, quad.predicate, quad.object, target)
+                    )
+            finally:
+                _drop_staging()
+
+            triples_loaded = len(staged)
 
             self._loaded_ontologies[schema_name] = graph_uri
 

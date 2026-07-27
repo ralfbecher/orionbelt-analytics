@@ -87,3 +87,58 @@ async def test_superseded_generation_is_refused_before_it_can_load(tmp_path):
 async def test_first_generation_is_allowed_through(tmp_path):
     """Nothing recorded yet means this caller is the first -- do not block it."""
     assert await ontology_is_current("fresh", tmp_path, "public", "A.ttl") is True
+
+
+class TestFailedLoadPreservesPreviousGeneration:
+    """A failed refresh must not destroy the last queryable ontology.
+
+    Making the load a replacement introduced this: the target graph was cleared
+    before the new TTL had parsed, so a malformed ontology left the graph empty
+    and SPARQL answering nothing. The new data is now staged and swapped in only
+    after it loads successfully.
+    """
+
+    def test_malformed_turtle_leaves_the_existing_graph_intact(self, store):
+        store.load_ontology(_ttl("Customers"), GRAPH, "public")
+
+        with pytest.raises(Exception):
+            store.load_ontology("this is not valid turtle @@@", GRAPH, "public")
+
+        assert _classes(store) == {
+            "Customers"
+        }, "a failed load destroyed the previous ontology"
+
+    def test_graph_survives_repeated_failures(self, store):
+        """Retrying a bad ontology must not erode the good one."""
+        store.load_ontology(_ttl("Customers", "Orders"), GRAPH, "public")
+
+        for _ in range(5):
+            with pytest.raises(Exception):
+                store.load_ontology("@@@ broken", GRAPH, "public")
+
+        assert _classes(store) == {"Customers", "Orders"}
+
+    def test_staging_graphs_are_not_left_behind(self, store):
+        """Clearing a graph's quads does not unregister it in pyoxigraph.
+
+        Without an explicit remove_graph the store accumulated one empty
+        staging graph per load, which show up in named_graphs() and in
+        cross-graph SPARQL.
+        """
+        store.load_ontology(_ttl("Customers"), GRAPH, "public")
+        for _ in range(5):
+            with pytest.raises(Exception):
+                store.load_ontology("@@@ broken", GRAPH, "public")
+            store.load_ontology(_ttl("Customers"), GRAPH, "public")
+
+        graphs = [str(g) for g in store.store.named_graphs()]
+        assert not [
+            g for g in graphs if "__staging" in g
+        ], f"staging graphs leaked: {graphs}"
+        assert len(graphs) == 1
+
+    def test_successful_load_still_replaces(self, store):
+        """Staging must not accidentally turn replacement back into append."""
+        store.load_ontology(_ttl("Customers", "DroppedTable"), GRAPH, "public")
+        store.load_ontology(_ttl("Customers"), GRAPH, "public")
+        assert _classes(store) == {"Customers"}
