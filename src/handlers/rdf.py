@@ -1,5 +1,6 @@
 """Oxigraph RDF store and SPARQL handler implementations."""
 
+import asyncio
 import logging
 from typing import Any
 
@@ -156,7 +157,7 @@ async def query_sparql(
                 "query": sparql_query,
             }
         elif query_type == "CONSTRUCT":
-            result = store.query_sparql_construct(sparql_query)
+            result = await asyncio.to_thread(store.query_sparql_construct, sparql_query)
             await ctx.info("SPARQL CONSTRUCT query completed")
             return {
                 "success": True,

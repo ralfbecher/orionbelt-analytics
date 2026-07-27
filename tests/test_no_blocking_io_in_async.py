@@ -28,21 +28,19 @@ SRC = PROJECT_ROOT / "src"
 # indirection further in.
 OFFLOAD_DISPATCHERS = ("to_thread", "mutate_workspace_metadata")
 
-BLOCKING_METHODS = {"read_text", "write_text", "read_bytes", "write_bytes"}
+# rdflib Graph.parse/serialize dominate the loop stalls in this codebase:
+# roughly 876 ms for a 2.65 MB Turtle file versus ~1.2 ms to read the same
+# bytes. Converting the read while leaving the parse on the loop would fix only
+# the cheap half, so they are enforced here alongside the file operations.
+BLOCKING_METHODS = {
+    "read_text",
+    "write_text",
+    "read_bytes",
+    "write_bytes",
+    "parse",
+    "serialize",
+}
 
-# KNOWN GAP -- deliberately not enforced here yet.
-#
-# rdflib Graph.parse/serialize are the dominant loop stalls in this codebase:
-# roughly 876 ms for a 2.65 MB Turtle file, versus ~1.2 ms to read the same
-# bytes. So converting the read to read_text_file() while leaving parse() on the
-# loop fixes the cheap half. Adding "parse"/"serialize" to BLOCKING_METHODS
-# above immediately reports 11+ call sites (ontology_generation, ontology_io,
-# ontology_semantic, rdf, graphrag) -- all of which are byte-identical on main,
-# i.e. pre-existing rather than introduced here.
-#
-# Converting them is tracked separately rather than folded into this change.
-# This comment exists so the guard is not mistaken for proof that no blocking
-# work remains on the event loop: it covers file I/O, not CPU-bound parsing.
 BLOCKING_MODULE_CALLS = {
     ("json", "dump"),
     ("json", "load"),
@@ -210,8 +208,17 @@ def test_async_callers_do_not_invoke_blocking_sync_helpers():
         if not is_async:
             continue
         exempt = _dispatched_spans(node)
+        # An awaited call cannot be the sync helper we are hunting. Names are
+        # matched loosely (there is no type information here), and some are
+        # shared between an async handler and a sync method -- e.g.
+        # apply_semantic_names is both. Awaiting is the precise discriminator.
+        awaited = {
+            id(n.value)
+            for n in ast.walk(node)
+            if isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+        }
         for call in ast.walk(node):
-            if not isinstance(call, ast.Call):
+            if not isinstance(call, ast.Call) or id(call) in awaited:
                 continue
             func = call.func
             name = (

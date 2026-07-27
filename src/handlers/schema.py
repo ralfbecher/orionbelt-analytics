@@ -143,7 +143,7 @@ async def discover_schema(
                     ctx=ctx,
                 )
             )
-            session.graphrag._init_task = task
+            session.graphrag.track_init_task(task)
             logger.info(
                 "GraphRAG auto-initialization started in background (from cache)"
             )
@@ -265,7 +265,7 @@ async def discover_schema(
                     ctx=ctx,
                 )
             )
-            session.graphrag._init_task = task
+            session.graphrag.track_init_task(task)
             logger.info("GraphRAG auto-initialization started in background")
             lightweight_result["graphrag_auto_init"] = "started in background"
 
@@ -405,8 +405,10 @@ async def discover_schema(
                 r2rml_generator = R2RMLGenerator(
                     base_iri=base_iri, database_name=database_name
                 )
-                r2rml_content = r2rml_generator.generate_from_schema(
-                    table_info_objects, schema_name=effective_schema
+                r2rml_content = await asyncio.to_thread(
+                    r2rml_generator.generate_from_schema,
+                    table_info_objects,
+                    schema_name=effective_schema,
                 )
 
                 schema_safe = effective_schema.replace(" ", "_").replace(".", "_")
@@ -493,7 +495,7 @@ async def discover_schema(
                 )
             )
             session = services.get_session_data(ctx)
-            session.graphrag._init_task = task
+            session.graphrag.track_init_task(task)
             logger.info(
                 "GraphRAG auto-initialization started in background (full mode)"
             )

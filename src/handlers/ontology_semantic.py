@@ -1,5 +1,6 @@
 """Semantic-naming handlers: suggest and apply business-friendly names."""
 
+import asyncio
 import json
 import logging
 import re
@@ -295,7 +296,7 @@ async def suggest_semantic_names(
                         "hint": "Check the filename from generate_ontology response",
                     }
                 generator = OntologyGenerator()
-                generator.load_from_file(str(ontology_path))
+                await asyncio.to_thread(generator.load_from_file, str(ontology_path))
                 source_filename = ontology_file
                 logger.info(f"Loaded ontology from provided file: {ontology_file}")
             else:
@@ -430,7 +431,7 @@ async def apply_semantic_names(
                     )
                     return err
                 generator = OntologyGenerator()
-                generator.load_from_file(str(ontology_path))
+                await asyncio.to_thread(generator.load_from_file, str(ontology_path))
                 logger.info(f"Loaded ontology from provided file: {ontology_file}")
             else:
                 generator, _ = services.load_ontology_from_session(ctx)
@@ -461,7 +462,9 @@ async def apply_semantic_names(
             )
             return err
 
-        updated_ontology = generator.apply_semantic_names(name_suggestions)
+        updated_ontology = await asyncio.to_thread(
+            generator.apply_semantic_names, name_suggestions
+        )
 
         new_ontology_filename = None
         if save_to_file:
@@ -584,7 +587,9 @@ async def apply_semantic_names(
 
         if not persisted:
             # Without Oxigraph, return a minimal graph summary instead of full TTL
-            result += _build_minimal_graph_summary(updated_ontology)
+            result += await asyncio.to_thread(
+                _build_minimal_graph_summary, updated_ontology
+            )
 
         return result
 

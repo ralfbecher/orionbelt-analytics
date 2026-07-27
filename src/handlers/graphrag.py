@@ -74,7 +74,9 @@ async def _auto_generate_ontology_background(
         base_uri = config.ontology_base_uri
 
         ontology_generator = OntologyGenerator(base_uri=base_uri)
-        ontology_ttl = ontology_generator.generate_from_schema(tables_info)
+        ontology_ttl = await asyncio.to_thread(
+            ontology_generator.generate_from_schema, tables_info
+        )
 
         conn_dir = (
             get_connection_dir(session.connection_id)

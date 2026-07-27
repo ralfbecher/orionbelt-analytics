@@ -242,7 +242,9 @@ async def generate_ontology(
         return err
 
     generator = services.server_state.get_ontology_generator(base_uri=base_uri)
-    ontology_ttl = generator.generate_from_schema(tables_info)
+    # rdflib work is CPU-bound (~876 ms per 2.65 MB of Turtle); off the loop
+    # so it does not freeze every concurrent session.
+    ontology_ttl = await asyncio.to_thread(generator.generate_from_schema, tables_info)
 
     # Optional SHACL conformance check (Phase 4). Default on, gated by setting;
     # never hard-fails generation — surfaces violations as a warning only.
@@ -335,7 +337,9 @@ async def generate_ontology(
 
         # Analyze for cryptic names
         generator = services.server_state.get_ontology_generator(base_uri=base_uri)
-        generator.graph.parse(data=ontology_ttl, format="turtle")
+        await asyncio.to_thread(
+            generator.graph.parse, data=ontology_ttl, format="turtle"
+        )
         generator.graph.bind("ns", generator.base_uri)
         generator.graph.bind("oba", generator.oba_ns)
         name_analysis = generator.extract_names_for_review()
@@ -430,7 +434,7 @@ To improve ontology for business users:
         # Fallback: return minimal graph summary instead of full TTL
         result = f"Ontology generated and saved to file: {ontology_filename}\n"
         result += f"Schema: {schema_name or 'default'}, Tables: {len(tables_info)}\n"
-        result += _build_minimal_graph_summary(ontology_ttl)
+        result += await asyncio.to_thread(_build_minimal_graph_summary, ontology_ttl)
 
         if cryptic_count > 0:
             result += "\n\nSEMANTIC NAME RESOLUTION RECOMMENDED"
@@ -448,4 +452,4 @@ To improve ontology for business users:
         await ctx.info(
             "Ontology file save failed but ontology generated; next call should be suggest_semantic_names to improve cryptic names"
         )
-        return _build_minimal_graph_summary(ontology_ttl)
+        return await asyncio.to_thread(_build_minimal_graph_summary, ontology_ttl)

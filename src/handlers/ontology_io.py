@@ -1,5 +1,6 @@
 """Ontology import/load handlers: load custom .ttl ontologies."""
 
+import asyncio
 import logging
 import os
 from collections.abc import Callable
@@ -196,7 +197,7 @@ async def load_my_ontology(
 
         graph = Graph()
         try:
-            graph.parse(data=ontology_content, format="turtle")
+            await asyncio.to_thread(graph.parse, data=ontology_content, format="turtle")
         except Exception as parse_error:
             return {
                 "success": False,
