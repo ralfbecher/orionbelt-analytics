@@ -3,7 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, ClassVar
 
 from rdflib import BNode, Graph, Literal, Namespace, URIRef
 from rdflib.collection import Collection
@@ -56,13 +56,13 @@ class DenormalizedField:
 class OntologyQualityReport:
     """Report on ontology generation quality."""
 
-    inferred_relationships: List[InferredRelationship] = field(default_factory=list)
-    denormalized_fields: List[DenormalizedField] = field(default_factory=list)
-    type_overrides: List[Dict[str, str]] = field(default_factory=list)
-    missing_descriptions: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    inferred_relationships: list[InferredRelationship] = field(default_factory=list)
+    denormalized_fields: list[DenormalizedField] = field(default_factory=list)
+    type_overrides: list[dict[str, str]] = field(default_factory=list)
+    missing_descriptions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert report to dictionary for JSON serialization."""
         return {
             "inferred_relationships": [
@@ -102,7 +102,7 @@ class OntologyGenerator:
     """Generates an ontology from a database schema with comprehensive database annotations."""
 
     # Patterns for inferring FK relationships from column names
-    FK_PATTERNS = [
+    FK_PATTERNS: ClassVar[list[tuple[str, str]]] = [
         # Pattern: suppliercountryid → country/countries
         (r"^(.+?)(?:_)?id$", "suffix_id"),
         # Pattern: id_country → country
@@ -118,7 +118,7 @@ class OntologyGenerator:
     ]
 
     # Column name patterns that indicate quantities (should be integers)
-    QUANTITY_PATTERNS = [
+    QUANTITY_PATTERNS: ClassVar[list[str]] = [
         "quantity",
         "qty",
         "count",
@@ -130,7 +130,13 @@ class OntologyGenerator:
     ]
 
     # Patterns for denormalized text fields
-    DENORM_SUFFIXES = ["name", "title", "description", "desc", "label"]
+    DENORM_SUFFIXES: ClassVar[list[str]] = [
+        "name",
+        "title",
+        "description",
+        "desc",
+        "label",
+    ]
 
     def __init__(self, base_uri: str = DEFAULT_BASE_URI):
         self.graph = Graph()
@@ -147,9 +153,9 @@ class OntologyGenerator:
         self.graph.bind("xsd", XSD)
 
         # Quality tracking
-        self.quality_report: Optional[OntologyQualityReport] = None
-        self._table_lookup: Dict[str, TableInfo] = {}
-        self._pk_columns: Dict[str, List[str]] = {}  # table -> primary key columns
+        self.quality_report: OntologyQualityReport | None = None
+        self._table_lookup: dict[str, TableInfo] = {}
+        self._pk_columns: dict[str, list[str]] = {}  # table -> primary key columns
 
     def load_from_file(self, file_path: str) -> None:
         """Load an existing ontology from a Turtle file.
@@ -191,7 +197,7 @@ class OntologyGenerator:
 
     def generate_from_schema(
         self,
-        tables_info: List[TableInfo],
+        tables_info: list[TableInfo],
         include_inferred_relationships: bool = True,
         annotate_denormalized: bool = True,
     ) -> str:
@@ -267,7 +273,7 @@ class OntologyGenerator:
 
         return self.graph.serialize(format="turtle")
 
-    def get_quality_report(self) -> Optional[OntologyQualityReport]:
+    def get_quality_report(self) -> OntologyQualityReport | None:
         """Get the quality report from the last generation.
 
         Returns:
@@ -368,7 +374,7 @@ class OntologyGenerator:
             self.graph.add((prop_uri, RDFS.comment, Literal(column.comment)))
 
     def _add_relationship_to_ontology(
-        self, table_uri: URIRef, fk: Dict[str, str], table_name: str
+        self, table_uri: URIRef, fk: dict[str, str], table_name: str
     ) -> None:
         """Add a foreign key relationship as an object property with comprehensive database annotations."""
         referenced_table = fk.get("referenced_table")
@@ -466,7 +472,7 @@ class OntologyGenerator:
 
         return cleaned or "unnamed"
 
-    def _build_table_lookup(self, tables_info: List[TableInfo]) -> None:
+    def _build_table_lookup(self, tables_info: list[TableInfo]) -> None:
         """Build lookup structures for tables and their primary keys."""
         self._table_lookup = {}
         self._pk_columns = {}
@@ -487,7 +493,7 @@ class OntologyGenerator:
             # Store primary key columns
             self._pk_columns[table.name] = table.primary_keys
 
-    def _find_matching_table(self, name: str) -> Optional[TableInfo]:
+    def _find_matching_table(self, name: str) -> TableInfo | None:
         """Find a table that matches the given name (handles pluralization)."""
         name_lower = name.lower()
 
@@ -524,8 +530,8 @@ class OntologyGenerator:
         return None
 
     def _infer_implicit_relationships(
-        self, tables_info: List[TableInfo]
-    ) -> List[InferredRelationship]:
+        self, tables_info: list[TableInfo]
+    ) -> list[InferredRelationship]:
         """Detect likely FK relationships from column naming patterns.
 
         This method analyzes column names to find implicit relationships that
@@ -537,8 +543,8 @@ class OntologyGenerator:
         Returns:
             List of inferred relationships with confidence levels
         """
-        inferred: List[InferredRelationship] = []
-        existing_fks: Set[Tuple[str, str]] = set()
+        inferred: list[InferredRelationship] = []
+        existing_fks: set[tuple[str, str]] = set()
 
         # Build set of existing declared FKs to avoid duplicates
         for table in tables_info:
@@ -546,7 +552,7 @@ class OntologyGenerator:
                 existing_fks.add((table.name.lower(), fk["column"].lower()))
 
         # Build table name variations for matching (include singular/plural forms)
-        table_name_variations: Dict[str, TableInfo] = {}
+        table_name_variations: dict[str, TableInfo] = {}
         for t in tables_info:
             name_lower = t.name.lower()
             table_name_variations[name_lower] = t
@@ -675,9 +681,9 @@ class OntologyGenerator:
         if target_pk_cols:
             target_pk_type = target_pk_cols[0].data_type.lower()
             col_type = column.data_type.lower()
-            if "int" in col_type and "int" in target_pk_type:
-                score += 2
-            elif col_type == target_pk_type:
+            if (
+                "int" in col_type and "int" in target_pk_type
+            ) or col_type == target_pk_type:
                 score += 2
 
         # Higher confidence if exact table name match (vs plural/singular variation)
@@ -688,7 +694,7 @@ class OntologyGenerator:
 
         # Higher confidence for common FK naming patterns
         col_lower = column.name.lower()
-        if col_lower.endswith("id") or col_lower.endswith("_id"):
+        if col_lower.endswith(("id", "_id")):
             score += 1
 
         if score >= 4:
@@ -698,8 +704,8 @@ class OntologyGenerator:
         return "low"
 
     def _detect_denormalized_fields(
-        self, tables_info: List[TableInfo]
-    ) -> List[DenormalizedField]:
+        self, tables_info: list[TableInfo]
+    ) -> list[DenormalizedField]:
         """Detect likely denormalized text fields that duplicate data from other tables.
 
         Denormalized fields store redundant copies of data (like customer names in orders)
@@ -711,10 +717,10 @@ class OntologyGenerator:
         Returns:
             List of detected denormalized fields
         """
-        denormalized: List[DenormalizedField] = []
+        denormalized: list[DenormalizedField] = []
 
         # Build table name variations for matching (singular and plural)
-        table_name_variations: Dict[str, str] = {}
+        table_name_variations: dict[str, str] = {}
         for t in tables_info:
             name_lower = t.name.lower()
             table_name_variations[name_lower] = t.name
@@ -920,7 +926,7 @@ class OntologyGenerator:
                 (prop_uri, self.oba_ns.denormalizationWarning, Literal(denorm.warning))
             )
 
-    def _add_disjoint_axioms(self, tables_info: List[TableInfo]) -> None:
+    def _add_disjoint_axioms(self, tables_info: list[TableInfo]) -> None:
         """Add owl:disjointWith axioms between sibling tables that share a dimension.
 
         Two tables are considered siblings when they both hold foreign keys to
@@ -932,7 +938,7 @@ class OntologyGenerator:
             tables_info: List of table information
         """
         # Build mapping: referenced_table -> set of source tables that FK into it
-        dimension_to_sources: Dict[str, Set[str]] = {}
+        dimension_to_sources: dict[str, set[str]] = {}
         for table in tables_info:
             for fk in table.foreign_keys:
                 ref = fk.get("referenced_table", "")
@@ -959,7 +965,7 @@ class OntologyGenerator:
         # disjoint would contradict the relationship and feed OBQC bad input.
         # So derive the exclusion set from both declared FKs and the inferred
         # many-to-one relationships already materialized in the graph.
-        fk_pairs: Set[Tuple[str, str]] = set()
+        fk_pairs: set[tuple[str, str]] = set()
         for table in tables_info:
             for fk in table.foreign_keys:
                 ref = fk.get("referenced_table", "")
@@ -980,8 +986,8 @@ class OntologyGenerator:
                     fk_pairs.add((str(ref_table), str(source_name)))
 
         # Declare disjoint pairs: siblings sharing a dimension, no FK between them
-        declared: Set[Tuple[str, str]] = set()
-        for _dim, sources in dimension_to_sources.items():
+        declared: set[tuple[str, str]] = set()
+        for sources in dimension_to_sources.values():
             source_list = sorted(sources)
             for i, a in enumerate(source_list):
                 for b in source_list[i + 1 :]:
@@ -1003,7 +1009,7 @@ class OntologyGenerator:
                             f"(sibling tables sharing a dimension)"
                         )
 
-    def _add_property_chain_axioms(self, tables_info: List[TableInfo]) -> None:
+    def _add_property_chain_axioms(self, tables_info: list[TableInfo]) -> None:
         """Add owl:propertyChainAxiom for transitive multi-hop join paths.
 
         When A→B and B→C are FK relationships but A→C has no direct FK,
@@ -1016,7 +1022,7 @@ class OntologyGenerator:
         """
         # Collect all many-to-one relationships currently in the graph
         # as (source_table_name, target_table_name, property_uri)
-        relationships: List[Tuple[str, str, URIRef]] = []
+        relationships: list[tuple[str, str, URIRef]] = []
         for subj in self.graph.subjects(RDF.type, OWL.ObjectProperty):
             if not isinstance(subj, URIRef):
                 continue
@@ -1032,12 +1038,12 @@ class OntologyGenerator:
                     relationships.append((str(src), str(tgt), subj))
 
         # Build lookup: (source, target) -> property URI
-        rel_lookup: Dict[Tuple[str, str], URIRef] = {}
+        rel_lookup: dict[tuple[str, str], URIRef] = {}
         for rel_src, rel_tgt, rel_uri in relationships:
             rel_lookup[(rel_src, rel_tgt)] = rel_uri
 
         # Find 2-hop chains A→B→C where A→C has no direct relationship
-        declared: Set[Tuple[str, str]] = set()
+        declared: set[tuple[str, str]] = set()
         for src_ab, tgt_ab, uri_ab in relationships:
             for src_bc, tgt_bc, uri_bc in relationships:
                 if tgt_ab != src_bc:
@@ -1081,7 +1087,7 @@ class OntologyGenerator:
                 declared.add((a, c))
                 logger.info(f"Added owl:propertyChainAxiom: {a} -> {tgt_ab} -> {c}")
 
-    def validate_enrichment_completeness(self) -> Dict[str, Any]:
+    def validate_enrichment_completeness(self) -> dict[str, Any]:
         """Check that all classes and properties have semantic descriptions.
 
         Returns:
@@ -1174,7 +1180,7 @@ class OntologyGenerator:
 
     def _map_sql_to_xsd(
         self, sql_type: str, column_name: str = "", table_name: str = ""
-    ) -> Tuple[Optional[URIRef], Optional[Dict[str, str]]]:
+    ) -> tuple[URIRef | None, dict[str, str] | None]:
         """Map SQL data types to XSD Schema datatypes with semantic awareness.
 
         This method considers column naming patterns to make smarter type decisions.
@@ -1193,20 +1199,23 @@ class OntologyGenerator:
         type_override = None
 
         # Semantic override: quantities should be integers even if stored as float/double
-        if col_lower and any(p in col_lower for p in self.QUANTITY_PATTERNS):
-            if any(
+        if (
+            col_lower
+            and any(p in col_lower for p in self.QUANTITY_PATTERNS)
+            and any(
                 t in sql_type_lower
                 for t in ["float", "double", "decimal", "numeric", "real"]
-            ):
-                type_override = {
-                    "table": table_name,
-                    "column": column_name,
-                    "original_sql_type": sql_type,
-                    "original_xsd_type": "xsd:double",
-                    "overridden_xsd_type": "xsd:integer",
-                    "reason": f"Column name '{column_name}' indicates quantity/count (should be integer)",
-                }
-                return XSD.integer, type_override
+            )
+        ):
+            type_override = {
+                "table": table_name,
+                "column": column_name,
+                "original_sql_type": sql_type,
+                "original_xsd_type": "xsd:double",
+                "overridden_xsd_type": "xsd:integer",
+                "reason": f"Column name '{column_name}' indicates quantity/count (should be integer)",
+            }
+            return XSD.integer, type_override
 
         # Integer types - check tinyint first before checking for "int"
         if "tinyint" in sql_type_lower:
@@ -1256,7 +1265,7 @@ class OntologyGenerator:
         logger.warning(f"Unknown SQL type '{sql_type}', mapping to xsd:string")
         return XSD.string, None
 
-    def apply_semantic_descriptions(self, descriptions: Dict[str, Any]) -> None:
+    def apply_semantic_descriptions(self, descriptions: dict[str, Any]) -> None:
         """Apply LLM-generated semantic descriptions to the ontology.
 
         This method allows applying rich, context-aware descriptions generated
@@ -1399,8 +1408,8 @@ class OntologyGenerator:
         return self.graph.serialize(format="turtle")
 
     def get_enrichment_data(
-        self, tables_info: List[TableInfo], sample_data: Dict[str, List[Dict[str, Any]]]
-    ) -> Dict[str, Any]:
+        self, tables_info: list[TableInfo], sample_data: dict[str, list[dict[str, Any]]]
+    ) -> dict[str, Any]:
         """Generate enrichment data structure for LLM processing.
 
         Args:
@@ -1413,7 +1422,7 @@ class OntologyGenerator:
         schema_data = []
 
         for table_info in tables_info:
-            table_data: Dict[str, Any] = {
+            table_data: dict[str, Any] = {
                 "table_name": table_info.name,
                 "schema": table_info.schema,
                 "row_count": table_info.row_count,
@@ -1437,7 +1446,7 @@ class OntologyGenerator:
                 table_data["columns"].append(column_data)
 
             # Add sample data if available (limit to 3 rows)
-            if table_info.name in sample_data and sample_data[table_info.name]:
+            if sample_data.get(table_info.name):
                 table_data["sample_data"] = sample_data[table_info.name][:3]
 
             schema_data.append(table_data)
@@ -1481,7 +1490,7 @@ class OntologyGenerator:
         return {"schema_data": schema_data, "instructions": instructions}
 
     def apply_enrichment(
-        self, enrichment_suggestions: Dict[str, List[Dict[str, Any]]]
+        self, enrichment_suggestions: dict[str, list[dict[str, Any]]]
     ) -> None:
         """Apply enrichment suggestions to the ontology.
 
@@ -1575,7 +1584,7 @@ class OntologyGenerator:
         logger.info("Finished applying enrichment suggestions")
 
     def enrich_with_llm(
-        self, tables_info: List[TableInfo], sample_data: Dict[str, List[Dict[str, Any]]]
+        self, tables_info: list[TableInfo], sample_data: dict[str, list[dict[str, Any]]]
     ) -> str:
         """Generate basic ontology with optional LLM enrichment.
 
@@ -1592,7 +1601,7 @@ class OntologyGenerator:
         logger.info("Generating basic ontology (LLM enrichment handled by MCP tools)")
         return self.generate_from_schema(tables_info)
 
-    def extract_names_for_review(self, compact: bool = False) -> Dict[str, Any]:
+    def extract_names_for_review(self, compact: bool = False) -> dict[str, Any]:
         """Extract all class, property, and relationship names from the ontology for LLM review.
 
         This method analyzes the current ontology graph and extracts all names that might
@@ -1621,7 +1630,7 @@ class OntologyGenerator:
             if subject == OWL.Class:
                 continue
 
-            class_info: Dict[str, Any] = {
+            class_info: dict[str, Any] = {
                 "uri": str(subject),
                 "local_name": str(subject).split("/")[-1]
                 if "/" in str(subject)
@@ -1655,7 +1664,7 @@ class OntologyGenerator:
 
         # Extract data properties (columns)
         for subject in self.graph.subjects(RDF.type, OWL.DatatypeProperty):
-            prop_info: Dict[str, Any] = {
+            prop_info: dict[str, Any] = {
                 "uri": str(subject),
                 "local_name": str(subject).split("/")[-1]
                 if "/" in str(subject)
@@ -1695,7 +1704,7 @@ class OntologyGenerator:
 
         # Extract object properties (relationships)
         for subject in self.graph.subjects(RDF.type, OWL.ObjectProperty):
-            rel_info: Dict[str, Any] = {
+            rel_info: dict[str, Any] = {
                 "uri": str(subject),
                 "local_name": str(subject).split("/")[-1]
                 if "/" in str(subject)
@@ -1756,7 +1765,7 @@ class OntologyGenerator:
         # with limited context windows can still see all names at a glance.
         if compact:
 
-            def _compact_class(c: Dict[str, Any]) -> Dict[str, Any]:
+            def _compact_class(c: dict[str, Any]) -> dict[str, Any]:
                 if c.get("needs_review", {}).get("is_cryptic"):
                     return c
                 return {
@@ -1764,7 +1773,7 @@ class OntologyGenerator:
                     "table_name": c.get("table_name"),
                 }
 
-            def _compact_prop(p: Dict[str, Any]) -> Dict[str, Any]:
+            def _compact_prop(p: dict[str, Any]) -> dict[str, Any]:
                 if p.get("needs_review", {}).get("is_cryptic"):
                     return p
                 return {
@@ -1772,7 +1781,7 @@ class OntologyGenerator:
                     "table_name": p.get("table_name"),
                 }
 
-            def _compact_rel(r: Dict[str, Any]) -> Dict[str, Any]:
+            def _compact_rel(r: dict[str, Any]) -> dict[str, Any]:
                 if r.get("needs_review", {}).get("is_cryptic"):
                     return r
                 return {"local_name": r["local_name"]}
@@ -1812,7 +1821,7 @@ class OntologyGenerator:
             return True
         return word_frequency(token, "en") >= _WORD_FREQ_THRESHOLD
 
-    def _analyze_name_quality(self, name: str) -> Dict[str, Any]:
+    def _analyze_name_quality(self, name: str) -> dict[str, Any]:
         """Analyze if a name looks like an abbreviation or cryptic identifier.
 
         Uses a combination of structural heuristics (length, casing, suffix
@@ -1900,7 +1909,7 @@ class OntologyGenerator:
             else "low",
         }
 
-    def apply_semantic_names(self, name_suggestions: Dict[str, Any]) -> str:
+    def apply_semantic_names(self, name_suggestions: dict[str, Any]) -> str:
         """Apply suggested semantic names to the ontology.
 
         This method takes LLM-generated name suggestions and updates the ontology
@@ -1992,7 +2001,7 @@ class OntologyGenerator:
                 changing_uris = {
                     c["prop_uri"] for c in proposed_changes if c["suggested"]
                 }
-                existing_labels: Dict[str, URIRef] = {}
+                existing_labels: dict[str, URIRef] = {}
                 for rdf_type in (OWL.DatatypeProperty, OWL.ObjectProperty):
                     for s, _, _ in self.graph.triples((None, RDF.type, rdf_type)):
                         if isinstance(s, URIRef) and s not in changing_uris:
@@ -2000,7 +2009,7 @@ class OntologyGenerator:
                                 existing_labels[str(label).lower()] = s
 
                 # Group proposed changes by suggested label (case-insensitive)
-                label_groups: Dict[str, list] = {}
+                label_groups: dict[str, list] = {}
                 for change in proposed_changes:
                     if change["suggested"]:
                         key = change["suggested"].lower()

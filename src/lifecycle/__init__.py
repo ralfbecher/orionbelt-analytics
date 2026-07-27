@@ -14,10 +14,10 @@ from .metadata import (
 )
 
 __all__ = [
-    "VersionMetadataManager",
-    "VersionInfo",
-    "RetentionPolicy",
     "DataCleanupManager",
-    "update_workspace_section",
+    "RetentionPolicy",
+    "VersionInfo",
+    "VersionMetadataManager",
     "update_workspace_rdf",
+    "update_workspace_section",
 ]

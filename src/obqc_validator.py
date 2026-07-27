@@ -8,7 +8,7 @@ and fan-trap patterns without using LLM.
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 import sqlglot
 from rdflib import Graph, Namespace, URIRef
@@ -50,9 +50,9 @@ class OBQCIssue:
     issue_type: OBQCIssueType
     severity: OBQCSeverity
     message: str
-    location: Optional[str] = None
-    suggestion: Optional[str] = None
-    related_entities: List[str] = field(default_factory=list)
+    location: str | None = None
+    suggestion: str | None = None
+    related_entities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -60,16 +60,16 @@ class OBQCResult:
     """Complete OBQC validation result."""
 
     is_valid: bool
-    issues: List[OBQCIssue] = field(default_factory=list)
-    parsed_tables: List[str] = field(default_factory=list)
-    parsed_columns: List[str] = field(default_factory=list)
-    parsed_joins: List[Dict[str, Any]] = field(default_factory=list)
+    issues: list[OBQCIssue] = field(default_factory=list)
+    parsed_tables: list[str] = field(default_factory=list)
+    parsed_columns: list[str] = field(default_factory=list)
+    parsed_joins: list[dict[str, Any]] = field(default_factory=list)
     has_aggregation: bool = False
     has_group_by: bool = False
     fan_trap_risk: bool = False
     ontology_compatible: bool = True  # Whether ontology has oba: annotations
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert result to dictionary for JSON serialization."""
         return {
             "obqc_valid": self.is_valid,
@@ -107,12 +107,12 @@ class ColumnSchema:
     name: str
     table_name: str
     sql_data_type: str
-    xsd_type: Optional[URIRef] = None
+    xsd_type: URIRef | None = None
     is_nullable: bool = True
     is_primary_key: bool = False
     is_foreign_key: bool = False
-    fk_referenced_table: Optional[str] = None
-    fk_referenced_column: Optional[str] = None
+    fk_referenced_table: str | None = None
+    fk_referenced_column: str | None = None
 
 
 @dataclass
@@ -121,8 +121,8 @@ class TableSchema:
 
     name: str
     schema_name: str
-    columns: Dict[str, ColumnSchema] = field(default_factory=dict)
-    primary_keys: List[str] = field(default_factory=list)
+    columns: dict[str, ColumnSchema] = field(default_factory=dict)
+    primary_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -141,8 +141,8 @@ class RelationshipInfo:
 class OntologySchema:
     """Cached schema information extracted from ontology."""
 
-    tables: Dict[str, TableSchema] = field(default_factory=dict)
-    relationships: Dict[str, RelationshipInfo] = field(default_factory=dict)
+    tables: dict[str, TableSchema] = field(default_factory=dict)
+    relationships: dict[str, RelationshipInfo] = field(default_factory=dict)
 
 
 class OBQCValidator:
@@ -162,15 +162,15 @@ class OBQCValidator:
     DIALECT_MAP = DB_SQLGLOT_DIALECTS
 
     def __init__(self) -> None:
-        self._schema_cache: Optional[OntologySchema] = None
-        self._graph: Optional[Graph] = None
-        self._base_uri: Optional[Namespace] = None
-        self._oba_ns: Optional[Namespace] = None
+        self._schema_cache: OntologySchema | None = None
+        self._graph: Graph | None = None
+        self._base_uri: Namespace | None = None
+        self._oba_ns: Namespace | None = None
         self._is_compatible: bool = False  # Whether ontology has oba: annotations
         # Fan-trap topology read straight from the ontology axioms (Phase 2):
         # pairs of lower-cased table names declared owl:disjointWith each other
         # (sibling facts sharing a dimension — the canonical fan-trap shape).
-        self._disjoint_pairs: Set[frozenset] = set()
+        self._disjoint_pairs: set[frozenset] = set()
 
     def load_ontology(self, ontology_graph: Graph, base_uri: str) -> None:
         """Load and cache schema from ontology graph.
@@ -321,7 +321,7 @@ class OBQCValidator:
 
         return schema
 
-    def _extract_disjoint_pairs(self) -> Set[frozenset]:
+    def _extract_disjoint_pairs(self) -> set[frozenset]:
         """Read owl:disjointWith axioms as pairs of lower-cased table names.
 
         The generator emits owl:disjointWith between sibling fact tables that
@@ -329,7 +329,7 @@ class OBQCValidator:
         topology. Reading it here lets OBQC ground fan-trap detection in the
         ontology instead of re-deriving it from the relationship heuristic.
         """
-        pairs: Set[frozenset] = set()
+        pairs: set[frozenset] = set()
         if self._graph is None or self._oba_ns is None:
             return pairs
 
@@ -341,7 +341,7 @@ class OBQCValidator:
 
         return pairs
 
-    def _get_literal(self, subject: Node, predicate: URIRef) -> Optional[str]:
+    def _get_literal(self, subject: Node, predicate: URIRef) -> str | None:
         """Get string value of a literal predicate."""
         if self._graph is None:
             return None
@@ -405,7 +405,7 @@ class OBQCValidator:
                 OBQCIssue(
                     issue_type=OBQCIssueType.TABLE_NOT_FOUND,
                     severity=OBQCSeverity.ERROR,
-                    message=f"SQL parse error: {str(e)}",
+                    message=f"SQL parse error: {e!s}",
                     location="Query",
                 )
             )
@@ -451,7 +451,7 @@ class OBQCValidator:
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
         for join in parsed.find_all(exp.Join):
-            join_info: Dict[str, Any] = {
+            join_info: dict[str, Any] = {
                 "type": join.kind or "INNER",
                 "table": None,
                 "on_condition": None,
@@ -527,14 +527,16 @@ class OBQCValidator:
             else:
                 # Unqualified column - check for ambiguity
                 col_key = col_ref.lower()
-                found_in_tables: List[str] = []
+                found_in_tables: list[str] = []
 
                 # Only check tables that are actually in the query
                 for table_name in result.parsed_tables:
                     table_key = table_name.lower()
-                    if table_key in self._schema_cache.tables:
-                        if col_key in self._schema_cache.tables[table_key].columns:
-                            found_in_tables.append(table_name)
+                    if (
+                        table_key in self._schema_cache.tables
+                        and col_key in self._schema_cache.tables[table_key].columns
+                    ):
+                        found_in_tables.append(table_name)
 
                 if len(found_in_tables) == 0 and len(result.parsed_tables) > 0:
                     result.issues.append(
@@ -608,7 +610,7 @@ class OBQCValidator:
                 )
 
     def _is_valid_join_condition(
-        self, join_table: Optional[str], on_condition: str, all_tables: List[str]
+        self, join_table: str | None, on_condition: str, all_tables: list[str]
     ) -> bool:
         """Check if join condition matches a declared relationship."""
         if self._schema_cache is None or join_table is None:
@@ -618,22 +620,21 @@ class OBQCValidator:
         join_table_lower = join_table.lower()
 
         for rel_info in self._schema_cache.relationships.values():
-            # Check if relationship involves the join table
+            # Relationship must involve the join table AND the condition must
+            # reference both of its FK columns.
             if (
                 rel_info.from_table.lower() == join_table_lower
                 or rel_info.to_table.lower() == join_table_lower
+            ) and (
+                rel_info.from_column.lower() in on_lower
+                and rel_info.to_column.lower() in on_lower
             ):
-                # Check if condition references the FK columns
-                if (
-                    rel_info.from_column.lower() in on_lower
-                    and rel_info.to_column.lower() in on_lower
-                ):
-                    return True
+                return True
         return False
 
     def _get_suggested_join(
-        self, join_table: Optional[str], all_tables: List[str]
-    ) -> Optional[str]:
+        self, join_table: str | None, all_tables: list[str]
+    ) -> str | None:
         """Get suggested join condition from ontology relationships."""
         if self._schema_cache is None or join_table is None:
             return None
@@ -642,12 +643,16 @@ class OBQCValidator:
         all_tables_lower = [t.lower() for t in all_tables]
 
         for rel_info in self._schema_cache.relationships.values():
-            if rel_info.from_table.lower() == join_table_lower:
-                if rel_info.to_table.lower() in all_tables_lower:
-                    return f"Suggested: {rel_info.join_condition}"
-            elif rel_info.to_table.lower() == join_table_lower:
-                if rel_info.from_table.lower() in all_tables_lower:
-                    return f"Suggested: {rel_info.join_condition}"
+            if (
+                rel_info.from_table.lower() == join_table_lower
+                and rel_info.to_table.lower() in all_tables_lower
+            ):
+                return f"Suggested: {rel_info.join_condition}"
+            if (
+                rel_info.to_table.lower() == join_table_lower
+                and rel_info.from_table.lower() in all_tables_lower
+            ):
+                return f"Suggested: {rel_info.join_condition}"
         return None
 
     def _validate_type_compatibility(
@@ -663,19 +668,22 @@ class OBQCValidator:
             left_type = self._infer_type(left)
             right_type = self._infer_type(right)
 
-            if left_type and right_type:
-                if not self._types_compatible(left_type, right_type):
-                    result.issues.append(
-                        OBQCIssue(
-                            issue_type=OBQCIssueType.TYPE_MISMATCH,
-                            severity=OBQCSeverity.WARNING,
-                            message=f"Type mismatch: {self._type_name(left_type)} vs {self._type_name(right_type)}",
-                            location="WHERE/ON clause",
-                            suggestion="Ensure compared values have compatible types",
-                        )
+            if (
+                left_type
+                and right_type
+                and not self._types_compatible(left_type, right_type)
+            ):
+                result.issues.append(
+                    OBQCIssue(
+                        issue_type=OBQCIssueType.TYPE_MISMATCH,
+                        severity=OBQCSeverity.WARNING,
+                        message=f"Type mismatch: {self._type_name(left_type)} vs {self._type_name(right_type)}",
+                        location="WHERE/ON clause",
+                        suggestion="Ensure compared values have compatible types",
                     )
+                )
 
-    def _infer_type(self, expr: exp.Expr) -> Optional[str]:
+    def _infer_type(self, expr: exp.Expr) -> str | None:
         """Infer the XSD type of an expression from ontology."""
         if self._schema_cache is None:
             return None
@@ -750,7 +758,7 @@ class OBQCValidator:
             expressions = select.args.get("expressions", [])
 
             # Get GROUP BY columns
-            group_by_cols: Set[str] = set()
+            group_by_cols: set[str] = set()
             if select.args.get("group"):
                 for group_expr in select.args["group"].expressions:
                     if isinstance(group_expr, exp.Column):
@@ -761,8 +769,8 @@ class OBQCValidator:
 
             # Check each SELECT expression
             for expr in expressions:
-                col_name: Optional[str] = None
-                col_table: Optional[str] = None
+                col_name: str | None = None
+                col_table: str | None = None
 
                 if isinstance(expr, exp.Column):
                     col_name = expr.name
@@ -813,13 +821,18 @@ class OBQCValidator:
 
         for agg in select.find_all(*agg_types):
             for col in agg.find_all(exp.Column):
-                if isinstance(expr, exp.Column):
-                    if col.name == expr.name:
-                        if col.table == expr.table:
-                            return True
-                elif isinstance(expr, exp.Alias) and isinstance(expr.this, exp.Column):
-                    if col.name == expr.this.name:
-                        return True
+                if (
+                    isinstance(expr, exp.Column)
+                    and col.name == expr.name
+                    and col.table == expr.table
+                ):
+                    return True
+                if (
+                    isinstance(expr, exp.Alias)
+                    and isinstance(expr.this, exp.Column)
+                    and col.name == expr.this.name
+                ):
+                    return True
         return False
 
     def _detect_fan_trap(self, result: OBQCResult) -> None:
@@ -841,7 +854,7 @@ class OBQCValidator:
 
         # --- Axiom-grounded path: disjoint sibling facts in the same query ----
         queried = {t.lower() for t in result.parsed_tables}
-        disjoint_hits: Set[frozenset] = {
+        disjoint_hits: set[frozenset] = {
             pair for pair in self._disjoint_pairs if pair <= queried
         }
         if disjoint_hits:
@@ -869,7 +882,7 @@ class OBQCValidator:
 
         # --- Heuristic fallback: count one-to-many joins (no disjointness axioms)
         one_to_many_count = 0
-        involved_tables: List[str] = []
+        involved_tables: list[str] = []
 
         for join_info in result.parsed_joins:
             join_table = join_info.get("table")
@@ -877,14 +890,15 @@ class OBQCValidator:
                 join_table_lower = join_table.lower()
                 for rel_info in self._schema_cache.relationships.values():
                     # A table is on the "many" side in these cases
-                    if rel_info.relationship_type == "one_to_many":
-                        if rel_info.to_table.lower() == join_table_lower:
-                            one_to_many_count += 1
-                            involved_tables.append(join_table)
-                    elif rel_info.relationship_type == "many_to_one":
-                        if rel_info.from_table.lower() == join_table_lower:
-                            one_to_many_count += 1
-                            involved_tables.append(join_table)
+                    if (
+                        rel_info.relationship_type == "one_to_many"
+                        and rel_info.to_table.lower() == join_table_lower
+                    ) or (
+                        rel_info.relationship_type == "many_to_one"
+                        and rel_info.from_table.lower() == join_table_lower
+                    ):
+                        one_to_many_count += 1
+                        involved_tables.append(join_table)
 
         if one_to_many_count >= 2:
             result.fan_trap_risk = True

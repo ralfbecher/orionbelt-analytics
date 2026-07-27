@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from types import TracebackType
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Self
 
 import aiohttp
 
@@ -16,13 +16,9 @@ logger = logging.getLogger(__name__)
 class DremioAuthError(Exception):
     """Authentication error with Dremio."""
 
-    pass
-
 
 class DremioQueryError(Exception):
     """Query execution error in Dremio."""
-
-    pass
 
 
 def _sanitize_sql_for_logging(sql: str, max_length: int = 200) -> str:
@@ -42,19 +38,19 @@ class DremioClient:
     def __init__(
         self,
         uri: str,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        token: Optional[str] = None,
-        pat: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
+        token: str | None = None,
+        pat: str | None = None,
     ):
         self.uri = uri.rstrip("/")
         self.username = username
         self.password = password
         self.token = token
         self.pat = pat  # Personal Access Token (preferred)
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.session: aiohttp.ClientSession | None = None
 
-    async def __aenter__(self) -> "DremioClient":
+    async def __aenter__(self) -> Self:
         self.session = aiohttp.ClientSession()
         if self.pat:
             # Use PAT directly as token (following official dremio-mcp approach)
@@ -67,9 +63,9 @@ class DremioClient:
 
     async def __aexit__(
         self,
-        _exc_type: Optional[Type[BaseException]],
-        _exc_val: Optional[BaseException],
-        _exc_tb: Optional[TracebackType],
+        _exc_type: type[BaseException] | None,
+        _exc_val: BaseException | None,
+        _exc_tb: TracebackType | None,
     ) -> None:
         if self.session:
             await self.session.close()
@@ -108,7 +104,7 @@ class DremioClient:
 
     async def _make_request(
         self, method: str, endpoint: str, **kwargs: Any
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Make authenticated request to Dremio API."""
         if not self.token:
             raise DremioAuthError("No authentication token available")
@@ -134,7 +130,7 @@ class DremioClient:
                 if response.status == 401:
                     raise DremioAuthError("Authentication token expired or invalid")
 
-                data: Dict[str, Any]
+                data: dict[str, Any]
                 if response.content_type == "application/json":
                     data = await response.json()
                 else:
@@ -149,7 +145,7 @@ class DremioClient:
             logger.error(f"Network error during API request: {e}")
             raise DremioQueryError(f"Network error: {e}")
 
-    async def execute_query(self, sql: str, limit: int = 1000) -> Dict[str, Any]:
+    async def execute_query(self, sql: str, limit: int = 1000) -> dict[str, Any]:
         """Execute SQL query and return results."""
         try:
             # Log the SQL query being executed
@@ -227,7 +223,7 @@ class DremioClient:
             logger.error(f"Query execution failed: {e}")
             return {"success": False, "error": str(e), "error_type": type(e).__name__}
 
-    async def get_catalogs(self) -> List[Dict[str, Any]]:
+    async def get_catalogs(self) -> list[dict[str, Any]]:
         """Get list of catalogs (schemas)."""
         try:
             catalogs = await self._make_request("GET", "/api/v3/catalog")
@@ -256,7 +252,7 @@ class DremioClient:
             logger.error(f"Failed to get catalogs: {e}")
             return []
 
-    async def get_catalog_info(self, path: Union[List[str], str]) -> Dict[str, Any]:
+    async def get_catalog_info(self, path: list[str] | str) -> dict[str, Any]:
         """Get information about a catalog item."""
         try:
             # For nested paths, join with slashes (Dremio REST API requirement)
@@ -273,7 +269,7 @@ class DremioClient:
             logger.error(f"Failed to get catalog info for {path}: {e}")
             return {}
 
-    async def test_connection(self) -> Dict[str, Any]:
+    async def test_connection(self) -> dict[str, Any]:
         """Test the connection to Dremio."""
         try:
             # Simple query to test connection
@@ -293,19 +289,19 @@ class DremioClient:
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Connection test failed: {str(e)}",
+                "error": f"Connection test failed: {e!s}",
                 "error_type": type(e).__name__,
             }
 
 
 async def create_dremio_client(
-    host: Optional[str] = None,
+    host: str | None = None,
     port: int = 9047,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    token: Optional[str] = None,
-    pat: Optional[str] = None,
-    uri: Optional[str] = None,
+    username: str | None = None,
+    password: str | None = None,
+    token: str | None = None,
+    pat: str | None = None,
+    uri: str | None = None,
     ssl: bool = True,
 ) -> DremioClient:
     """Create and authenticate Dremio client.

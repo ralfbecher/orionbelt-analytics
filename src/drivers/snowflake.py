@@ -1,7 +1,8 @@
 """Snowflake database driver."""
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import quote_plus
 
 from sqlalchemy import MetaData, create_engine, inspect, text
@@ -29,8 +30,8 @@ class SnowflakeDriver(DatabaseDriver):
     db_type = "snowflake"
 
     def __init__(self, pool_size: int = 5, max_overflow: int = 10):
-        self.engine: Optional[Engine] = None
-        self.metadata: Optional[MetaData] = None
+        self.engine: Engine | None = None
+        self.metadata: MetaData | None = None
         self._pool_size = pool_size
         self._max_overflow = max_overflow
 
@@ -112,7 +113,7 @@ class SnowflakeDriver(DatabaseDriver):
     # Schema introspection
     # ------------------------------------------------------------------
 
-    def get_schemas(self) -> List[str]:
+    def get_schemas(self) -> list[str]:
         excluded_schemas = "', '".join(SNOWFLAKE_SYSTEM_SCHEMAS)
         query = text(
             f"""
@@ -131,7 +132,7 @@ class SnowflakeDriver(DatabaseDriver):
             logger.error(f"Failed to get schemas: {e}")
             return []
 
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -168,7 +169,7 @@ class SnowflakeDriver(DatabaseDriver):
     def prefetch_schema_constraints(
         self,
         schema_name: str,
-        connection_info: Dict[str, Any],
+        connection_info: dict[str, Any],
         cache_get: Callable[..., Any],
         cache_store: Callable[..., Any],
         log_sql: Callable[..., Any],
@@ -205,7 +206,7 @@ class SnowflakeDriver(DatabaseDriver):
             assert self.engine is not None
             with self.engine.connect() as conn:
                 # --- Primary keys ---
-                pk_by_table: Dict[str, List[str]] = {}
+                pk_by_table: dict[str, list[str]] = {}
                 pk_success = False
                 try:
                     pk_query = text(f"SHOW PRIMARY KEYS IN SCHEMA {full_schema_path}")
@@ -230,7 +231,7 @@ class SnowflakeDriver(DatabaseDriver):
                     cache_store(pk_cache_key, pk_by_table)
 
                 # --- Foreign keys ---
-                fk_by_table: Dict[str, List[Dict]] = {}
+                fk_by_table: dict[str, list[dict]] = {}
                 fk_success = False
                 try:
                     fk_query = text(f"SHOW IMPORTED KEYS IN SCHEMA {full_schema_path}")
@@ -269,7 +270,7 @@ class SnowflakeDriver(DatabaseDriver):
 
                 # --- Columns ---
                 cols_cache_key = f"schema_cols:{schema_name}"
-                cols_by_table: Dict[str, List[Dict]] = {}
+                cols_by_table: dict[str, list[dict]] = {}
                 cols_success = False
                 try:
                     cols_query = text(
@@ -324,10 +325,10 @@ class SnowflakeDriver(DatabaseDriver):
     def analyze_table(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
-        cache_get: Optional[Callable[..., Any]] = None,
-        log_sql: Optional[Callable[..., Any]] = None,
-    ) -> Optional[TableInfo]:
+        schema_name: str | None = None,
+        cache_get: Callable[..., Any] | None = None,
+        log_sql: Callable[..., Any] | None = None,
+    ) -> TableInfo | None:
         """Analyze a Snowflake table.
 
         If ``cache_get`` is provided, uses prefetched constraint data.
@@ -338,7 +339,7 @@ class SnowflakeDriver(DatabaseDriver):
                 inspector = inspect(self.engine)
 
                 table_columns = None
-                primary_keys: List[str] = []
+                primary_keys: list[str] = []
                 table_fks: list = []
 
                 if schema_name and cache_get is not None:
@@ -504,7 +505,7 @@ class SnowflakeDriver(DatabaseDriver):
                         logger.info(f"  FK: {fk}")
 
                 columns = []
-                foreign_keys: List[Dict[str, Any]] = []
+                foreign_keys: list[dict[str, Any]] = []
                 for col_info in table_columns:
                     column_name = col_info["name"]
                     is_pk = column_name.upper() in primary_keys_upper
@@ -575,8 +576,8 @@ class SnowflakeDriver(DatabaseDriver):
     # ------------------------------------------------------------------
 
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -613,10 +614,10 @@ class SnowflakeDriver(DatabaseDriver):
 
         return validation_result
 
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         import time as time_mod
 
-        result_data: Dict[str, Any] = {
+        result_data: dict[str, Any] = {
             "success": False,
             "data": [],
             "columns": [],
@@ -677,7 +678,7 @@ class SnowflakeDriver(DatabaseDriver):
             result_data["error_type"] = "execution_error"
             logger.error(f"SQL execution failed: {e}")
         except Exception as e:
-            result_data["error"] = f"Unexpected execution error: {str(e)}"
+            result_data["error"] = f"Unexpected execution error: {e!s}"
             result_data["error_type"] = "internal_error"
             logger.error(f"Unexpected SQL execution error: {e}")
 
@@ -686,9 +687,9 @@ class SnowflakeDriver(DatabaseDriver):
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = DEFAULT_SAMPLE_LIMIT,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < MIN_SAMPLE_LIMIT:
             limit = DEFAULT_SAMPLE_LIMIT
         elif limit > MAX_SAMPLE_LIMIT:

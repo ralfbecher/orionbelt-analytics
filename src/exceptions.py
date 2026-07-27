@@ -4,11 +4,10 @@ Provides structured error handling with consistent error types
 that replace ad-hoc string-based error_type fields.
 """
 
-from enum import Enum
-from typing import List, Optional
+from enum import StrEnum
 
 
-class ErrorType(str, Enum):
+class ErrorType(StrEnum):
     """Enumeration of all error types for consistent error reporting."""
 
     VALIDATION = "validation_error"
@@ -33,8 +32,8 @@ class OrionBeltError(Exception):
     def __init__(
         self,
         message: str,
-        details: Optional[str] = None,
-        suggestions: Optional[List[str]] = None,
+        details: str | None = None,
+        suggestions: list[str] | None = None,
     ):
         self.message = message
         self.details = details

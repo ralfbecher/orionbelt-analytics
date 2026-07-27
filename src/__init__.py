@@ -15,14 +15,14 @@ from .ontology_generator import OntologyGenerator
 from .session import SessionData
 
 __all__ = [
-    "DatabaseManager",
-    "TableInfo",
+    "SUPPORTED_DB_TYPES",
     "ColumnInfo",
+    "DatabaseManager",
     "OntologyGenerator",
     "SessionData",
-    "config_manager",
-    "SUPPORTED_DB_TYPES",
-    "__version__",
-    "__name__",
+    "TableInfo",
     "__description__",
+    "__name__",
+    "__version__",
+    "config_manager",
 ]

@@ -4,7 +4,7 @@ Kept out of ``main.py`` so server setup stays thin. Call
 :func:`register_resources` with the FastMCP instance to wire these up.
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 from fastmcp import FastMCP
 

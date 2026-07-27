@@ -13,7 +13,6 @@ R2RML mappings enable:
 
 import logging
 import re
-from typing import Dict, List, Optional
 
 from .database_manager import ColumnInfo, TableInfo
 
@@ -45,7 +44,7 @@ class R2RMLGenerator:
         self.database_name = database_name
 
     def generate_from_schema(
-        self, tables_info: List[TableInfo], schema_name: Optional[str] = None
+        self, tables_info: list[TableInfo], schema_name: str | None = None
     ) -> str:
         """Generate R2RML mapping from database schema information.
 
@@ -78,7 +77,7 @@ class R2RMLGenerator:
 
         return "\n".join(lines)
 
-    def _generate_prefixes(self) -> List[str]:
+    def _generate_prefixes(self) -> list[str]:
         """Generate R2RML prefix declarations."""
         prefixes = [
             "@prefix rr: <http://www.w3.org/ns/r2rml#> .",
@@ -90,9 +89,9 @@ class R2RMLGenerator:
     def _generate_triples_map(
         self,
         table_info: TableInfo,
-        schema_name: Optional[str],
-        table_lookup: Dict[str, TableInfo],
-    ) -> List[str]:
+        schema_name: str | None,
+        table_lookup: dict[str, TableInfo],
+    ) -> list[str]:
         """Generate a TriplesMap for a single table.
 
         Args:
@@ -165,7 +164,7 @@ class R2RMLGenerator:
         return lines
 
     def _generate_subject_template(
-        self, table_info: TableInfo, schema_name: Optional[str]
+        self, table_info: TableInfo, schema_name: str | None
     ) -> str:
         """Generate subject IRI template based on primary keys.
 
@@ -209,7 +208,7 @@ class R2RMLGenerator:
 
     def _generate_predicate_object_map(
         self, column: ColumnInfo, table_name: str
-    ) -> List[str]:
+    ) -> list[str]:
         """Generate predicate-object map for a regular column.
 
         Args:
@@ -236,10 +235,10 @@ class R2RMLGenerator:
     def _generate_fk_predicate_object_map(
         self,
         column: ColumnInfo,
-        fk: Dict[str, str],
-        schema_name: Optional[str],
-        table_lookup: Dict[str, TableInfo],
-    ) -> List[str]:
+        fk: dict[str, str],
+        schema_name: str | None,
+        table_lookup: dict[str, TableInfo],
+    ) -> list[str]:
         """Generate predicate-object map for a foreign key column.
 
         Foreign key columns are mapped as object properties that reference

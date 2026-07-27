@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 from fastmcp import Context
 
@@ -76,11 +76,9 @@ def _build_minimal_graph_summary(ontology_ttl: str) -> str:
 
     lines = ["\n## Minimal Graph Summary\n"]
     lines.append(f"### Classes ({len(class_names)})")
-    for cn in sorted(class_names):
-        lines.append(f"  - {cn}")
+    lines.extend(f"  - {cn}" for cn in sorted(class_names))
     lines.append(f"\n### Relationships ({len(rels)})")
-    for r in sorted(set(rels)):
-        lines.append(r)
+    lines.extend(sorted(set(rels)))
     lines.append(
         '\nUse download_artifact(artifact_type="ontology") to retrieve the full Turtle serialization.'
     )
@@ -89,13 +87,13 @@ def _build_minimal_graph_summary(ontology_ttl: str) -> str:
 
 async def generate_ontology(
     ctx: Context,
-    schema_info: Optional[str],
-    schema_name: Optional[str],
+    schema_info: str | None,
+    schema_name: str | None,
     base_uri: str,
     auto_persist: bool,
-    graph_uri: Optional[str],
+    graph_uri: str | None,
     services: "HandlerContext",
-) -> Union[str, Dict[str, Any]]:
+) -> str | dict[str, Any]:
     """Generate an RDF ontology from database schema.
 
     Extracts implementation from main.py's generate_ontology tool.
@@ -174,8 +172,8 @@ async def generate_ontology(
             logger.info(f"Using provided schema info: {len(tables_info)} tables")
 
         except Exception as e:
-            err: Dict[str, Any] = services.create_error_response(
-                f"Failed to parse schema_info parameter: {str(e)}", "parameter_error"
+            err: dict[str, Any] = services.create_error_response(
+                f"Failed to parse schema_info parameter: {e!s}", "parameter_error"
             )
             return err
     else:
@@ -231,7 +229,7 @@ async def generate_ontology(
 
             except Exception as e:
                 err = services.create_error_response(
-                    f"Failed to get tables from database: {str(e)}", "database_error"
+                    f"Failed to get tables from database: {e!s}", "database_error"
                 )
                 return err
 

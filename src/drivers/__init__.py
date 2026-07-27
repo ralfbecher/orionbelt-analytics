@@ -25,20 +25,20 @@ from .registry import (
 from .snowflake import SnowflakeDriver
 
 __all__ = [
-    "DatabaseDriver",
     # Registry (single source of truth for db_type -> driver/dialect)
     "DATABASE_REGISTRY",
+    "BigQueryDriver",
+    "ClickHouseDriver",
+    "DatabaseDriver",
+    "DatabricksDriver",
+    "DremioDriver",
     "DriverMeta",
-    "dialect_for",
-    "get_driver_class",
-    "supported_db_types",
+    "DuckDBDriver",
+    "MySQLDriver",
     # Concrete drivers
     "PostgreSQLDriver",
     "SnowflakeDriver",
-    "ClickHouseDriver",
-    "DremioDriver",
-    "BigQueryDriver",
-    "DuckDBDriver",
-    "DatabricksDriver",
-    "MySQLDriver",
+    "dialect_for",
+    "get_driver_class",
+    "supported_db_types",
 ]

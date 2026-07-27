@@ -17,12 +17,12 @@ Modules:
 from . import chart, connection, graphrag, ontology, query, rdf, schema, workspace
 
 __all__ = [
+    "chart",
     "connection",
-    "schema",
+    "graphrag",
     "ontology",
     "query",
-    "chart",
     "rdf",
-    "graphrag",
+    "schema",
     "workspace",
 ]

@@ -230,12 +230,12 @@ class TestPhase2EdgeCases:
         """Test behavior when schema has no tables."""
         # This should be handled gracefully
         # Lightweight mode should return empty lists
-        pass  # Requires actual DB connection
+        # Requires actual DB connection
 
     def test_get_table_details_nonexistent_table(self):
         """Test get_table_details with nonexistent table."""
         # Should return error response with success=False
-        pass  # Requires actual DB connection
+        # Requires actual DB connection
 
     def test_get_table_details_without_schema(self):
         """Test get_table_details uses default schema."""

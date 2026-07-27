@@ -211,7 +211,7 @@ class TestOntologyGenerator(unittest.TestCase):
 
         for sql_type, expected_xsd in test_cases:
             with self.subTest(sql_type=sql_type):
-                result, override = self.generator._map_sql_to_xsd(sql_type)
+                result, _override = self.generator._map_sql_to_xsd(sql_type)
                 self.assertEqual(
                     result,
                     expected_xsd,

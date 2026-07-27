@@ -119,16 +119,39 @@ line-length = 88
 # tracks that single source of truth.
 
 [tool.ruff.lint]
-# Pinned explicitly rather than relying on ruff's built-in defaults, which are
+# Selected explicitly rather than relying on ruff's built-in defaults, which are
 # not stable across releases: 0.16.0 widened the default set from 118 rules to
-# 826 (adding UP, BLE, DTZ, RUF, ...) and simultaneously dropped E401/E402/E7xx.
-# That turned every routine ruff bump into 1300+ unrelated lint failures and
-# blocked otherwise-fine dependency PRs. This selection reproduces the rule set
-# the codebase was already passing under 0.15.10.
-#
-# Widening this list is a deliberate, separate decision -- add prefixes here and
-# fix the resulting findings in their own PR, not as a side effect of a bump.
-select = ["E4", "E7", "E9", "F"]
+# 826 while dropping E401/E402/E7xx, turning routine ruff bumps into thousands
+# of unrelated failures. Everything enabled here is enabled on purpose.
+select = [
+    "E4",     # import formatting
+    "E7",     # statement-level errors
+    "E9",     # syntax / IO errors
+    "F",      # pyflakes
+    "UP",     # pyupgrade -- PEP 585/604 typing, modern idioms
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "PIE",    # flake8-pie -- unnecessary code
+    "PERF",   # perflint
+    "EXE",    # shebang correctness
+    "PYI",    # stub/typing correctness
+    "RUF",    # ruff-specific
+]
+
+ignore = [
+    # Deferred, NOT dismissed. Every SIM105 site is also an S110 site (blind
+    # `except Exception: pass` in the drivers). Rewriting them to
+    # contextlib.suppress would delete the S110 signal without anyone deciding
+    # whether swallowing is correct there -- suppression wearing a fix's
+    # clothing. These are handled in the error-handling audit that enables
+    # BLE/S110/G/DTZ/ASYNC, where each swallow is judged on merit.
+    "SIM105",
+]
+
+# Tests legitimately hold mutable class-level fixtures; that is noise there
+# rather than signal.
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF012"]
 
 [tool.black]
 line-length = 88

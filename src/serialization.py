@@ -5,10 +5,11 @@ in both sample_table_data() and execute_sql_query() within database_manager.py.
 """
 
 import decimal
-from typing import Any, Dict, List, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 
-def serialize_row(row: Sequence[Any], columns: List[str]) -> Dict[str, Any]:
+def serialize_row(row: Sequence[Any], columns: list[str]) -> dict[str, Any]:
     """Serialize a database row into a JSON-compatible dict.
 
     Handles conversion of non-serializable types:
@@ -26,7 +27,7 @@ def serialize_row(row: Sequence[Any], columns: List[str]) -> Dict[str, Any]:
     Returns:
         Dictionary mapping column names to serialized values
     """
-    row_dict: Dict[str, Any] = {}
+    row_dict: dict[str, Any] = {}
     for i, value in enumerate(row):
         column_name = columns[i]
         if value is None:
@@ -47,8 +48,8 @@ def serialize_row(row: Sequence[Any], columns: List[str]) -> Dict[str, Any]:
 
 
 def serialize_rows(
-    rows: Sequence[Sequence[Any]], columns: List[str]
-) -> List[Dict[str, Any]]:
+    rows: Sequence[Sequence[Any]], columns: list[str]
+) -> list[dict[str, Any]]:
     """Serialize multiple database rows into JSON-compatible dicts.
 
     Args:

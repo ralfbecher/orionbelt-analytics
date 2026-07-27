@@ -2,9 +2,10 @@
 
 import logging
 import os
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 from fastmcp import Context
 
@@ -21,7 +22,7 @@ def _check_ontology_db_compatibility(
     ctx: Context,
     get_session_db_manager: Callable[..., Any],
     session: Any,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Compare ontology tables/columns against the connected database.
 
     Returns a compatibility dict or None if no database is connected.
@@ -72,10 +73,7 @@ def _check_ontology_db_compatibility(
         total_onto = len(onto_tables)
         match_count = len(matched)
 
-        if total_onto == 0:
-            pct = 0
-        else:
-            pct = round(100 * match_count / total_onto)
+        pct = 0 if total_onto == 0 else round(100 * match_count / total_onto)
 
         if pct == 100:
             status = "full_match"
@@ -125,11 +123,11 @@ async def load_my_ontology(
     ctx: Context,
     import_folder: str,
     auto_persist: bool,
-    graph_uri: Optional[str],
+    graph_uri: str | None,
     services: "HandlerContext",
-    ontology_content: Optional[str] = None,
-    file_name: Optional[str] = None,
-) -> Dict[str, Any]:
+    ontology_content: str | None = None,
+    file_name: str | None = None,
+) -> dict[str, Any]:
     """Load an ontology from inline content or the newest .ttl file from the import folder."""
     try:
         from rdflib import Graph
@@ -192,7 +190,7 @@ async def load_my_ontology(
             ttl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
             newest_file = ttl_files[0]
 
-            with open(newest_file, "r", encoding="utf-8") as f:
+            with open(newest_file, encoding="utf-8") as f:
                 ontology_content = f.read()
 
             file_stat = newest_file.stat()
@@ -203,7 +201,7 @@ async def load_my_ontology(
         except Exception as parse_error:
             return {
                 "success": False,
-                "error": f"Failed to parse ontology file: {str(parse_error)}",
+                "error": f"Failed to parse ontology file: {parse_error!s}",
                 "error_type": "parse_error",
                 "file_path": str(newest_file),
                 "suggestion": "Ensure the file is valid Turtle format",
@@ -276,7 +274,7 @@ async def load_my_ontology(
                 f"Ontology loaded with {classes_count} classes; ready for SQL generation"
             )
 
-        response: Dict[str, Any] = {
+        response: dict[str, Any] = {
             "success": True,
             "source": "chat_upload" if from_chat else "import_folder",
             "file_path": str(newest_file),
@@ -336,6 +334,6 @@ async def load_my_ontology(
         logger.error(f"Error loading ontology: {e}")
         return {
             "success": False,
-            "error": f"Failed to load ontology: {str(e)}",
+            "error": f"Failed to load ontology: {e!s}",
             "error_type": "internal_error",
         }

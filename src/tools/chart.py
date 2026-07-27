@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 from ..chart_utils import create_plotly_chart
 
@@ -10,19 +10,19 @@ logger = logging.getLogger(__name__)
 
 
 def generate_chart(
-    data_source: List[Dict[str, Any]],
+    data_source: list[dict[str, Any]],
     chart_type: str,
     x_column: str,
-    y_column: Optional[Union[str, List[str]]] = None,
-    color_column: Optional[str] = None,
-    title: Optional[str] = None,
+    y_column: str | list[str] | None = None,
+    color_column: str | None = None,
+    title: str | None = None,
     chart_style: str = "grouped",
     width: int = 800,
     height: int = 600,
-    sort_by: Optional[str] = None,
-    sort_order: Optional[str] = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
     output_format: str = "image",
-) -> Union[Tuple[bytes, str], Dict[str, Any]]:
+) -> tuple[bytes, str] | dict[str, Any]:
     """Generate chart and return either Plotly data or image bytes.
 
     Args:
@@ -258,4 +258,4 @@ def generate_chart(
 
     except Exception as e:
         logger.error(f"Chart creation error: {e}")
-        return {"error": f"❌ Chart generation failed: {str(e)}"}
+        return {"error": f"❌ Chart generation failed: {e!s}"}

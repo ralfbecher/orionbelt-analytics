@@ -7,7 +7,7 @@ import os
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -29,9 +29,9 @@ class SecurityLevel(Enum):
 class SecureCredentialManager:
     """Secure credential management with encryption."""
 
-    def __init__(self, master_password: Optional[str] = None):
+    def __init__(self, master_password: str | None = None):
         """Initialize with optional master password for encryption."""
-        self._cipher: Optional[Fernet] = None
+        self._cipher: Fernet | None = None
         self._salt_file = Path.home() / ".mcp_credential_salt"
 
         # Try to get master password from environment if not provided
@@ -82,7 +82,7 @@ class SecureCredentialManager:
             logger.info("Created new salt file: %s", self._salt_file)
             return salt
 
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.error("Failed to manage salt file: %s", e)
             # Fallback to session-only salt (less secure)
             logger.warning(
@@ -91,7 +91,7 @@ class SecureCredentialManager:
             )
             return os.urandom(16)
 
-    def encrypt_credentials(self, credentials: Dict[str, Any]) -> str:
+    def encrypt_credentials(self, credentials: dict[str, Any]) -> str:
         """Encrypt credentials dictionary."""
         if not self._cipher:
             raise ValueError("Encryption not initialized")
@@ -107,7 +107,7 @@ class SecureCredentialManager:
         encrypted_data = self._cipher.encrypt(json_data)
         return base64.urlsafe_b64encode(encrypted_data).decode()
 
-    def decrypt_credentials(self, encrypted_data: str) -> Dict[str, Any]:
+    def decrypt_credentials(self, encrypted_data: str) -> dict[str, Any]:
         """Decrypt credentials dictionary."""
         if not self._cipher:
             raise ValueError("Encryption not initialized")
@@ -115,13 +115,13 @@ class SecureCredentialManager:
         try:
             decoded_data = base64.urlsafe_b64decode(encrypted_data.encode())
             decrypted_data = self._cipher.decrypt(decoded_data)
-            credentials_dict: Dict[str, Any] = json.loads(decrypted_data.decode())
+            credentials_dict: dict[str, Any] = json.loads(decrypted_data.decode())
             return credentials_dict
         except Exception as e:
             logger.error("Failed to decrypt credentials: %s", e)
             raise ValueError("Invalid or corrupted credential data") from e
 
-    def _sanitize_credentials(self, credentials: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
         """Remove sensitive information for logging."""
         sensitive_keys = {
             "password",
@@ -146,7 +146,7 @@ class SQLInjectionValidator:
     """Validates SQL queries to prevent injection attacks."""
 
     # Dangerous SQL patterns that should be blocked
-    DANGEROUS_PATTERNS = [
+    DANGEROUS_PATTERNS: ClassVar[list[str]] = [
         # Multiple statements with DDL/DML
         r";.*(?:DROP|DELETE|INSERT|UPDATE|CREATE|ALTER|TRUNCATE)",
         # Classic injection patterns (but NOT blocking UNION/UNION ALL)
@@ -178,7 +178,7 @@ class SQLInjectionValidator:
     # Pattern matches: optional (-- followed by non-SQL text, or /* ... */) followed by whitespace
     _OPT_COMMENT = r"^(?:--[^;]*?\s+)?"
 
-    SAFE_PATTERNS = [
+    SAFE_PATTERNS: ClassVar[list[str]] = [
         # Basic SELECT queries with JOINs (with optional leading comments)
         _OPT_COMMENT + r"SELECT\s+.+\s+FROM\s+.+$",
         # CTEs (WITH clauses) - now more permissive for complex queries
@@ -203,7 +203,7 @@ class SQLInjectionValidator:
             for pattern in self.SAFE_PATTERNS
         ]
 
-    def validate_query(self, sql_query: str) -> Dict[str, Any]:
+    def validate_query(self, sql_query: str) -> dict[str, Any]:
         """Validate SQL query for security issues."""
         if not sql_query or not sql_query.strip():
             return {
@@ -329,7 +329,7 @@ class IdentifierValidator:
 
 def audit_log_security_event(
     event_type: str,
-    details: Dict[str, Any],
+    details: dict[str, Any],
     risk_level: SecurityLevel = SecurityLevel.MEDIUM,
 ) -> None:
     """Log security-related events for auditing."""
@@ -372,7 +372,7 @@ _WRITE_EXPRESSIONS = (
 )
 
 
-def analyze_sql_statement(sql_query: str, dialect: str = "postgres") -> Dict[str, Any]:
+def analyze_sql_statement(sql_query: str, dialect: str = "postgres") -> dict[str, Any]:
     """Dialect-aware structural analysis of a SQL statement using sqlglot.
 
     This is the *primary*, parser-based safety gate. Unlike regex/``startswith``
@@ -395,7 +395,7 @@ def analyze_sql_statement(sql_query: str, dialect: str = "postgres") -> Dict[str
     import sqlglot
     from sqlglot import expressions as exp
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "parsed": False,
         "single_statement": True,
         "query_type": "UNKNOWN",

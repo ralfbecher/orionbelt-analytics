@@ -14,7 +14,6 @@ top.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Type
 
 from ..constants import DB_SQLGLOT_DIALECTS
 from .base import DatabaseDriver
@@ -33,13 +32,13 @@ class DriverMeta:
     """Metadata describing one supported database."""
 
     db_type: str
-    driver_cls: Type[DatabaseDriver]
+    driver_cls: type[DatabaseDriver]
     dialect: str  # sqlglot dialect name
 
 
 # Map of db_type -> driver class. The single place the driver classes are
 # enumerated; everything else derives from this plus DB_SQLGLOT_DIALECTS.
-_DRIVER_CLASSES: Dict[str, Type[DatabaseDriver]] = {
+_DRIVER_CLASSES: dict[str, type[DatabaseDriver]] = {
     "postgresql": PostgreSQLDriver,
     "snowflake": SnowflakeDriver,
     "dremio": DremioDriver,
@@ -50,7 +49,7 @@ _DRIVER_CLASSES: Dict[str, Type[DatabaseDriver]] = {
     "mysql": MySQLDriver,
 }
 
-DATABASE_REGISTRY: Dict[str, DriverMeta] = {
+DATABASE_REGISTRY: dict[str, DriverMeta] = {
     db_type: DriverMeta(
         db_type=db_type,
         driver_cls=driver_cls,
@@ -60,12 +59,12 @@ DATABASE_REGISTRY: Dict[str, DriverMeta] = {
 }
 
 
-def supported_db_types() -> List[str]:
+def supported_db_types() -> list[str]:
     """Return the supported db_type identifiers, in registration order."""
     return list(DATABASE_REGISTRY)
 
 
-def get_driver_class(db_type: str) -> Type[DatabaseDriver]:
+def get_driver_class(db_type: str) -> type[DatabaseDriver]:
     """Return the driver class for ``db_type``.
 
     Args:

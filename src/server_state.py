@@ -15,7 +15,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
 
 from fastmcp import Context
 from pydantic import BaseModel
@@ -55,9 +55,9 @@ def _get_connection_fingerprint(db_manager: DatabaseManager) -> str:
     return hashlib.sha256(fingerprint_data.encode()).hexdigest()[:16]
 
 
-def _calculate_schema_hash(tables_info: List[Any]) -> str:
+def _calculate_schema_hash(tables_info: list[Any]) -> str:
     """Calculate deterministic hash of schema structure."""
-    schema_structure: Dict[str, List[Dict[str, Any]]] = {"tables": []}
+    schema_structure: dict[str, list[dict[str, Any]]] = {"tables": []}
 
     sorted_tables = sorted(tables_info, key=lambda t: t.name)
     for table in sorted_tables:
@@ -120,8 +120,8 @@ class ServerState:
     """Manages server state with per-session isolation and idle eviction."""
 
     def __init__(self) -> None:
-        self._sessions: Dict[str, SessionData] = {}
-        self._eviction_task: Optional[asyncio.Task[None]] = None
+        self._sessions: dict[str, SessionData] = {}
+        self._eviction_task: asyncio.Task[None] | None = None
 
     @property
     def session_count(self) -> int:
@@ -266,7 +266,7 @@ def get_session_db_manager(ctx: Context) -> DatabaseManager:
     return cast(DatabaseManager, session.db_manager)
 
 
-def get_session_obqc_validator(ctx: Context) -> Optional[OBQCValidator]:
+def get_session_obqc_validator(ctx: Context) -> OBQCValidator | None:
     """Get or create OBQC validator for the current session."""
     session = get_session_data(ctx)
 
@@ -303,7 +303,7 @@ def get_session_obqc_validator(ctx: Context) -> Optional[OBQCValidator]:
         session.obqc_validator.load_ontology(ontology_generator.graph, base_uri)
         logger.debug(f"Initialized OBQC validator for session: {get_session_id(ctx)}")
 
-    return cast(Optional[OBQCValidator], session.obqc_validator)
+    return cast(OBQCValidator | None, session.obqc_validator)
 
 
 def get_session_safe_filename(ctx: Context, prefix: str, suffix: str = "") -> str:
@@ -350,12 +350,12 @@ class ErrorResponse(BaseModel):
 
     error: str
     error_type: str = "unknown"
-    details: Optional[str] = None
+    details: str | None = None
 
 
 def create_error_response(
-    error_msg: str, error_type: str = "unknown", details: Optional[str] = None
-) -> Dict[str, Any]:
+    error_msg: str, error_type: str = "unknown", details: str | None = None
+) -> dict[str, Any]:
     """Create a standardized error response.
 
     DEPRECATED: Use exceptions from src.exceptions instead.
@@ -368,7 +368,7 @@ def create_error_response(
     return response.model_dump()
 
 
-def get_oxigraph_store(ctx: Context) -> Optional[OxigraphStoreManager]:
+def get_oxigraph_store(ctx: Context) -> OxigraphStoreManager | None:
     """Get or initialize connection-scoped Oxigraph store for the session."""
     session = get_session_data(ctx)
 
@@ -395,4 +395,4 @@ def get_oxigraph_store(ctx: Context) -> Optional[OxigraphStoreManager]:
             logger.error(f"Failed to initialize Oxigraph store: {e}")
             return None
 
-    return cast(Optional[OxigraphStoreManager], session.oxigraph_store)
+    return cast(OxigraphStoreManager | None, session.oxigraph_store)

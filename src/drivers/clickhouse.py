@@ -1,7 +1,7 @@
 """ClickHouse database driver."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import quote_plus
 
 from sqlalchemy import MetaData, create_engine, inspect, text
@@ -29,8 +29,8 @@ class ClickHouseDriver(DatabaseDriver):
     db_type = "clickhouse"
 
     def __init__(self, pool_size: int = 5, max_overflow: int = 10):
-        self.engine: Optional[Engine] = None
-        self.metadata: Optional[MetaData] = None
+        self.engine: Engine | None = None
+        self.metadata: MetaData | None = None
         self._pool_size = pool_size
         self._max_overflow = max_overflow
 
@@ -115,7 +115,7 @@ class ClickHouseDriver(DatabaseDriver):
     # Schema introspection
     # ------------------------------------------------------------------
 
-    def get_schemas(self) -> List[str]:
+    def get_schemas(self) -> list[str]:
         excluded_schemas = "', '".join(CLICKHOUSE_SYSTEM_SCHEMAS)
         query = text(
             f"""
@@ -134,7 +134,7 @@ class ClickHouseDriver(DatabaseDriver):
             logger.error(f"Failed to get schemas: {e}")
             return []
 
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -176,8 +176,8 @@ class ClickHouseDriver(DatabaseDriver):
     def analyze_table(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
-    ) -> Optional[TableInfo]:
+        schema_name: str | None = None,
+    ) -> TableInfo | None:
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -218,7 +218,7 @@ class ClickHouseDriver(DatabaseDriver):
                         logger.info(f"  FK: {fk}")
 
                 columns = []
-                foreign_keys: List[Dict[str, Any]] = []
+                foreign_keys: list[dict[str, Any]] = []
                 for col_info in table_columns:
                     column_name = col_info["name"]
                     is_pk = column_name.upper() in primary_keys_upper
@@ -331,8 +331,8 @@ class ClickHouseDriver(DatabaseDriver):
     # ------------------------------------------------------------------
 
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -374,10 +374,10 @@ class ClickHouseDriver(DatabaseDriver):
 
         return validation_result
 
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         import time as time_mod
 
-        result_data: Dict[str, Any] = {
+        result_data: dict[str, Any] = {
             "success": False,
             "data": [],
             "columns": [],
@@ -438,7 +438,7 @@ class ClickHouseDriver(DatabaseDriver):
             result_data["error_type"] = "execution_error"
             logger.error(f"SQL execution failed: {e}")
         except Exception as e:
-            result_data["error"] = f"Unexpected execution error: {str(e)}"
+            result_data["error"] = f"Unexpected execution error: {e!s}"
             result_data["error_type"] = "internal_error"
             logger.error(f"Unexpected SQL execution error: {e}")
 
@@ -447,9 +447,9 @@ class ClickHouseDriver(DatabaseDriver):
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = DEFAULT_SAMPLE_LIMIT,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < MIN_SAMPLE_LIMIT:
             limit = DEFAULT_SAMPLE_LIMIT
         elif limit > MAX_SAMPLE_LIMIT:

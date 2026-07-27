@@ -9,7 +9,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -24,8 +24,8 @@ class StoredElement:
     element_id: str
     name: str
     description: str
-    metadata: Dict[str, Any]
-    embedding: List[float]  # Stored as list for JSON serialization
+    metadata: dict[str, Any]
+    embedding: list[float]  # Stored as list for JSON serialization
 
 
 class VectorStore:
@@ -39,8 +39,8 @@ class VectorStore:
             dimension: Embedding dimension
         """
         self.dimension = dimension
-        self.elements: List[StoredElement] = []
-        self.embeddings_matrix: Optional[np.ndarray] = None
+        self.elements: list[StoredElement] = []
+        self.embeddings_matrix: np.ndarray | None = None
         self._index_built = False
 
     def add_element(
@@ -50,7 +50,7 @@ class VectorStore:
         name: str,
         description: str,
         embedding: np.ndarray,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """
         Add a schema element to the store.
@@ -82,7 +82,7 @@ class VectorStore:
         self.elements.append(element)
         self._index_built = False  # Invalidate index
 
-    def add_elements_batch(self, elements: List[Any]) -> None:
+    def add_elements_batch(self, elements: list[Any]) -> None:
         """
         Add multiple schema elements in batch.
 
@@ -115,9 +115,9 @@ class VectorStore:
         self,
         query_embedding: np.ndarray,
         top_k: int = 5,
-        element_type: Optional[str] = None,
+        element_type: str | None = None,
         threshold: float = 0.0,
-    ) -> List[Tuple[StoredElement, float]]:
+    ) -> list[tuple[StoredElement, float]]:
         """
         Search for similar elements.
 
@@ -170,10 +170,11 @@ class VectorStore:
         top_indices = np.argsort(similarities)[::-1][:top_k]
 
         # Filter out -inf scores
-        results = []
-        for idx in top_indices:
-            if similarities[idx] > -np.inf:
-                results.append((self.elements[idx], float(similarities[idx])))
+        results = [
+            (self.elements[idx], float(similarities[idx]))
+            for idx in top_indices
+            if similarities[idx] > -np.inf
+        ]
 
         return results
 
@@ -182,8 +183,8 @@ class VectorStore:
         query_text: str,
         embedder: Any,
         top_k: int = 5,
-        element_type: Optional[str] = None,
-    ) -> List[Tuple[StoredElement, float]]:
+        element_type: str | None = None,
+    ) -> list[tuple[StoredElement, float]]:
         """
         Search using natural language query.
 
@@ -199,7 +200,7 @@ class VectorStore:
         query_embedding = embedder._embed_text(query_text)
         return self.search(query_embedding, top_k=top_k, element_type=element_type)
 
-    def get_by_id(self, element_id: str) -> Optional[StoredElement]:
+    def get_by_id(self, element_id: str) -> StoredElement | None:
         """
         Get element by ID.
 
@@ -214,7 +215,7 @@ class VectorStore:
                 return elem
         return None
 
-    def get_by_type(self, element_type: str) -> List[StoredElement]:
+    def get_by_type(self, element_type: str) -> list[StoredElement]:
         """
         Get all elements of a specific type.
 
@@ -252,7 +253,7 @@ class VectorStore:
         Args:
             filepath: Input file path (JSON)
         """
-        with open(filepath, "r") as f:
+        with open(filepath) as f:
             data = json.load(f)
 
         self.dimension = data["dimension"]
@@ -266,14 +267,14 @@ class VectorStore:
             f"Loaded vector store with {len(self.elements)} elements from {filepath}"
         )
 
-    def get_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> dict[str, Any]:
         """
         Get store statistics.
 
         Returns:
             Statistics dictionary
         """
-        type_counts: Dict[str, int] = {}
+        type_counts: dict[str, int] = {}
         for elem in self.elements:
             type_counts[elem.element_type] = type_counts.get(elem.element_type, 0) + 1
 
