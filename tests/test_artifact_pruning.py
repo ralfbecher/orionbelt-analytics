@@ -7,12 +7,14 @@ on a large schema, and never reclaimed, because AUTO_CLEANUP_ON_STARTUP only
 removes whole workspaces by age, not files inside a live one.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from src.lifecycle.artifacts import (
     DEFAULT_KEEP_VERSIONS,
+    artifact_family_lock,
     family_key,
     get_keep_versions,
     prune_superseded_artifacts,
@@ -232,3 +234,117 @@ class TestKeepVersionsSetting:
     def test_falls_back_on_garbage(self, monkeypatch):
         monkeypatch.setenv("ARTIFACT_KEEP_VERSIONS", "not-a-number")
         assert get_keep_versions() == DEFAULT_KEEP_VERSIONS
+
+
+class TestFamilySerialization:
+    """Overlapping producers for one family must not prune each other's files.
+
+    Each handler writes a timestamped file, records it in metadata, then prunes
+    older generations. Run concurrently for the same schema, request A's prune
+    saw request B's freshly written file as an unprotected sibling and deleted
+    it -- before or after B recorded it. Protecting only A's own previous
+    filename does not help, because B's file is unknown to A.
+
+    artifact_family_lock() makes the whole produce -> record -> prune sequence
+    atomic per family, so the interleaving cannot arise.
+    """
+
+    async def test_lock_serializes_producers_for_one_family(self, tmp_path):
+        """Concurrent producers each keep the file they wrote."""
+        order: list[str] = []
+        survivors: dict[str, Path] = {}
+
+        async def producer(tag: str, stamp: str) -> None:
+            async with artifact_family_lock(tmp_path, "ontology_conn_public"):
+                order.append(f"{tag}:start")
+                path = _write(tmp_path, _generation("public", stamp))
+                survivors[tag] = path
+                await asyncio.sleep(0)  # force a scheduling point inside the lock
+                await prune_superseded_artifacts(path, keep=1)
+                order.append(f"{tag}:end")
+
+        await asyncio.gather(
+            producer("A", "20260101_120000000000"),
+            producer("B", "20260102_120000000000"),
+        )
+
+        # Never interleaved: each producer ran start..end without the other cutting in.
+        assert order in (
+            ["A:start", "A:end", "B:start", "B:end"],
+            ["B:start", "B:end", "A:start", "A:end"],
+        ), order
+
+        # The producer that ran last is the surviving generation, and exactly
+        # one file remains for keep=1 -- nobody's file vanished mid-flight.
+        remaining = list(tmp_path.glob("ontology_*"))
+        assert len(remaining) == 1
+        last = order[-2].split(":")[0]
+        assert remaining[0] == survivors[last]
+
+    async def test_different_families_are_not_serialized(self, tmp_path):
+        """The lock must be per family, not global."""
+        inside = asyncio.Event()
+        released = asyncio.Event()
+
+        async def hold() -> None:
+            async with artifact_family_lock(tmp_path, "ontology_conn_public"):
+                inside.set()
+                await released.wait()
+
+        async def other() -> bool:
+            await inside.wait()
+            async with artifact_family_lock(tmp_path, "ontology_conn_sales"):
+                return True
+
+        holder = asyncio.create_task(hold())
+        got_other = await asyncio.wait_for(other(), timeout=2)
+        released.set()
+        await holder
+
+        assert got_other, "a different family blocked on an unrelated lock"
+
+
+def test_every_prune_call_sits_inside_a_family_lock():
+    """Structural guard: pruning outside the lock reintroduces the race.
+
+    A prune that is not serialized against concurrent producers for the same
+    family can delete another in-flight request's just-written artifact. The
+    lock is only load-bearing if every call site is inside one.
+    """
+    import ast
+
+    handlers = Path(__file__).resolve().parent.parent / "src" / "handlers"
+    offenders = []
+
+    for module in sorted(handlers.glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+
+        spans = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncWith):
+                continue
+            for item in node.items:
+                call = item.context_expr
+                if (
+                    isinstance(call, ast.Call)
+                    and getattr(call.func, "id", "") == "artifact_family_lock"
+                ):
+                    last = max(
+                        getattr(child, "lineno", node.lineno)
+                        for child in ast.walk(node)
+                    )
+                    spans.append((node.lineno, last))
+
+        offenders.extend(
+            f"src/handlers/{module.name}:{node.lineno}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") == "prune_superseded_artifacts"
+            and not any(lo <= node.lineno <= hi for lo, hi in spans)
+        )
+
+    assert not offenders, (
+        "prune_superseded_artifacts() called outside artifact_family_lock():\n  "
+        + "\n  ".join(offenders)
+        + "\n\nWrap the produce -> record -> prune sequence in the family lock."
+    )

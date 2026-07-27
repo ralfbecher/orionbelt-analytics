@@ -11,7 +11,7 @@ from fastmcp import Context
 from ..exceptions import ConnectionError
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
-from ..lifecycle.artifacts import prune_superseded_artifacts
+from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
@@ -83,39 +83,42 @@ async def _auto_generate_ontology_background(
         )
 
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
-        ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
-        await write_text_file(ontology_file, ontology_ttl)
+        # Serialize produce -> record -> prune for this family; a concurrent
+        # generation for the same schema must not have its file pruned as stale.
+        async with artifact_family_lock(conn_dir, f"ontology_{schema_name}"):
+            ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
+            await write_text_file(ontology_file, ontology_ttl)
 
-        # Write to the specific schema's state (not current schema)
-        schema_state = session.get_or_create_schema_state(schema_name)
-        previous_ontology_file = schema_state.ontology.ontology_file
-        schema_state.ontology.ontology_file = ontology_file.name
+            # Write to the specific schema's state (not current schema)
+            schema_state = session.get_or_create_schema_state(schema_name)
+            previous_ontology_file = schema_state.ontology.ontology_file
+            schema_state.ontology.ontology_file = ontology_file.name
 
-        if OXIGRAPH_AVAILABLE:
-            try:
-                # Direct store access for background task (connection-scoped)
-                if session.oxigraph_store:
-                    graph_uri = f"{base_uri}{schema_name}"
-                    triple_count = session.oxigraph_store.load_ontology(
-                        ontology_ttl, graph_uri, schema_name
-                    )
-                    logger.info(
-                        f"Stored {triple_count} triples in RDF store (graph: {graph_uri})"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to store in RDF: {e}")
+            if OXIGRAPH_AVAILABLE:
+                try:
+                    # Direct store access for background task (connection-scoped)
+                    if session.oxigraph_store:
+                        graph_uri = f"{base_uri}{schema_name}"
+                        triple_count = session.oxigraph_store.load_ontology(
+                            ontology_ttl, graph_uri, schema_name
+                        )
+                        logger.info(
+                            f"Stored {triple_count} triples in RDF store (graph: {graph_uri})"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to store in RDF: {e}")
 
-        elapsed = time.time() - start_time
-        logger.info(f"Ontology auto-generated successfully ({elapsed:.2f}s)")
-        logger.info(f"Saved to: {ontology_file.name}")
+            elapsed = time.time() - start_time
+            logger.info(f"Ontology auto-generated successfully ({elapsed:.2f}s)")
+            logger.info(f"Saved to: {ontology_file.name}")
 
-        # Pruned last, and never touching what the session previously pointed
-        # at: this path writes no persisted metadata, so the in-memory
-        # reference is the only record that the older file is still in use.
-        await prune_superseded_artifacts(
-            ontology_file,
-            protect=[previous_ontology_file] if previous_ontology_file else [],
-        )
+            # Pruned last, and never touching what the session previously
+            # pointed at: this path writes no persisted metadata, so the
+            # in-memory reference is the only record the older file is in use.
+            await prune_superseded_artifacts(
+                ontology_file,
+                protect=[previous_ontology_file] if previous_ontology_file else [],
+            )
 
     except Exception as e:
         logger.error(f"Ontology auto-generation failed: {type(e).__name__}: {e}")

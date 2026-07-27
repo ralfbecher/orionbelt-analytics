@@ -9,7 +9,7 @@ from fastmcp import Context
 
 from ..config import config_manager
 from ..handler_context import HandlerContext
-from ..lifecycle.artifacts import prune_superseded_artifacts
+from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
@@ -471,47 +471,56 @@ async def apply_semantic_names(
                     if session.connection_id
                     else ensure_output_dir()
                 )
-                new_ontology_filename = (
-                    services.get_session_safe_filename(ctx, "ontology", "semantic")
-                    + ".ttl"
-                )
-                ontology_file_path = conn_dir / new_ontology_filename
+                # Serialize produce -> record -> prune for this family so an
+                # overlapping request cannot have its just-written ontology
+                # pruned as stale.
+                async with artifact_family_lock(
+                    conn_dir,
+                    f"ontology_{session.connection_id or 'default'}_semantic",
+                ):
+                    new_ontology_filename = (
+                        services.get_session_safe_filename(ctx, "ontology", "semantic")
+                        + ".ttl"
+                    )
+                    ontology_file_path = conn_dir / new_ontology_filename
 
-                await write_text_file(ontology_file_path, updated_ontology)
+                    await write_text_file(ontology_file_path, updated_ontology)
 
-                logger.info(f"Saved semantic ontology to: {ontology_file_path}")
-                previous_ontology_file = session.ontology_file
-                session.ontology_file = new_ontology_filename
-                session.ontology_enriched = True
-                session.obqc_validator = None
+                    logger.info(f"Saved semantic ontology to: {ontology_file_path}")
+                    previous_ontology_file = session.ontology_file
+                    session.ontology_file = new_ontology_filename
+                    session.ontology_enriched = True
+                    session.obqc_validator = None
 
-                # Update workspace: mark ontology as enriched
-                if session.connection_id:
-                    try:
-                        schema_name = session.get_last_analyzed_schema() or "default"
-                        await update_workspace_section(
-                            connection_id=session.connection_id,
-                            output_dir=OUTPUT_DIR,
-                            schema_name=schema_name,
-                            section="ontology",
-                            data={
-                                "ontology_file": new_ontology_filename,
-                                "enriched": True,
-                                "persisted_to_rdf": False,
-                                "generated_at": utc_now().isoformat(),
-                            },
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to write workspace metadata: {e}")
+                    # Update workspace: mark ontology as enriched
+                    if session.connection_id:
+                        try:
+                            schema_name = (
+                                session.get_last_analyzed_schema() or "default"
+                            )
+                            await update_workspace_section(
+                                connection_id=session.connection_id,
+                                output_dir=OUTPUT_DIR,
+                                schema_name=schema_name,
+                                section="ontology",
+                                data={
+                                    "ontology_file": new_ontology_filename,
+                                    "enriched": True,
+                                    "persisted_to_rdf": False,
+                                    "generated_at": utc_now().isoformat(),
+                                },
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to write workspace metadata: {e}")
 
-                # Prune only after metadata names the new file, protecting the
-                # one it referenced until now.
-                await prune_superseded_artifacts(
-                    ontology_file_path,
-                    protect=(
-                        [previous_ontology_file] if previous_ontology_file else []
-                    ),
-                )
+                    # Prune only after metadata names the new file, protecting the
+                    # one it referenced until now.
+                    await prune_superseded_artifacts(
+                        ontology_file_path,
+                        protect=(
+                            [previous_ontology_file] if previous_ontology_file else []
+                        ),
+                    )
             except Exception as e:
                 logger.warning(f"Failed to save ontology to file: {e}")
 

@@ -20,10 +20,57 @@ import asyncio
 import logging
 import os
 import re
-from collections.abc import Iterable
+import weakref
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Serializes the produce -> record -> prune sequence for one artifact family.
+#
+# Without it, two overlapping requests for the same schema each write a file and
+# each treat its own as authoritative: workspace metadata ends up naming
+# whichever wrote last, and pruning turns the other request's live artifact into
+# a deletion. Holding this from before the filename is minted until after the
+# prune makes the sequence atomic per family.
+#
+# Keyed per event loop only, unlike the metadata locks. Artifact writers are
+# request handlers, which all run on the server's single loop; nothing writes
+# artifacts from a second loop the way get_registered_tool_names spins one up
+# for tool listing.
+_family_locks: "weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+@asynccontextmanager
+async def artifact_family_lock(directory: Path, family: str) -> AsyncIterator[None]:
+    """Serialize artifact production for one family within a directory.
+
+    Wrap the whole sequence -- mint the timestamped filename, write it, update
+    workspace metadata, prune superseded generations -- so a concurrent request
+    for the same schema cannot interleave and have its just-written file pruned
+    as though it were stale.
+
+    Args:
+        directory: Connection directory the artifacts live in.
+        family: Family prefix, e.g. ``"ontology_ab12cd34_public"``.
+
+    Yields:
+        None, with the family lock held.
+    """
+    loop = asyncio.get_running_loop()
+    per_loop = _family_locks.setdefault(loop, {})
+    key = f"{directory}::{family}"
+    lock = per_loop.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        per_loop[key] = lock
+    async with lock:
+        yield
+
 
 # Trailing timestamp produced by get_session_safe_filename ("%Y%m%d_%H%M%S%f")
 # and by the background ontology path ("%Y%m%d_%H%M%S"). Note it contains an
