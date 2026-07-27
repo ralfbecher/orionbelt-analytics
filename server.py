@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Startup script for OrionBelt Analytics."""
 
-import json
-import sys
-import signal
-import shutil
 import asyncio
-from pathlib import Path
+import json
+import shutil
+import signal
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Add src directory to path for imports
 src_path = Path(__file__).parent / "src"
@@ -15,14 +15,18 @@ sys.path.insert(0, str(src_path))
 
 import atexit  # noqa: E402
 
-from src.main import mcp, cleanup_server  # noqa: E402
+from src import __name__ as SERVER_NAME  # noqa: E402
+from src import __version__  # noqa: E402
 from src.config import config_manager  # noqa: E402
+from src.main import cleanup_server, mcp  # noqa: E402
 from src.utils import setup_logging  # noqa: E402
-from src import __version__, __name__ as SERVER_NAME  # noqa: E402
 
 # Setup logging
 config = config_manager.get_server_config()
-logger = setup_logging(config.log_level, structured=False)  # Use simple format for startup
+logger = setup_logging(
+    config.log_level, structured=False
+)  # Use simple format for startup
+
 
 def setup_signal_handlers():
     """Setup signal handlers for graceful shutdown."""
@@ -43,13 +47,16 @@ def setup_signal_handlers():
 
     return shutdown_event
 
+
 def print_startup_info():
     """Print server startup information."""
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info(f"{SERVER_NAME} v{__version__}")
-    logger.info("MCP server for database ad hoc analysis with ontology support and interactive charting")
-    logger.info("="*60)
-    
+    logger.info(
+        "MCP server for database ad hoc analysis with ontology support and interactive charting"
+    )
+    logger.info("=" * 60)
+
     # Count comes straight from the registry so the banner can never drift
     # from the tools actually registered in src/main.py.
     from src.main import get_registered_tool_names
@@ -104,7 +111,11 @@ def print_startup_info():
             logger.info(f"    • {tool}")
 
     # Warn loudly if the curated banner ever drifts from the real registry.
-    listed = {entry.split(" - ", 1)[0].strip() for tools in tool_groups.values() for entry in tools}
+    listed = {
+        entry.split(" - ", 1)[0].strip()
+        for tools in tool_groups.values()
+        for entry in tools
+    }
     missing = sorted(set(registered) - listed)
     extra = sorted(listed - set(registered))
     if missing or extra:
@@ -114,7 +125,9 @@ def print_startup_info():
         )
 
     logger.info("")
-    logger.info("🗄️ Supported Databases: PostgreSQL, MySQL, Snowflake, ClickHouse, Dremio, BigQuery, DuckDB/MotherDuck, Databricks")
+    logger.info(
+        "🗄️ Supported Databases: PostgreSQL, MySQL, Snowflake, ClickHouse, Dremio, BigQuery, DuckDB/MotherDuck, Databricks"
+    )
     logger.info("🧠 LLM Enrichment: Available via MCP prompts and tools")
     logger.info("🔒 Security: Credential handling and input validation")
     logger.info("⚡ Performance: Connection pooling and parallel processing")
@@ -127,6 +140,7 @@ def print_startup_info():
     logger.info(f"  • Host: {config.mcp_server_host}")
     logger.info(f"  • Port: {config.mcp_server_port}")
     logger.info("")
+
 
 def cleanup_tmp_folder():
     """Clean up stale top-level files from tmp/, preserving workspace data.
@@ -143,6 +157,7 @@ def cleanup_tmp_folder():
     - "all": removes ALL workspace directories (fresh start)
     """
     import os
+
     tmp_dir = Path(__file__).parent / "tmp"
 
     if not tmp_dir.exists():
@@ -192,7 +207,9 @@ def cleanup_tmp_folder():
 
     if cleanup_mode == "all":
         # Remove ALL workspace directories (fresh start)
-        logger.info(f"Full cleanup enabled, removing {len(workspace_dirs)} workspace(s)...")
+        logger.info(
+            f"Full cleanup enabled, removing {len(workspace_dirs)} workspace(s)..."
+        )
         cleaned = 0
         for conn_dir in workspace_dirs:
             try:
@@ -222,12 +239,14 @@ def cleanup_tmp_folder():
                 cleaned += 1
                 logger.info(f"Removed orphaned workspace directory: {conn_dir.name}")
             except Exception as e:
-                logger.warning(f"Failed to remove orphaned directory {conn_dir.name}: {e}")
+                logger.warning(
+                    f"Failed to remove orphaned directory {conn_dir.name}: {e}"
+                )
             continue
 
         # Check workspace age from metadata
         try:
-            with open(metadata_file, "r") as f:
+            with open(metadata_file) as f:
                 metadata = json.load(f)
             workspace = metadata.get("workspace", {})
             updated_at = workspace.get("updated_at")
@@ -249,6 +268,7 @@ def cleanup_tmp_folder():
     else:
         logger.info("Retention cleanup: all workspaces within retention period")
 
+
 def main():
     """Start the OrionBelt Analytics MCP server."""
     try:
@@ -268,15 +288,24 @@ def main():
         print_startup_info()
 
         transport_name = "streamable-http" if config.mcp_transport == "http" else "SSE"
-        logger.info(f"🚀 Starting OrionBelt Analytics v{__version__} MCP server with {transport_name} transport...")
+        logger.info(
+            f"🚀 Starting OrionBelt Analytics v{__version__} MCP server with {transport_name} transport..."
+        )
         logger.info("📡 Server ready for MCP protocol messages")
 
         # Configure FastMCP with shorter shutdown timeout for cleaner exits
         # This reduces the timeout window for SSE connections during shutdown
         import os
-        os.environ.setdefault("MCP_SHUTDOWN_TIMEOUT", "2")  # 2 seconds instead of default 5
 
-        mcp.run(transport=config.mcp_transport, host=config.mcp_server_host, port=config.mcp_server_port)
+        os.environ.setdefault(
+            "MCP_SHUTDOWN_TIMEOUT", "2"
+        )  # 2 seconds instead of default 5
+
+        mcp.run(
+            transport=config.mcp_transport,
+            host=config.mcp_server_host,
+            port=config.mcp_server_port,
+        )
 
     except KeyboardInterrupt:
         logger.info("⏹️  Server stopped by user (Ctrl+C)")
@@ -293,6 +322,7 @@ def main():
         logger.info("✅ Server shutdown complete")
 
     return 0
+
 
 if __name__ == "__main__":
     exit_code = main()
