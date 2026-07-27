@@ -74,8 +74,17 @@ NON_WORKSPACE_DIRS = frozenset({"chromadb", "oxigraph", "oxigraph_store"})
 
 
 def ensure_output_dir() -> Path:
-    """Get the output directory, creating it if needed."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    """Get the output directory, creating it and any missing parents.
+
+    ``parents=True`` because OUTPUT_DIR may legitimately be nested (say
+    ``output/data`` or ``/var/lib/orionbelt/data``) -- the resolver accepts
+    those, so creation has to as well or a fresh deployment fails with
+    FileNotFoundError on the first write.
+
+    Returns:
+        The output directory, guaranteed to exist.
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return OUTPUT_DIR
 
 

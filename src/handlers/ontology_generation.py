@@ -11,7 +11,11 @@ from fastmcp import Context
 from ..database_manager import ColumnInfo, TableInfo
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
-from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
+from ..lifecycle.metadata import (
+    mark_ontology_persisted,
+    update_workspace_rdf,
+    update_workspace_section,
+)
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..utils import utc_now, write_text_file
@@ -368,22 +372,26 @@ async def generate_ontology(
                     # Update workspace: mark ontology as persisted + write rdf_store
                     if session.connection_id:
                         try:
-                            await update_workspace_section(
+                            # Generation-guarded: this runs outside the
+                            # artifact family lock, so a concurrent generation
+                            # may already have recorded a newer TTL. Marking
+                            # that one persisted on the strength of *this*
+                            # request's RDF load would be a lie, so the helper
+                            # sets the flag only while our file is still the
+                            # recorded one.
+                            marked = await mark_ontology_persisted(
                                 connection_id=session.connection_id,
                                 output_dir=OUTPUT_DIR,
                                 schema_name=schema_name or "default",
-                                section="ontology",
-                                # Merge: this follow-up write only reports RDF
-                                # persistence. Replacing the section would
-                                # re-stamp ontology_file with this request's
-                                # name even if a concurrent generation has
-                                # already superseded it.
-                                data={
-                                    "graph_uri": graph_uri,
-                                    "persisted_to_rdf": True,
-                                },
-                                merge=True,
+                                ontology_file=ontology_filename,
+                                graph_uri=graph_uri,
                             )
+                            if not marked:
+                                logger.info(
+                                    "Skipped persisted_to_rdf flag: a newer "
+                                    "ontology generation superseded "
+                                    f"{ontology_filename}"
+                                )
                             await update_workspace_rdf(
                                 connection_id=session.connection_id,
                                 output_dir=OUTPUT_DIR,

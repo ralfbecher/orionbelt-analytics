@@ -404,7 +404,6 @@ class VersionMetadataManager:
         schema_name: str,
         section: str,
         data: dict[str, Any],
-        merge: bool = False,
     ) -> None:
         """Update a workspace section for a schema.
 
@@ -412,11 +411,6 @@ class VersionMetadataManager:
             schema_name: Database schema name (e.g. "public")
             section: Section key ("schema", "ontology", "graphrag")
             data: Section data dict
-            merge: Update the existing section in place instead of replacing
-                it. Use this for follow-up writes that only report on part of
-                the section -- replacing would re-stamp fields the caller did
-                not intend to own, such as an ontology_file that a later
-                request has already superseded.
         """
         if "workspace" not in self.metadata:
             self.metadata["workspace"] = {
@@ -429,10 +423,7 @@ class VersionMetadataManager:
         if schema_name not in workspace.get("schemas", {}):
             workspace.setdefault("schemas", {})[schema_name] = {}
 
-        if merge:
-            workspace["schemas"][schema_name].setdefault(section, {}).update(data)
-        else:
-            workspace["schemas"][schema_name][section] = data
+        workspace["schemas"][schema_name][section] = data
         workspace["updated_at"] = utc_now().isoformat()
 
         self._save_metadata()
@@ -535,7 +526,6 @@ async def update_workspace_section(
     schema_name: str,
     section: str,
     data: dict[str, Any],
-    merge: bool = False,
 ) -> None:
     """Thread-safe workspace section update with per-connection locking.
 
@@ -553,8 +543,60 @@ async def update_workspace_section(
     await mutate_workspace_metadata(
         connection_id,
         output_dir,
-        lambda mgr: mgr.update_workspace(schema_name, section, data, merge=merge),
+        lambda mgr: mgr.update_workspace(schema_name, section, data),
     )
+
+
+async def mark_ontology_persisted(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+    ontology_file: str,
+    graph_uri: str,
+) -> bool:
+    """Flag an ontology as persisted to RDF, only while it is still current.
+
+    The RDF load happens outside the artifact family lock -- it is expensive,
+    and holding the lock across it would serialize generation for the schema.
+    That leaves a window: two overlapping generate_ontology calls can record
+    A.ttl then B.ttl, and A's slower auto-persist can land last. A blind merge
+    would then mark B.ttl as persisted on the strength of A's RDF load.
+
+    So the check and the write happen together under the metadata lock: the
+    flag is set only if the recorded ontology_file is still the generation that
+    was actually loaded.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema whose ontology section to update.
+        ontology_file: The generation this caller persisted.
+        graph_uri: Named graph it was loaded into.
+
+    Returns:
+        True if the flag was set, False if a newer generation had superseded
+        this one.
+    """
+    applied = False
+
+    def _mutate(mgr: VersionMetadataManager) -> None:
+        nonlocal applied
+        section = (
+            mgr.metadata.get("workspace", {})
+            .get("schemas", {})
+            .get(schema_name, {})
+            .get("ontology")
+        )
+        if not section or section.get("ontology_file") != ontology_file:
+            return
+        section["graph_uri"] = graph_uri
+        section["persisted_to_rdf"] = True
+        mgr.metadata["workspace"]["updated_at"] = utc_now().isoformat()
+        mgr._save_metadata()
+        applied = True
+
+    await mutate_workspace_metadata(connection_id, output_dir, _mutate)
+    return applied
 
 
 async def update_workspace_rdf(

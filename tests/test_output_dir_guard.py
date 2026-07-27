@@ -87,3 +87,25 @@ def test_guard_fires_at_import_time():
     )
     assert proc.returncode != 0, "importing with OUTPUT_DIR=. should have failed"
     assert "contains the installation" in proc.stderr
+
+
+def test_nested_output_dir_is_created_with_missing_parents(monkeypatch, tmp_path):
+    """A nested OUTPUT_DIR the resolver accepts must also be creatable.
+
+    _resolve_output_dir() accepts values like "output/data" and
+    /var/lib/orionbelt/data, so ensure_output_dir() needs parents=True --
+    otherwise a fresh deployment passes validation and then dies with
+    FileNotFoundError on the first write.
+    """
+    target = tmp_path / "missing-parent" / "data"
+    assert not target.parent.exists()
+
+    monkeypatch.setenv("OUTPUT_DIR", str(target))
+    import src.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "OUTPUT_DIR", paths_module._resolve_output_dir())
+
+    created = paths_module.ensure_output_dir()
+
+    assert created.is_dir()
+    assert created == target.resolve()

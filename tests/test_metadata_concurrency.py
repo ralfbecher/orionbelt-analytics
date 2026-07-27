@@ -26,6 +26,7 @@ import pytest
 
 from src.lifecycle.metadata import (
     VersionMetadataManager,
+    mark_ontology_persisted,
     mutate_workspace_metadata,
     update_workspace_section,
 )
@@ -315,3 +316,70 @@ def test_public_async_wrappers_use_the_lock(name):
         assert (
             "mutate_workspace_metadata" in body
         ), f"{wrapper.name} must route through mutate_workspace_metadata"
+
+
+class TestGenerationGuardedPersistFlag:
+    """persisted_to_rdf must describe the generation that was actually loaded.
+
+    The Oxigraph load runs outside the artifact family lock -- it is expensive,
+    and holding the lock across it would serialize generation for the schema.
+    That leaves a window where two overlapping generate_ontology calls record
+    A.ttl then B.ttl, and A's slower auto-persist lands last. A blind merge
+    marked B.ttl persisted on the strength of A's load.
+    """
+
+    async def test_stale_persist_does_not_flag_a_newer_generation(self, tmp_path):
+        """A's late flag must not land on B's record."""
+        cid, schema = "genguard", "public"
+        await update_workspace_section(
+            cid,
+            tmp_path,
+            schema,
+            "ontology",
+            {"ontology_file": "A.ttl", "persisted_to_rdf": False},
+        )
+        await update_workspace_section(
+            cid,
+            tmp_path,
+            schema,
+            "ontology",
+            {"ontology_file": "B.ttl", "persisted_to_rdf": False},
+        )
+
+        applied = await mark_ontology_persisted(cid, tmp_path, schema, "A.ttl", "g:u")
+
+        section = json.loads(
+            (tmp_path / cid / "metadata.json").read_text(encoding="utf-8")
+        )["workspace"]["schemas"][schema]["ontology"]
+        assert applied is False
+        assert section["ontology_file"] == "B.ttl"
+        assert (
+            section["persisted_to_rdf"] is False
+        ), "B was marked persisted on the strength of A's RDF load"
+
+    async def test_current_generation_is_flagged(self, tmp_path):
+        """The guard must not block the normal path."""
+        cid, schema = "genguard-ok", "public"
+        await update_workspace_section(
+            cid,
+            tmp_path,
+            schema,
+            "ontology",
+            {"ontology_file": "B.ttl", "persisted_to_rdf": False},
+        )
+
+        applied = await mark_ontology_persisted(cid, tmp_path, schema, "B.ttl", "g:u")
+
+        section = json.loads(
+            (tmp_path / cid / "metadata.json").read_text(encoding="utf-8")
+        )["workspace"]["schemas"][schema]["ontology"]
+        assert applied is True
+        assert section["persisted_to_rdf"] is True
+        assert section["graph_uri"] == "g:u"
+
+    async def test_missing_section_is_not_invented(self, tmp_path):
+        """No ontology recorded yet means nothing to flag."""
+        applied = await mark_ontology_persisted(
+            "genguard-empty", tmp_path, "public", "A.ttl", "g:u"
+        )
+        assert applied is False
