@@ -9,7 +9,7 @@ from fastmcp import Context
 from ..constants import SUPPORTED_DB_TYPES
 from ..exceptions import ConnectionError, ValidationError
 from ..handler_context import HandlerContext
-from ..lifecycle.metadata import VersionMetadataManager
+from ..lifecycle.metadata import mutate_workspace_metadata
 from ..paths import OUTPUT_DIR
 from ..utils import utc_now
 from ..workspace import detect_workspace, format_workspace_summary
@@ -320,8 +320,13 @@ async def connect_database(
 
         # Write workspace connection info
         try:
-            mgr = VersionMetadataManager(new_conn_id, OUTPUT_DIR)
-            mgr.update_workspace_connection(db_type=db_type, db_name=db_name)
+            await mutate_workspace_metadata(
+                new_conn_id,
+                OUTPUT_DIR,
+                lambda mgr: mgr.update_workspace_connection(
+                    db_type=db_type, db_name=db_name
+                ),
+            )
         except Exception as e:
             logger.warning(f"Failed to write workspace connection info: {e}")
 

@@ -11,7 +11,7 @@ from fastmcp import Context
 from ..database_manager import TableInfo
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
-from ..lifecycle.metadata import VersionMetadataManager
+from ..lifecycle.metadata import VersionMetadataManager, mutate_workspace_metadata
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir, get_models_dir
 from ..utils import read_json_file, read_text_file, utc_now, write_text_file
@@ -406,10 +406,10 @@ async def save_semantic_model(
         )
         return err
 
-    # Update workspace metadata. The whole read-modify-write is blocking disk
-    # I/O, so it runs off the event loop rather than stalling other sessions.
-    def _record_model() -> None:
-        mgr = VersionMetadataManager(connection_id, OUTPUT_DIR)
+    # Update workspace metadata through the shared locked helper. Doing this
+    # read-modify-write outside the per-connection lock races every other
+    # workspace writer -- reproducibly dropping sections and tearing the file.
+    def _record_model(mgr: VersionMetadataManager) -> None:
         workspace = mgr.metadata.setdefault(
             "workspace",
             {
@@ -427,7 +427,7 @@ async def save_semantic_model(
         mgr._save_metadata()
 
     try:
-        await asyncio.to_thread(_record_model)
+        await mutate_workspace_metadata(connection_id, OUTPUT_DIR, _record_model)
     except Exception as e:
         logger.warning(f"Failed to update workspace metadata for model: {e}")
 

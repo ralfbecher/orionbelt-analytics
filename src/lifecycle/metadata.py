@@ -7,8 +7,12 @@ Also manages workspace state for session restore across reconnections.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
+import weakref
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,8 +21,33 @@ from ..utils import parse_timestamp, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Module-level lock dict for serializing concurrent metadata writes per connection
-_metadata_locks: dict[str, asyncio.Lock] = {}
+# Locks serializing concurrent metadata writes, keyed by event loop and then by
+# connection. Keyed by loop because an asyncio.Lock binds to whichever loop first
+# awaits it and raises RuntimeError if reused from another -- and this process
+# does run more than one loop (see get_registered_tool_names in main.py, which
+# calls asyncio.run). A WeakKeyDictionary also means a finished loop's locks are
+# collected instead of accumulating for the process lifetime.
+_metadata_locks: "weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _get_metadata_lock(connection_id: str) -> asyncio.Lock:
+    """Return the write lock for *connection_id* on the running event loop.
+
+    Args:
+        connection_id: Database connection fingerprint.
+
+    Returns:
+        An asyncio.Lock scoped to the current loop and connection.
+    """
+    loop = asyncio.get_running_loop()
+    per_loop = _metadata_locks.setdefault(loop, {})
+    lock = per_loop.get(connection_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        per_loop[connection_id] = lock
+    return lock
 
 
 @dataclass
@@ -109,13 +138,29 @@ class VersionMetadataManager:
         }
 
     def _save_metadata(self) -> None:
-        """Save metadata to disk."""
+        """Save metadata to disk atomically.
+
+        Written to a sibling temp file and moved into place with os.replace,
+        which is atomic on POSIX and Windows. A plain open(..., "w") truncates
+        first, so a concurrent or interrupted write leaves a torn file -- in
+        practice a short write over a longer one, whose leftover tail makes the
+        JSON unparseable ("Extra data"). Readers now see either the old file or
+        the new one, never a mixture.
+        """
+        tmp_file = self.metadata_file.with_name(
+            f"{self.metadata_file.name}.{os.getpid()}.tmp"
+        )
         try:
-            with open(self.metadata_file, "w") as f:
+            with open(tmp_file, "w") as f:
                 json.dump(self.metadata, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.metadata_file)
             logger.debug(f"Saved metadata for connection {self.connection_id}")
         except Exception as e:
             logger.error(f"Failed to save metadata: {e}")
+            with contextlib.suppress(OSError):
+                tmp_file.unlink()
 
     def get_schema_metadata(self, schema_name: str) -> dict[str, Any] | None:
         """Get metadata for a specific schema."""
@@ -386,6 +431,36 @@ class VersionMetadataManager:
         logger.debug(f"Updated workspace.rdf_store (connection {self.connection_id})")
 
 
+async def mutate_workspace_metadata(
+    connection_id: str,
+    output_dir: Path,
+    mutate: Callable[["VersionMetadataManager"], None],
+) -> None:
+    """Run a metadata.json read-modify-write serialized per connection, off-loop.
+
+    Every writer must go through here. metadata.json is a single file holding
+    all workspace sections, so two unserialized read-modify-write cycles either
+    drop one another's section (last writer wins on a stale read) or interleave
+    into an unparseable file. Both were reproducible before this existed.
+
+    The mutation runs in a worker thread -- the file can be large and the loop
+    must not stall -- with the per-connection asyncio lock held across the whole
+    load/modify/save cycle, not just the save.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory (usually OUTPUT_DIR).
+        mutate: Callback applied to a freshly loaded manager. It is responsible
+            for persisting, which every ``update_*`` method already does.
+    """
+
+    def _apply() -> None:
+        mutate(VersionMetadataManager(connection_id, output_dir))
+
+    async with _get_metadata_lock(connection_id):
+        await asyncio.to_thread(_apply)
+
+
 async def update_workspace_section(
     connection_id: str,
     output_dir: Path,
@@ -406,17 +481,11 @@ async def update_workspace_section(
         data: Section data dict
     """
 
-    def _update() -> None:
-        VersionMetadataManager(connection_id, output_dir).update_workspace(
-            schema_name, section, data
-        )
-
-    lock = _metadata_locks.setdefault(connection_id, asyncio.Lock())
-    async with lock:
-        # Read-modify-write of metadata.json is blocking; run it off the loop so
-        # a large workspace does not stall every other session -- and so the lock
-        # above is not held by a thread that is busy doing disk I/O.
-        await asyncio.to_thread(_update)
+    await mutate_workspace_metadata(
+        connection_id,
+        output_dir,
+        lambda mgr: mgr.update_workspace(schema_name, section, data),
+    )
 
 
 async def update_workspace_rdf(
@@ -432,11 +501,8 @@ async def update_workspace_rdf(
         data: RDF store state dict
     """
 
-    def _update() -> None:
-        VersionMetadataManager(connection_id, output_dir).update_workspace_rdf_store(
-            data
-        )
-
-    lock = _metadata_locks.setdefault(connection_id, asyncio.Lock())
-    async with lock:
-        await asyncio.to_thread(_update)
+    await mutate_workspace_metadata(
+        connection_id,
+        output_dir,
+        lambda mgr: mgr.update_workspace_rdf_store(data),
+    )

@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 class DataCleanupManager:
+    # NOTE: this class mutates metadata.json directly via
+    # metadata_mgr.mark_version_deleted(), which bypasses the per-connection
+    # lock in lifecycle/metadata.py. That is safe only because the API is
+    # synchronous and nothing instantiates it today. Before calling it from an
+    # async path, route the write through mutate_workspace_metadata() -- an
+    # unserialized read-modify-write of metadata.json reproducibly drops other
+    # writers' sections. tests/test_metadata_concurrency.py exempts this file
+    # by name; remove that exemption at the same time.
     """
     Manages cleanup of old GraphRAG and RDF data based on retention policies.
     """

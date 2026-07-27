@@ -23,6 +23,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
 
+# Callables whose entire job is running work off the event loop. A blocking
+# helper reached through one of these is fine -- the thread hop just happens one
+# indirection further in.
+OFFLOAD_DISPATCHERS = ("to_thread", "mutate_workspace_metadata")
+
 BLOCKING_METHODS = {"read_text", "write_text", "read_bytes", "write_bytes"}
 BLOCKING_MODULE_CALLS = {
     ("json", "dump"),
@@ -162,8 +167,9 @@ def test_async_callers_do_not_invoke_blocking_sync_helpers():
             )
             if name not in blocking_helpers:
                 continue
-            # Accept it when the async function hands the helper to to_thread.
-            if "to_thread" in source and name in source:
+            # Accept it when the async function routes through a dispatcher
+            # that runs the work in a worker thread.
+            if any(d in source for d in OFFLOAD_DISPATCHERS) and name in source:
                 continue
             rel = path.relative_to(PROJECT_ROOT)
             offenders.append(f"{rel}:{call.lineno}  {name}()  from async {qualname}")
