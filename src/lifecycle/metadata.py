@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 _metadata_locks: "weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]]" = (
     weakref.WeakKeyDictionary()
 )
+#
+# Neither registry is evicted. Keys are connection fingerprints (a truncated
+# sha256 of type/host/port/database/schema), so the count is bounded by the
+# distinct databases this server connects to, at roughly 100 bytes each. Adding
+# eviction would risk handing two writers different locks for one connection --
+# reintroducing precisely the race these exist to prevent -- for a saving of
+# well under a megabyte. Left deliberately.
 _metadata_thread_locks: dict[str, threading.Lock] = {}
 _thread_lock_registry_guard = threading.Lock()
 
@@ -485,13 +492,16 @@ async def mutate_workspace_metadata(
     cycle, not just the save: the per-loop asyncio lock, and the process-wide
     threading lock that actually provides mutual exclusion between event loops.
 
-    Scope: this serializes writers **within one process**. Two server processes
-    sharing an OUTPUT_DIR are not serialized against each other. The save itself
-    is atomic (unique temp file plus os.replace), so a cross-process race cannot
-    corrupt or tear metadata.json -- but it can still lose an update, because
-    the loser wrote from a stale read. Serializing across processes would need a
-    file lock; that is not implemented, since the supported deployment is one
-    server per output directory.
+    Scope: this serializes writers **within one process**, which is sufficient
+    because two processes cannot share an OUTPUT_DIR in the first place --
+    Oxigraph's store is RocksDB-backed and takes an exclusive OS lock on its
+    directory, so a second server fails to open it outright ("IO error: While
+    lock file"). A cross-process file lock here would guard metadata.json while
+    the RDF store remained unusable, so it is deliberately not implemented.
+
+    The save is atomic regardless (unique temp file plus os.replace), so even an
+    unexpected concurrent writer cannot corrupt or tear metadata.json -- the
+    worst case is a lost update from a stale read.
 
     Args:
         connection_id: Database connection fingerprint.
