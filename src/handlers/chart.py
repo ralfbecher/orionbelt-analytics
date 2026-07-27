@@ -1,5 +1,6 @@
 """Chart generation handler implementation."""
 
+import asyncio
 import logging
 from typing import Any, cast
 from uuid import uuid4
@@ -160,8 +161,12 @@ async def generate_chart(
                     format="png", width=PNG_WIDTH, height=PNG_HEIGHT
                 )
                 connection_id = services.get_session_data(ctx).connection_id
-                image_file_path = save_image_to_tmp(
-                    image_bytes, image_id, "png", connection_id=connection_id
+                image_file_path = await asyncio.to_thread(
+                    save_image_to_tmp,
+                    image_bytes,
+                    image_id,
+                    "png",
+                    connection_id=connection_id,
                 )
                 if image_file_path:
                     file_uri = f"\nStatic image: file://{image_file_path}"
@@ -191,7 +196,8 @@ async def generate_chart(
 
         connection_id = services.get_session_data(ctx).connection_id
 
-        image_file_path = save_image_to_tmp(
+        image_file_path = await asyncio.to_thread(
+            save_image_to_tmp,
             image_bytes,
             image_id,
             "png",

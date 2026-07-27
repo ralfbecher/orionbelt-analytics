@@ -1,5 +1,6 @@
 """Workspace restore, cleanup, and semantic model storage handler implementation."""
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -13,7 +14,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import VersionMetadataManager
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir, get_models_dir
-from ..utils import read_json_file, utc_now, write_text_file
+from ..utils import read_json_file, read_text_file, utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ async def _restore_workspace_core(
                     enriched_tag = " (enriched)" if is_enriched else ""
                     restored.append(f"Ontology '{sname}'{enriched_tag}")
 
-                    ontology_content = ontology_path.read_text(encoding="utf-8")
+                    ontology_content = await read_text_file(ontology_path)
                     session.loaded_ontology = ontology_content
                     session.loaded_ontology_path = str(ontology_path)
                 except Exception as e:
@@ -152,7 +153,7 @@ async def _restore_workspace_core(
                         connection_id=connection_id,
                         schema_name=sname,
                     )
-                    if manager.load_state(ensure_output_dir()):
+                    if await asyncio.to_thread(manager.load_state, ensure_output_dir()):
                         session.graphrag_manager = manager
                         session.graphrag_initialized = True
                         stats = manager.vector_store.get_statistics()
@@ -315,7 +316,7 @@ async def cleanup_workspace(
     for dir_path, label in dirs_to_remove:
         if dir_path.exists():
             try:
-                shutil.rmtree(dir_path, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, dir_path, ignore_errors=True)
                 removed.append(label)
                 logger.info(f"Cleaned up {label}: {dir_path}")
             except Exception as e:
@@ -405,8 +406,9 @@ async def save_semantic_model(
         )
         return err
 
-    # Update workspace metadata
-    try:
+    # Update workspace metadata. The whole read-modify-write is blocking disk
+    # I/O, so it runs off the event loop rather than stalling other sessions.
+    def _record_model() -> None:
         mgr = VersionMetadataManager(connection_id, OUTPUT_DIR)
         workspace = mgr.metadata.setdefault(
             "workspace",
@@ -423,6 +425,9 @@ async def save_semantic_model(
         }
         workspace["updated_at"] = utc_now().isoformat()
         mgr._save_metadata()
+
+    try:
+        await asyncio.to_thread(_record_model)
     except Exception as e:
         logger.warning(f"Failed to update workspace metadata for model: {e}")
 
@@ -501,7 +506,7 @@ async def get_semantic_model(
         return err
 
     try:
-        model_yaml = model_path.read_text(encoding="utf-8")
+        model_yaml = await read_text_file(model_path)
     except Exception as e:
         err = services.create_error_response(
             f"Failed to read model file: {e}",

@@ -1,5 +1,6 @@
 """GraphRAG initialization and search handler implementations."""
 
+import asyncio
 import logging
 import os
 import time
@@ -14,7 +15,7 @@ from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
-from ..utils import utc_now
+from ..utils import utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ async def _auto_generate_ontology_background(
 
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         ontology_file = conn_dir / f"ontology_{schema_name}_{timestamp}.ttl"
-        ontology_file.write_text(ontology_ttl, encoding="utf-8")
+        await write_text_file(ontology_file, ontology_ttl)
 
         # Write to the specific schema's state (not current schema)
         schema_state = session.get_or_create_schema_state(schema_name)
@@ -147,7 +148,7 @@ async def _auto_initialize_graphrag_background(
             )
 
         output_dir = ensure_output_dir()
-        session.graphrag_manager.save_state(output_dir)
+        await asyncio.to_thread(session.graphrag_manager.save_state, output_dir)
 
         elapsed = time.time() - start_time
         session.graphrag_initialized = True
@@ -173,7 +174,7 @@ async def _auto_initialize_graphrag_background(
                         "table_count": len(tables_dict),
                         "embedding_count": stats.get("total_elements", 0),
                         "schemas": schemas,
-                        "initialized_at": utc_now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "initialized_at": utc_now().isoformat(),
                     },
                 )
             except Exception as e:
@@ -289,7 +290,7 @@ async def initialize_graphrag(
         session.graphrag_initialized = True
 
         output_dir = ensure_output_dir()
-        session.graphrag_manager.save_state(output_dir)
+        await asyncio.to_thread(session.graphrag_manager.save_state, output_dir)
 
         total_tables = session.graphrag_manager.graph_retriever.graph.number_of_nodes()
         schemas = session.graphrag_manager._schema_names
@@ -308,7 +309,7 @@ async def initialize_graphrag(
                         "table_count": len(tables_dict),
                         "embedding_count": stats.get("total_elements", 0),
                         "schemas": schemas,
-                        "initialized_at": utc_now().strftime("%Y-%m-%dT%H:%M:%S"),
+                        "initialized_at": utc_now().isoformat(),
                     },
                 )
             except Exception as e:

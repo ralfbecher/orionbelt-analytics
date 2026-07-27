@@ -1,5 +1,6 @@
 """Ontology generation handler: build OWL/RDF from a database schema."""
 
+import asyncio
 import json
 import logging
 import os
@@ -248,7 +249,7 @@ async def generate_ontology(
         try:
             from ..shacl_validator import validate_ontology
 
-            shacl = validate_ontology(ontology_ttl)
+            shacl = await asyncio.to_thread(validate_ontology, ontology_ttl)
             if shacl["available"] and not shacl["conforms"]:
                 logger.warning(
                     "SHACL: generated ontology has %d violation(s):\n%s",

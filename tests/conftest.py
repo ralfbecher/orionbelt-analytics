@@ -4,9 +4,33 @@ Patches OUTPUT_DIR to use pytest's tmp_path for all tests, preventing
 test artifacts from polluting the real tmp/ directory.
 """
 
+import asyncio
 import contextlib
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+async def drain_background_tasks():
+    """Cancel fire-and-forget tasks a test leaves behind.
+
+    Handlers spawn GraphRAG and RDF initialization as background tasks and
+    stash the handle on the session. Production cancels those in
+    ServerState.cleanup_session(), but tests drive the handlers with Mock
+    sessions that never go through that path -- so without this the task
+    survives the test and gets destroyed mid-await at loop teardown
+    ("Task was destroyed but it is pending!"), which both adds noise and
+    hides whether the background path completed.
+    """
+    yield
+    current = asyncio.current_task()
+    leftover = [
+        task for task in asyncio.all_tasks() if task is not current and not task.done()
+    ]
+    for task in leftover:
+        task.cancel()
+    if leftover:
+        await asyncio.gather(*leftover, return_exceptions=True)
 
 
 @pytest.fixture(autouse=True)

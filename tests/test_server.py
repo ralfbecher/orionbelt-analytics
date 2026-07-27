@@ -1,5 +1,6 @@
 """Comprehensive tests for the OrionBelt Analytics MCP server."""
 
+import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -424,6 +425,14 @@ class TestMCPToolsAsync:
             result = await main_module.discover_schema(
                 mock_ctx, "public", lightweight=False
             )
+
+            # discover_schema spawns GraphRAG init as a fire-and-forget task.
+            # Await it here so the test does not abandon a pending task at loop
+            # teardown (which surfaces as "Task was destroyed but it is
+            # pending!" and hides whether the background path actually worked).
+            init_task = getattr(mock_session_data.graphrag, "_init_task", None)
+            if isinstance(init_task, asyncio.Task):
+                await asyncio.gather(init_task, return_exceptions=True)
 
         assert isinstance(result, dict)
         assert result["schema"] == "public"

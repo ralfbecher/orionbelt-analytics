@@ -149,6 +149,19 @@ class ServerState:
         """Clean up a specific session's resources."""
         if session_id in self._sessions:
             session = self._sessions[session_id]
+            # Background init tasks outlive the session otherwise: they are
+            # fire-and-forget, so an evicted session leaves one still running
+            # against state that no longer exists.
+            for state, label in (
+                (session.graphrag, "GraphRAG"),
+                (session.rdf_store, "RDF store"),
+            ):
+                task = getattr(state, "_init_task", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                    logger.debug(
+                        f"Cancelled pending {label} init task for session {session_id}"
+                    )
             if session.db_manager:
                 try:
                     session.db_manager.disconnect()

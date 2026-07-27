@@ -405,10 +405,18 @@ async def update_workspace_section(
         section: Section key ("schema", "ontology", "graphrag")
         data: Section data dict
     """
+
+    def _update() -> None:
+        VersionMetadataManager(connection_id, output_dir).update_workspace(
+            schema_name, section, data
+        )
+
     lock = _metadata_locks.setdefault(connection_id, asyncio.Lock())
     async with lock:
-        mgr = VersionMetadataManager(connection_id, output_dir)
-        mgr.update_workspace(schema_name, section, data)
+        # Read-modify-write of metadata.json is blocking; run it off the loop so
+        # a large workspace does not stall every other session -- and so the lock
+        # above is not held by a thread that is busy doing disk I/O.
+        await asyncio.to_thread(_update)
 
 
 async def update_workspace_rdf(
@@ -423,7 +431,12 @@ async def update_workspace_rdf(
         output_dir: Base output directory
         data: RDF store state dict
     """
+
+    def _update() -> None:
+        VersionMetadataManager(connection_id, output_dir).update_workspace_rdf_store(
+            data
+        )
+
     lock = _metadata_locks.setdefault(connection_id, asyncio.Lock())
     async with lock:
-        mgr = VersionMetadataManager(connection_id, output_dir)
-        mgr.update_workspace_rdf_store(data)
+        await asyncio.to_thread(_update)

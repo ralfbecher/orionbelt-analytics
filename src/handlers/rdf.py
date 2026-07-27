@@ -15,7 +15,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
-from ..utils import utc_now
+from ..utils import read_text_file, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ async def store_ontology_in_rdf(
                 f"Ontology file not found: {session.ontology_file}"
             ).to_response()
 
-        ontology_ttl = ontology_path.read_text(encoding="utf-8")
+        ontology_ttl = await read_text_file(ontology_path)
 
         if not graph_uri:
             graph_uri = schema_graph_uri(effective_schema)
