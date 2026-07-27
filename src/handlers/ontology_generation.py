@@ -13,6 +13,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
+from ..utils import write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -280,8 +281,7 @@ async def generate_ontology(
         )
         ontology_file_path = conn_dir / ontology_filename
 
-        with open(ontology_file_path, "w", encoding="utf-8") as f:
-            f.write(ontology_ttl)
+        await write_text_file(ontology_file_path, ontology_ttl)
 
         logger.info(
             f"Generated ontology for schema '{schema_name or 'default'}': {len(tables_info)} tables"

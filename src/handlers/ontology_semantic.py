@@ -14,7 +14,7 @@ from ..lifecycle.metadata import update_workspace_section
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
-from ..utils import is_client_disconnect, safe_ctx_info
+from ..utils import is_client_disconnect, safe_ctx_info, write_text_file
 from .ontology_generation import _build_minimal_graph_summary
 
 logger = logging.getLogger(__name__)
@@ -477,8 +477,7 @@ async def apply_semantic_names(
                 )
                 ontology_file_path = conn_dir / new_ontology_filename
 
-                with open(ontology_file_path, "w", encoding="utf-8") as f:
-                    f.write(updated_ontology)
+                await write_text_file(ontology_file_path, updated_ontology)
 
                 logger.info(f"Saved semantic ontology to: {ontology_file_path}")
                 session.ontology_file = new_ontology_filename

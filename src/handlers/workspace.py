@@ -1,6 +1,5 @@
 """Workspace restore, cleanup, and semantic model storage handler implementation."""
 
-import json
 import logging
 import shutil
 from datetime import datetime
@@ -15,6 +14,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import VersionMetadataManager
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir, get_models_dir
+from ..utils import read_json_file, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,7 @@ async def _restore_workspace_core(
             schema_path = conn_dir / schema_file
             if schema_path.exists():
                 try:
-                    with open(schema_path, encoding="utf-8") as f:
-                        schema_json = json.load(f)
+                    schema_json = await read_json_file(schema_path)
 
                     tables_raw = schema_json.get("tables", [])
                     tables_info = [TableInfo.from_dict(t) for t in tables_raw]
@@ -397,8 +396,7 @@ async def save_semantic_model(
     model_path = models_dir / model_filename
 
     try:
-        with open(model_path, "w", encoding="utf-8") as f:
-            f.write(model_yaml)
+        await write_text_file(model_path, model_yaml)
         logger.info(f"Saved semantic model '{model_name}' to: {model_path}")
     except Exception as e:
         logger.error(f"Failed to save semantic model: {e}")

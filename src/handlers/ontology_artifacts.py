@@ -9,6 +9,7 @@ from fastmcp import Context
 from ..handler_context import HandlerContext
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import ensure_output_dir, get_connection_dir
+from ..utils import read_text_file, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,7 @@ async def download_ontology(
                 file_name = f"ontology_{schema_safe}_export.ttl"
                 file_path = conn_dir / file_name
 
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(ontology_ttl)
+                await write_text_file(file_path, ontology_ttl)
 
                 triple_count = len(
                     [
@@ -134,8 +134,7 @@ async def download_ontology(
                     "error_type": "file_not_found",
                 }
 
-            with open(ontology_file_path, encoding="utf-8") as f:
-                ontology_ttl = f.read()
+            ontology_ttl = await read_text_file(ontology_file_path)
 
             file_stat = ontology_file_path.stat()
             logger.info(f"Read ontology from file: {ontology_file_path}")
@@ -220,8 +219,7 @@ async def download_r2rml(
                 "hint": "Run discover_schema() to generate R2RML mapping",
             }
 
-        with open(r2rml_file_path, encoding="utf-8") as f:
-            r2rml_content = f.read()
+        r2rml_content = await read_text_file(r2rml_file_path)
 
         file_stat = r2rml_file_path.stat()
 

@@ -1,7 +1,6 @@
 """Schema analysis, table details, and cache management handler implementations."""
 
 import asyncio
-import json
 import logging
 import os
 from typing import Any
@@ -12,6 +11,7 @@ from ..handler_context import HandlerContext
 from ..lifecycle.metadata import update_workspace_section
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..r2rml_generator import R2RMLGenerator
+from ..utils import write_json_file, write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -326,8 +326,7 @@ async def discover_schema(
         )
         schema_file_path = conn_dir / schema_filename
 
-        with open(schema_file_path, "w", encoding="utf-8") as f:
-            json.dump(full_schema_data, f, indent=2, ensure_ascii=False)
+        await write_json_file(schema_file_path, full_schema_data)
 
         logger.info(f"Saved schema analysis to: {schema_file_path}")
         services.get_session_data(ctx).schema_file = schema_filename
@@ -392,8 +391,7 @@ async def discover_schema(
             )
             r2rml_file_path = conn_dir / r2rml_filename
 
-            with open(r2rml_file_path, "w", encoding="utf-8") as f:
-                f.write(r2rml_content)
+            await write_text_file(r2rml_file_path, r2rml_content)
 
             logger.info(f"Generated R2RML mapping: {r2rml_file_path}")
             services.get_session_data(ctx).r2rml_file = r2rml_filename
