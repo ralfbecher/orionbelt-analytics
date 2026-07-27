@@ -3,7 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -52,37 +52,37 @@ class DatabaseConfig:
     """Database connection configuration."""
 
     # PostgreSQL settings
-    postgres_host: Optional[str] = None
+    postgres_host: str | None = None
     postgres_port: int = DEFAULT_POSTGRES_PORT
-    postgres_database: Optional[str] = None
-    postgres_username: Optional[str] = None
-    postgres_password: Optional[str] = None
+    postgres_database: str | None = None
+    postgres_username: str | None = None
+    postgres_password: str | None = None
 
     # Snowflake settings
-    snowflake_account: Optional[str] = None
-    snowflake_username: Optional[str] = None
-    snowflake_password: Optional[str] = None
-    snowflake_warehouse: Optional[str] = None
-    snowflake_database: Optional[str] = None
+    snowflake_account: str | None = None
+    snowflake_username: str | None = None
+    snowflake_password: str | None = None
+    snowflake_warehouse: str | None = None
+    snowflake_database: str | None = None
     snowflake_schema: str = DEFAULT_SNOWFLAKE_SCHEMA
     snowflake_role: str = "PUBLIC"
 
     # Dremio settings (following official dremio-mcp approach)
-    dremio_uri: Optional[
-        str
-    ] = None  # Full API endpoint like https://api.dremio.cloud or https://host:port
-    dremio_pat: Optional[str] = None  # Personal Access Token
+    dremio_uri: str | None = (
+        None  # Full API endpoint like https://api.dremio.cloud or https://host:port
+    )
+    dremio_pat: str | None = None  # Personal Access Token
     # Legacy settings for backward compatibility
-    dremio_host: Optional[str] = None
+    dremio_host: str | None = None
     dremio_port: int = DEFAULT_DREMIO_PORT
-    dremio_username: Optional[str] = None
-    dremio_password: Optional[str] = None
+    dremio_username: str | None = None
+    dremio_password: str | None = None
     dremio_ssl: bool = False
 
     # ClickHouse settings
-    clickhouse_host: Optional[str] = None
+    clickhouse_host: str | None = None
     clickhouse_port: int = DEFAULT_CLICKHOUSE_PORT
-    clickhouse_database: Optional[str] = None
+    clickhouse_database: str | None = None
     clickhouse_username: str = "default"
     clickhouse_password: str = ""
     clickhouse_protocol: str = "http"
@@ -97,8 +97,8 @@ class ConfigManager:
         # Load .env from project root (one level up from src)
         env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
         load_dotenv(env_path)
-        self._server_config: Optional[ServerConfig] = None
-        self._db_config: Optional[DatabaseConfig] = None
+        self._server_config: ServerConfig | None = None
+        self._db_config: DatabaseConfig | None = None
 
     def get_server_config(self) -> ServerConfig:
         """Get server configuration."""
@@ -198,7 +198,7 @@ class ConfigManager:
 
         logger.info("Server configuration validated successfully")
 
-    def validate_db_config(self, db_type: str) -> Dict[str, Any]:
+    def validate_db_config(self, db_type: str) -> dict[str, Any]:
         """Validate database configuration for a specific type."""
         config = self.get_database_config()
         missing_params = []

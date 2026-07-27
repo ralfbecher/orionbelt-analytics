@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Comprehensive tests for GraphRAG integration.
 
@@ -357,7 +356,8 @@ class TestGraphRetriever:
         retriever = GraphRetriever()
 
         # Add isolated table
-        tables = sample_tables + [
+        tables = [
+            *sample_tables,
             {
                 "name": "isolated_table",
                 "schema": "public",
@@ -366,7 +366,7 @@ class TestGraphRetriever:
                 "primary_keys": [],
                 "comment": None,
                 "row_count": 0,
-            }
+            },
         ]
 
         retriever.build_graph(tables)
@@ -389,7 +389,8 @@ class TestGraphRetriever:
         retriever = GraphRetriever()
 
         # Create schema with fan-trap
-        fan_trap_tables = sample_tables + [
+        fan_trap_tables = [
+            *sample_tables,
             {
                 "name": "payments",
                 "schema": "public",
@@ -404,7 +405,7 @@ class TestGraphRetriever:
                 ],
                 "comment": None,
                 "row_count": 0,
-            }
+            },
         ]
 
         retriever.build_graph(fan_trap_tables)
@@ -442,7 +443,7 @@ class TestCommunityDetector:
 
         # All tables are connected, so should be 1 community
         assert len(communities) == 1
-        assert len(list(communities.values())[0]) == 3
+        assert len(next(iter(communities.values()))) == 3
 
     def test_get_community_summary(self, sample_tables):
         """Test getting community summary."""

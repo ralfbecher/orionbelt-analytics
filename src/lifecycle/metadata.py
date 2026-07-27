@@ -12,12 +12,12 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # Module-level lock dict for serializing concurrent metadata writes per connection
-_metadata_locks: Dict[str, asyncio.Lock] = {}
+_metadata_locks: dict[str, asyncio.Lock] = {}
 
 
 @dataclass
@@ -41,7 +41,7 @@ class VersionInfo:
     ontology_status: str  # "active" or "archived"
 
     # Changes from previous version (if any)
-    changes: Optional[Dict[str, Any]] = None
+    changes: dict[str, Any] | None = None
 
     # Overall status
     status: str = "active"  # "active" or "archived"
@@ -83,12 +83,12 @@ class VersionMetadataManager:
         # Load or initialize metadata
         self.metadata = self._load_metadata()
 
-    def _load_metadata(self) -> Dict[str, Any]:
+    def _load_metadata(self) -> dict[str, Any]:
         """Load metadata from disk or create new."""
         if self.metadata_file.exists():
             try:
-                with open(self.metadata_file, "r") as f:
-                    metadata: Dict[str, Any] = json.load(f)
+                with open(self.metadata_file) as f:
+                    metadata: dict[str, Any] = json.load(f)
                 logger.debug(f"Loaded metadata for connection {self.connection_id}")
                 return metadata
             except Exception as e:
@@ -98,7 +98,7 @@ class VersionMetadataManager:
         else:
             return self._create_fresh_metadata()
 
-    def _create_fresh_metadata(self) -> Dict[str, Any]:
+    def _create_fresh_metadata(self) -> dict[str, Any]:
         """Create fresh metadata structure."""
         return {
             "connection_id": self.connection_id,
@@ -116,14 +116,14 @@ class VersionMetadataManager:
         except Exception as e:
             logger.error(f"Failed to save metadata: {e}")
 
-    def get_schema_metadata(self, schema_name: str) -> Optional[Dict[str, Any]]:
+    def get_schema_metadata(self, schema_name: str) -> dict[str, Any] | None:
         """Get metadata for a specific schema."""
-        schema_meta: Optional[Dict[str, Any]] = self.metadata.get("schemas", {}).get(
+        schema_meta: dict[str, Any] | None = self.metadata.get("schemas", {}).get(
             schema_name
         )
         return schema_meta
 
-    def get_current_version(self, schema_name: str) -> Optional[VersionInfo]:
+    def get_current_version(self, schema_name: str) -> VersionInfo | None:
         """Get current (active) version for a schema."""
         schema_meta = self.get_schema_metadata(schema_name)
         if not schema_meta:
@@ -145,7 +145,7 @@ class VersionMetadataManager:
         self,
         schema_name: str,
         data_type: str = "all",  # "graphrag", "ontology", or "all"
-    ) -> List[VersionInfo]:
+    ) -> list[VersionInfo]:
         """
         Get versions that should be cleaned up based on retention policy.
 
@@ -209,12 +209,12 @@ class VersionMetadataManager:
 
     def _get_cleanup_list(
         self,
-        versions: List[VersionInfo],
+        versions: list[VersionInfo],
         keep_count: int,
         max_age_days: int,
         min_versions: int,
         status_field: str,
-    ) -> List[VersionInfo]:
+    ) -> list[VersionInfo]:
         """
         Get versions to cleanup based on policy.
 
@@ -297,25 +297,23 @@ class VersionMetadataManager:
 
     # --- Workspace State Management ---
 
-    def get_workspace(self) -> Optional[Dict[str, Any]]:
+    def get_workspace(self) -> dict[str, Any] | None:
         """Get the full workspace section from metadata."""
         return self.metadata.get("workspace")
 
-    def get_workspace_schema(self, schema_name: str) -> Optional[Dict[str, Any]]:
+    def get_workspace_schema(self, schema_name: str) -> dict[str, Any] | None:
         """Get workspace data for a specific schema."""
         workspace = self.get_workspace()
         if not workspace:
             return None
-        schema_ws: Optional[Dict[str, Any]] = workspace.get("schemas", {}).get(
-            schema_name
-        )
+        schema_ws: dict[str, Any] | None = workspace.get("schemas", {}).get(schema_name)
         return schema_ws
 
     def update_workspace(
         self,
         schema_name: str,
         section: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
     ) -> None:
         """Update a workspace section for a schema.
 
@@ -368,7 +366,7 @@ class VersionMetadataManager:
 
         self._save_metadata()
 
-    def update_workspace_rdf_store(self, data: Dict[str, Any]) -> None:
+    def update_workspace_rdf_store(self, data: dict[str, Any]) -> None:
         """Update connection-level RDF store info.
 
         Args:
@@ -392,7 +390,7 @@ async def update_workspace_section(
     output_dir: Path,
     schema_name: str,
     section: str,
-    data: Dict[str, Any],
+    data: dict[str, Any],
 ) -> None:
     """Thread-safe workspace section update with per-connection locking.
 
@@ -415,7 +413,7 @@ async def update_workspace_section(
 async def update_workspace_rdf(
     connection_id: str,
     output_dir: Path,
-    data: Dict[str, Any],
+    data: dict[str, Any],
 ) -> None:
     """Thread-safe RDF store workspace update.
 

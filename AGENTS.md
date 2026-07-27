@@ -15,8 +15,8 @@ uv run pytest tests/test_obqc_validator.py -v          # single file
 uv run pytest tests/test_obqc_validator.py::test_name -v   # single test
 uv run pytest -k "ontology and not server"             # keyword expression
 
-black src/ tests/ && isort src/ tests/   # format
-ruff check src/ tests/                   # lint
+black src/ tests/ server.py && isort src/ tests/ server.py   # format
+ruff check src/ tests/ server.py         # lint (server.py is the root entry point)
 mypy src/                                # strict type check (disallow_untyped_defs etc.)
 bandit -r src/                           # security scan (run for SQL/credential changes)
 pre-commit run --all-files               # all of the above as configured hooks

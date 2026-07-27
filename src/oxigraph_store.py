@@ -8,7 +8,7 @@ Stores ontologies, schema metadata, and accumulated knowledge across sessions.
 import logging
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from pyoxigraph import (
@@ -84,7 +84,7 @@ def _escape_sparql_iri(value: str) -> str:
 class OxigraphStoreManager:
     """Manages persistent RDF storage using Oxigraph."""
 
-    def __init__(self, store_path: Optional[Path] = None):
+    def __init__(self, store_path: Path | None = None):
         """
         Initialize Oxigraph store manager.
 
@@ -124,7 +124,7 @@ class OxigraphStoreManager:
             logger.info("Initialized Oxigraph in-memory store")
 
         # Track loaded ontologies
-        self._loaded_ontologies: Dict[str, str] = {}  # schema_name -> graph_uri
+        self._loaded_ontologies: dict[str, str] = {}  # schema_name -> graph_uri
 
     def load_ontology(self, ontology_ttl: str, graph_uri: str, schema_name: str) -> int:
         """
@@ -186,8 +186,8 @@ class OxigraphStoreManager:
             raise
 
     def query_sparql(
-        self, sparql_query: str, timeout_seconds: Optional[int] = 30
-    ) -> List[Dict[str, Any]]:
+        self, sparql_query: str, timeout_seconds: int | None = 30
+    ) -> list[dict[str, Any]]:
         """
         Execute SPARQL query.
 
@@ -220,13 +220,13 @@ class OxigraphStoreManager:
         if timeout_seconds is None:
             return self._execute_select(sparql_query)
 
-        result: List[List[Dict[str, Any]]] = []
-        error: List[BaseException] = []
+        result: list[list[dict[str, Any]]] = []
+        error: list[BaseException] = []
 
         def _runner() -> None:
             try:
                 result.append(self._execute_select(sparql_query))
-            except BaseException as exc:  # noqa: BLE001 - re-raised on caller thread
+            except BaseException as exc:
                 error.append(exc)
 
         worker = threading.Thread(target=_runner, name="sparql-query", daemon=True)
@@ -243,7 +243,7 @@ class OxigraphStoreManager:
             raise error[0]
         return result[0]
 
-    def _execute_select(self, sparql_query: str) -> List[Dict[str, Any]]:
+    def _execute_select(self, sparql_query: str) -> list[dict[str, Any]]:
         """Execute a SELECT query and materialize its bindings (no timeout).
 
         Args:
@@ -261,7 +261,7 @@ class OxigraphStoreManager:
             solutions = cast("QuerySolutions", self.store.query(sparql_query))
             variables = solutions.variables
             for solution in solutions:
-                binding: Dict[str, Any] = {}
+                binding: dict[str, Any] = {}
                 for var in variables:
                     term = solution[var]
                     if term is None:
@@ -351,7 +351,7 @@ class OxigraphStoreManager:
         subject: str,
         predicate: str,
         object: str,
-        graph_uri: Optional[str] = None,
+        graph_uri: str | None = None,
         object_is_literal: bool = False,
     ) -> None:
         """
@@ -396,7 +396,7 @@ class OxigraphStoreManager:
         subject: str,
         predicate: str,
         object: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         graph_uri: str = "http://example.com/knowledge",
     ) -> None:
         """
@@ -448,7 +448,7 @@ class OxigraphStoreManager:
             logger.error(f"Failed to add knowledge: {e}", exc_info=True)
             raise
 
-    def get_ontology_stats(self, graph_uri: Optional[str] = None) -> Dict[str, Any]:
+    def get_ontology_stats(self, graph_uri: str | None = None) -> dict[str, Any]:
         """
         Get statistics about stored ontologies.
 
@@ -498,7 +498,7 @@ class OxigraphStoreManager:
             logger.error(f"Failed to get stats: {e}", exc_info=True)
             return {"error": str(e)}
 
-    def list_tables_sparql(self, schema_graph: str) -> List[str]:
+    def list_tables_sparql(self, schema_graph: str) -> list[str]:
         """
         List all tables from an ontology using SPARQL.
 
@@ -526,8 +526,8 @@ class OxigraphStoreManager:
         return [r["tableName"] for r in results]
 
     def find_columns_by_type(
-        self, data_type: str, schema_graph: Optional[str] = None
-    ) -> List[Dict[str, str]]:
+        self, data_type: str, schema_graph: str | None = None
+    ) -> list[dict[str, str]]:
         """
         Find columns by data type using SPARQL.
 

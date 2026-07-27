@@ -1,7 +1,7 @@
 """Google BigQuery database driver."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
@@ -38,13 +38,13 @@ class BigQueryDriver(DatabaseDriver):
     db_type = "bigquery"
 
     def __init__(self, pool_size: int = 5, max_overflow: int = 10):
-        self.engine: Optional[Engine] = None
-        self.metadata: Optional[MetaData] = None
+        self.engine: Engine | None = None
+        self.metadata: MetaData | None = None
         self._pool_size = pool_size
         self._max_overflow = max_overflow
         self._credential_manager = SecureCredentialManager()
-        self._project_id: Optional[str] = None
-        self._dataset: Optional[str] = None
+        self._project_id: str | None = None
+        self._dataset: str | None = None
 
     # ------------------------------------------------------------------
     # Connection
@@ -144,7 +144,7 @@ class BigQueryDriver(DatabaseDriver):
     # Schema introspection
     # ------------------------------------------------------------------
 
-    def get_schemas(self) -> List[str]:
+    def get_schemas(self) -> list[str]:
         """Get datasets in the BigQuery project.
 
         In BigQuery terminology, datasets are equivalent to schemas.
@@ -167,7 +167,7 @@ class BigQueryDriver(DatabaseDriver):
             logger.error(f"Failed to get BigQuery datasets: {e}")
             return []
 
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
         """Get tables in a dataset.
 
         Args:
@@ -196,8 +196,8 @@ class BigQueryDriver(DatabaseDriver):
             return []
 
     def analyze_table(
-        self, table_name: str, schema_name: Optional[str] = None
-    ) -> Optional[TableInfo]:
+        self, table_name: str, schema_name: str | None = None
+    ) -> TableInfo | None:
         """Analyze a BigQuery table and return its metadata.
 
         BigQuery doesn't support traditional foreign keys, so FK detection is limited.
@@ -221,8 +221,8 @@ class BigQueryDriver(DatabaseDriver):
 
                 # BigQuery doesn't have traditional primary keys or foreign keys
                 # but we can check for clustering/partitioning
-                primary_keys: List[str] = []
-                foreign_keys: List[Dict[str, Any]] = []
+                primary_keys: list[str] = []
+                foreign_keys: list[dict[str, Any]] = []
 
                 columns = []
                 for col_info in table_columns:
@@ -266,8 +266,8 @@ class BigQueryDriver(DatabaseDriver):
     # ------------------------------------------------------------------
 
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """Validate BigQuery SQL syntax using dry run."""
         try:
             assert self.engine is not None
@@ -307,11 +307,11 @@ class BigQueryDriver(DatabaseDriver):
 
         return validation_result
 
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         """Execute BigQuery SQL query."""
         import time as time_mod
 
-        result_data: Dict[str, Any] = {
+        result_data: dict[str, Any] = {
             "success": False,
             "data": [],
             "columns": [],
@@ -372,7 +372,7 @@ class BigQueryDriver(DatabaseDriver):
             result_data["error_type"] = "execution_error"
             logger.error(f"BigQuery SQL execution failed: {e}")
         except Exception as e:
-            result_data["error"] = f"Unexpected execution error: {str(e)}"
+            result_data["error"] = f"Unexpected execution error: {e!s}"
             result_data["error_type"] = "internal_error"
             logger.error(f"Unexpected BigQuery SQL execution error: {e}")
 
@@ -381,9 +381,9 @@ class BigQueryDriver(DatabaseDriver):
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = DEFAULT_SAMPLE_LIMIT,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Sample data from a BigQuery table."""
         if not isinstance(limit, int) or limit < MIN_SAMPLE_LIMIT:
             limit = DEFAULT_SAMPLE_LIMIT

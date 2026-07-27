@@ -9,7 +9,7 @@ Uses a lightweight embedding model to create semantic representations of:
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 
@@ -24,8 +24,8 @@ class SchemaElement:
     element_id: str
     name: str
     description: str
-    metadata: Dict[str, Any]
-    embedding: Optional[np.ndarray] = None
+    metadata: dict[str, Any]
+    embedding: np.ndarray | None = None
 
 
 class SchemaEmbedder:
@@ -68,9 +68,9 @@ class SchemaEmbedder:
     def create_table_embedding(
         self,
         table_name: str,
-        columns: List[Dict[str, Any]],
-        comment: Optional[str] = None,
-        foreign_keys: Optional[List[Dict[str, Any]]] = None,
+        columns: list[dict[str, Any]],
+        comment: str | None = None,
+        foreign_keys: list[dict[str, Any]] | None = None,
     ) -> SchemaElement:
         """
         Create embedding for a table.
@@ -129,8 +129,8 @@ class SchemaEmbedder:
         data_type: str,
         is_primary_key: bool = False,
         is_foreign_key: bool = False,
-        foreign_key_table: Optional[str] = None,
-        comment: Optional[str] = None,
+        foreign_key_table: str | None = None,
+        comment: str | None = None,
     ) -> SchemaElement:
         """
         Create embedding for a column.
@@ -187,7 +187,7 @@ class SchemaEmbedder:
         self,
         from_table: str,
         to_table: str,
-        join_columns: List[tuple],
+        join_columns: list[tuple],
         relationship_type: str = "one_to_many",
     ) -> SchemaElement:
         """
@@ -250,8 +250,8 @@ class SchemaEmbedder:
             return np.asarray(embedding)
 
     def batch_embed_tables(
-        self, tables_info: List[Dict[str, Any]]
-    ) -> List[SchemaElement]:
+        self, tables_info: list[dict[str, Any]]
+    ) -> list[SchemaElement]:
         """
         Create embeddings for multiple tables in batch.
 
@@ -276,8 +276,8 @@ class SchemaEmbedder:
         return elements
 
     def batch_embed_schema(
-        self, tables_info: List[Dict[str, Any]]
-    ) -> Dict[str, List[SchemaElement]]:
+        self, tables_info: list[dict[str, Any]]
+    ) -> dict[str, list[SchemaElement]]:
         """
         Create embeddings for entire schema (tables, columns, relationships).
 
@@ -287,7 +287,7 @@ class SchemaEmbedder:
         Returns:
             Dictionary with 'tables', 'columns', 'relationships' lists
         """
-        result: Dict[str, List[SchemaElement]] = {
+        result: dict[str, list[SchemaElement]] = {
             "tables": [],
             "columns": [],
             "relationships": [],
@@ -300,8 +300,10 @@ class SchemaEmbedder:
                 text_parts = [table["name"]]
                 if table.get("comment"):
                     text_parts.append(table["comment"])
-                for col in table.get("columns", []):
-                    text_parts.append(f"{col['name']} {col['data_type']}")
+                text_parts.extend(
+                    f"{col['name']} {col['data_type']}"
+                    for col in table.get("columns", [])
+                )
                 all_texts.append(" ".join(text_parts))
 
             if all_texts:

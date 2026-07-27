@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 from fastmcp import Context
 
@@ -41,7 +41,7 @@ def _extract_query_intent(sql: str) -> str:
 
     # Extract aggregation functions
     aggs = re.findall(r"\b(SUM|AVG|COUNT|MAX|MIN)\s*\(", sql, re.IGNORECASE)
-    aggs = list(set([a.upper() for a in aggs]))
+    aggs = list({a.upper() for a in aggs})
 
     # Extract WHERE conditions
     where_match = re.search(
@@ -73,7 +73,7 @@ async def validate_sql_syntax(
     ctx: Context,
     sql_query: str,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Validate SQL syntax, security, and fan-trap risks before execution.
 
     Args:
@@ -111,7 +111,7 @@ async def validate_sql_syntax(
                 "database_dialect": "unknown",
             }
 
-        validation_result: Dict[str, Any] = db_manager.validate_sql_syntax(
+        validation_result: dict[str, Any] = db_manager.validate_sql_syntax(
             sql_query.strip()
         )
 
@@ -190,7 +190,7 @@ async def validate_sql_syntax(
         logger.error(f"SQL validation error: {e}")
         return {
             "is_valid": False,
-            "error": f"Validation system error: {str(e)}",
+            "error": f"Validation system error: {e!s}",
             "error_type": "internal_error",
             "suggestions": [
                 "Check if the database connection is stable",
@@ -205,10 +205,10 @@ async def execute_sql_query(
     ctx: Context,
     sql_query: str,
     limit: int,
-    checklist_completed: Union[bool, str],
-    query_intent: Optional[str],
+    checklist_completed: bool | str,
+    query_intent: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute SQL query with built-in validation and fan-trap protection.
 
     Args:
@@ -322,7 +322,7 @@ async def execute_sql_query(
             except Exception as e:
                 logger.debug(f"Context auto-retrieval failed (non-critical): {e}")
 
-        result: Dict[str, Any] = db_manager.execute_sql_query(sql_query.strip(), limit)
+        result: dict[str, Any] = db_manager.execute_sql_query(sql_query.strip(), limit)
 
         # Merge OBQC warnings into result
         if obqc_warnings:
@@ -351,8 +351,8 @@ async def execute_sql_query(
 
     except Exception as e:
         logger.error(f"Critical error in SQL execution: {e}")
-        err: Dict[str, Any] = services.create_error_response(
-            f"Internal server error during SQL execution: {str(e)}",
+        err: dict[str, Any] = services.create_error_response(
+            f"Internal server error during SQL execution: {e!s}",
             "internal_error",
             "This may indicate a system-level issue. Please check server logs and try again.",
         )

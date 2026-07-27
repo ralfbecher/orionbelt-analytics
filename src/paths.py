@@ -6,7 +6,6 @@ Replaces scattered Path construction and hardcoded paths.
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from .constants import DEFAULT_OUTPUT_DIR
 
@@ -23,7 +22,7 @@ def ensure_output_dir() -> Path:
     return OUTPUT_DIR
 
 
-def get_env_file_path() -> Optional[Path]:
+def get_env_file_path() -> Path | None:
     """Find the .env file using standard resolution order.
 
     Resolution order:
@@ -40,7 +39,7 @@ def get_env_file_path() -> Optional[Path]:
     return None
 
 
-def get_oxigraph_store_dir(connection_id: Optional[str] = None) -> Path:
+def get_oxigraph_store_dir(connection_id: str | None = None) -> Path:
     """Get Oxigraph store directory, scoped per connection.
 
     Args:

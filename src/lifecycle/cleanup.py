@@ -8,7 +8,7 @@ based on retention policies.
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .metadata import VersionMetadataManager
 
@@ -35,7 +35,7 @@ class DataCleanupManager:
 
     def cleanup_graphrag(
         self, schema_name: str, dry_run: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Clean up old GraphRAG data based on retention policy.
 
@@ -96,8 +96,8 @@ class DataCleanupManager:
         self,
         schema_name: str,
         dry_run: bool = True,
-        oxigraph_store: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        oxigraph_store: Any | None = None,
+    ) -> dict[str, Any]:
         """
         Clean up old RDF ontology data based on retention policy.
 

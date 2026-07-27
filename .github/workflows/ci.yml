@@ -30,14 +30,17 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # server.py is the entry point and lives at the repo root -- keep it in
+      # every lint/format gate, otherwise it silently drifts out of adoption
+      # whenever a rule set changes.
       - name: Lint (ruff)
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ server.py
 
       - name: Format check (black)
-        run: uv run black --check src/ tests/
+        run: uv run black --check src/ tests/ server.py
 
       - name: Import order (isort)
-        run: uv run isort --check-only src/ tests/
+        run: uv run isort --check-only src/ tests/ server.py
 
       - name: Tests
         run: uv run pytest

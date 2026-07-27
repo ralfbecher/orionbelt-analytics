@@ -299,9 +299,8 @@ class TestDatabaseManager(unittest.TestCase):
 
     def test_get_connection_no_engine(self):
         """Test connection context manager without engine."""
-        with self.assertRaises(RuntimeError):
-            with self.db_manager.get_connection():
-                pass
+        with self.assertRaises(RuntimeError), self.db_manager.get_connection():
+            pass
 
     def test_strip_leading_sql_comments_preserves_duplicates(self):
         """Ensure comment stripping doesn't mis-handle duplicate lines."""

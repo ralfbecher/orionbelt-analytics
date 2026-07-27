@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 from fastmcp import Context
 
@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 async def _maybe_sample_rename_suggestions(
     ctx: Context,
     cryptic_classes: list,
-    cryptic_props_by_table: Dict[str, list],
+    cryptic_props_by_table: dict[str, list],
     cryptic_relationships: list,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Ask the host LLM (via MCP sampling) for ontology-shaped rename suggestions.
 
     Returns the structured payload that ``apply_semantic_names`` consumes
@@ -51,14 +51,10 @@ async def _maybe_sample_rename_suggestions(
     if not (cryptic_classes or cryptic_props_by_table or cryptic_relationships):
         return {"classes": [], "properties": [], "relationships": []}
 
-    items: list[str] = []
-    for c in cryptic_classes:
-        items.append(f"CLASS  {c}")
+    items: list[str] = [f"CLASS  {c}" for c in cryptic_classes]
     for table, cols in cryptic_props_by_table.items():
-        for col in cols:
-            items.append(f"PROP   {table}.{col}")
-    for r in cryptic_relationships:
-        items.append(f"REL    {r}")
+        items.extend(f"PROP   {table}.{col}" for col in cols)
+    items.extend(f"REL    {r}" for r in cryptic_relationships)
 
     logger.info(
         "MCP sampling: requesting rename suggestions for %d items "
@@ -191,26 +187,24 @@ def _build_rename_prompt(items: list[str]) -> str:
     )
 
 
-def _normalize_structured_suggestions(
-    parsed: Optional[Dict[str, Any]]
-) -> Dict[str, list]:
+def _normalize_structured_suggestions(parsed: dict[str, Any] | None) -> dict[str, list]:
     """Validate and clean a structured suggestions payload.
 
     Drops items missing required fields, strips suggestions that match the
     original verbatim, and guarantees the three top-level keys exist.
     """
-    out: Dict[str, list] = {"classes": [], "properties": [], "relationships": []}
+    out: dict[str, list] = {"classes": [], "properties": [], "relationships": []}
     if not isinstance(parsed, dict):
         return out
 
-    def _clean_item(item: Any, *, require_table: bool) -> Optional[Dict[str, str]]:
+    def _clean_item(item: Any, *, require_table: bool) -> dict[str, str] | None:
         if not isinstance(item, dict):
             return None
         original = str(item.get("original_name") or "").strip()
         suggested = str(item.get("suggested_name") or "").strip()
         if not original or not suggested or original == suggested:
             return None
-        cleaned: Dict[str, str] = {
+        cleaned: dict[str, str] = {
             "original_name": original,
             "suggested_name": suggested,
         }
@@ -240,7 +234,7 @@ def _normalize_structured_suggestions(
     return out
 
 
-def _parse_rename_json(text: str) -> Optional[Dict[str, Any]]:
+def _parse_rename_json(text: str) -> dict[str, Any] | None:
     """Best-effort JSON extraction from a sampling text response.
 
     Handles three common shapes: a bare JSON object, a JSON object inside
@@ -280,9 +274,9 @@ def _parse_rename_json(text: str) -> Optional[Dict[str, Any]]:
 
 async def suggest_semantic_names(
     ctx: Context,
-    ontology_file: Optional[str],
+    ontology_file: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract and analyze names from a generated ontology."""
     try:
         try:
@@ -323,7 +317,7 @@ async def suggest_semantic_names(
         ]
 
         # Group cryptic properties by table for compact output
-        cryptic_props_by_table: Dict[str, list] = {}
+        cryptic_props_by_table: dict[str, list] = {}
         for p in extraction_result["properties"]:
             if p.get("needs_review", {}).get("is_cryptic"):
                 table = p.get("table_name") or "unknown"
@@ -407,18 +401,18 @@ async def suggest_semantic_names(
             raise
         logger.error(f"Error extracting names for review: {e}")
         return {
-            "error": f"Failed to extract names: {str(e)}",
+            "error": f"Failed to extract names: {e!s}",
             "error_type": "internal_error",
         }
 
 
 async def apply_semantic_names(
     ctx: Context,
-    suggestions: Union[str, Dict[str, Any]],
-    ontology_file: Optional[str],
+    suggestions: str | dict[str, Any],
+    ontology_file: str | None,
     save_to_file: bool,
     services: "HandlerContext",
-) -> Union[str, Dict[str, Any]]:
+) -> str | dict[str, Any]:
     """Apply LLM-suggested semantic names to an existing ontology."""
     try:
         session = services.get_session_data(ctx)
@@ -431,19 +425,18 @@ async def apply_semantic_names(
                 )
                 ontology_path = conn_dir / ontology_file
                 if not ontology_path.exists():
-                    err: Dict[str, Any] = services.create_error_response(
+                    err: dict[str, Any] = services.create_error_response(
                         f"Ontology file not found: {ontology_file}", "file_not_found"
                     )
                     return err
                 generator = OntologyGenerator()
                 generator.load_from_file(str(ontology_path))
-                source_filename = ontology_file
                 logger.info(f"Loaded ontology from provided file: {ontology_file}")
             else:
-                generator, source_filename = services.load_ontology_from_session(ctx)
+                generator, _ = services.load_ontology_from_session(ctx)
         except ValueError as e:
             err = services.create_error_response(
-                f"{str(e)} - pass ontology_file parameter from generate_ontology response",
+                f"{e!s} - pass ontology_file parameter from generate_ontology response",
                 "session_error",
             )
             return err
@@ -455,7 +448,7 @@ async def apply_semantic_names(
                 name_suggestions = suggestions
         except json.JSONDecodeError as e:
             err = services.create_error_response(
-                f"Invalid JSON in suggestions parameter: {str(e)}",
+                f"Invalid JSON in suggestions parameter: {e!s}",
                 "parameter_error",
                 "Ensure suggestions is valid JSON with classes, properties, and relationships arrays",
             )
@@ -562,6 +555,6 @@ async def apply_semantic_names(
     except Exception as e:
         logger.error(f"Error applying semantic names: {e}")
         err = services.create_error_response(
-            f"Failed to apply semantic names: {str(e)}", "internal_error"
+            f"Failed to apply semantic names: {e!s}", "internal_error"
         )
         return err

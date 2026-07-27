@@ -20,12 +20,12 @@ from .ontology_io import load_my_ontology
 from .ontology_semantic import apply_semantic_names, suggest_semantic_names
 
 __all__ = [
-    "generate_ontology",
-    "suggest_semantic_names",
+    "OUTPUT_DIR",
     "apply_semantic_names",
-    "load_my_ontology",
     "download_ontology",
     "download_r2rml",
-    "OUTPUT_DIR",
     "ensure_output_dir",
+    "generate_ontology",
+    "load_my_ontology",
+    "suggest_semantic_names",
 ]

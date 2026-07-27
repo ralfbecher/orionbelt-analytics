@@ -14,7 +14,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -40,8 +40,8 @@ class StoredElement:
     element_id: str
     name: str
     description: str
-    metadata: Dict[str, Any]
-    embedding: List[float]  # Stored as list for JSON serialization
+    metadata: dict[str, Any]
+    embedding: list[float]  # Stored as list for JSON serialization
 
 
 class ChromaDBVectorStore:
@@ -116,7 +116,7 @@ class ChromaDBVectorStore:
         name: str,
         description: str,
         embedding: np.ndarray,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """
         Add a schema element to the store.
@@ -130,7 +130,7 @@ class ChromaDBVectorStore:
             metadata: Optional metadata dictionary
         """
         # Prepare metadata (ChromaDB requires strings, ints, floats, or bools)
-        chroma_metadata: Dict[str, Any] = {
+        chroma_metadata: dict[str, Any] = {
             "element_type": element_type,
             "name": name,
             "description": description,
@@ -163,7 +163,7 @@ class ChromaDBVectorStore:
             logger.error(f"Failed to add element {element_id}: {e}")
             raise
 
-    def add_elements_batch(self, elements: List[Any]) -> None:
+    def add_elements_batch(self, elements: list[Any]) -> None:
         """
         Add multiple schema elements in batch.
 
@@ -173,13 +173,13 @@ class ChromaDBVectorStore:
         if not elements:
             return
 
-        ids: List[Any] = []
-        embeddings: List[Any] = []
-        metadatas: List[Any] = []
+        ids: list[Any] = []
+        embeddings: list[Any] = []
+        metadatas: list[Any] = []
 
         for elem in elements:
             # Prepare metadata
-            chroma_metadata: Dict[str, Any] = {
+            chroma_metadata: dict[str, Any] = {
                 "element_type": elem.element_type,
                 "name": elem.name,
                 "description": elem.description,
@@ -225,9 +225,9 @@ class ChromaDBVectorStore:
         self,
         query_embedding: np.ndarray,
         top_k: int = 5,
-        element_type: Optional[str] = None,
+        element_type: str | None = None,
         threshold: float = 0.0,
-    ) -> List[Tuple[StoredElement, float]]:
+    ) -> list[tuple[StoredElement, float]]:
         """
         Search for similar elements using ChromaDB.
 
@@ -259,8 +259,8 @@ class ChromaDBVectorStore:
 
         # Query ChromaDB
         try:
-            results: Dict[str, Any] = cast(
-                Dict[str, Any],
+            results: dict[str, Any] = cast(
+                dict[str, Any],
                 self.collection.query(
                     query_embeddings=[query_embedding.tolist()],
                     n_results=top_k,
@@ -273,7 +273,7 @@ class ChromaDBVectorStore:
             return []
 
         # Convert results to StoredElement format
-        stored_elements: List[Tuple[StoredElement, float]] = []
+        stored_elements: list[tuple[StoredElement, float]] = []
 
         if not results["ids"] or not results["ids"][0]:
             return []
@@ -297,9 +297,7 @@ class ChromaDBVectorStore:
             for key, value in metadata.items():
                 if key not in ["element_type", "name", "description"]:
                     # Try to parse JSON strings back to objects
-                    if isinstance(value, str) and (
-                        value.startswith("{") or value.startswith("[")
-                    ):
+                    if isinstance(value, str) and (value.startswith(("{", "["))):
                         try:
                             elem_metadata[key] = json.loads(value)
                         except (json.JSONDecodeError, ValueError):
@@ -325,8 +323,8 @@ class ChromaDBVectorStore:
         query_text: str,
         embedder: Any,
         top_k: int = 5,
-        element_type: Optional[str] = None,
-    ) -> List[Tuple[StoredElement, float]]:
+        element_type: str | None = None,
+    ) -> list[tuple[StoredElement, float]]:
         """
         Search using natural language query.
 
@@ -342,7 +340,7 @@ class ChromaDBVectorStore:
         query_embedding = embedder._embed_text(query_text)
         return self.search(query_embedding, top_k=top_k, element_type=element_type)
 
-    def get_by_id(self, element_id: str) -> Optional[StoredElement]:
+    def get_by_id(self, element_id: str) -> StoredElement | None:
         """
         Get element by ID from ChromaDB.
 
@@ -353,8 +351,8 @@ class ChromaDBVectorStore:
             StoredElement or None if not found
         """
         try:
-            result: Dict[str, Any] = cast(
-                Dict[str, Any],
+            result: dict[str, Any] = cast(
+                dict[str, Any],
                 self.collection.get(
                     ids=[element_id], include=["metadatas", "embeddings"]
                 ),
@@ -370,9 +368,7 @@ class ChromaDBVectorStore:
             elem_metadata = {}
             for key, value in metadata.items():
                 if key not in ["element_type", "name", "description"]:
-                    if isinstance(value, str) and (
-                        value.startswith("{") or value.startswith("[")
-                    ):
+                    if isinstance(value, str) and (value.startswith(("{", "["))):
                         try:
                             elem_metadata[key] = json.loads(value)
                         except (json.JSONDecodeError, ValueError):
@@ -392,7 +388,7 @@ class ChromaDBVectorStore:
             logger.error(f"Failed to get element {element_id}: {e}")
             return None
 
-    def get_by_type(self, element_type: str) -> List[StoredElement]:
+    def get_by_type(self, element_type: str) -> list[StoredElement]:
         """
         Get all elements of a specific type.
 
@@ -403,8 +399,8 @@ class ChromaDBVectorStore:
             List of matching elements
         """
         try:
-            results: Dict[str, Any] = cast(
-                Dict[str, Any],
+            results: dict[str, Any] = cast(
+                dict[str, Any],
                 self.collection.get(
                     where={"element_type": element_type},
                     include=["metadatas", "embeddings"],
@@ -420,9 +416,7 @@ class ChromaDBVectorStore:
                 elem_metadata = {}
                 for key, value in metadata.items():
                     if key not in ["element_type", "name", "description"]:
-                        if isinstance(value, str) and (
-                            value.startswith("{") or value.startswith("[")
-                        ):
+                        if isinstance(value, str) and (value.startswith(("{", "["))):
                             try:
                                 elem_metadata[key] = json.loads(value)
                             except (json.JSONDecodeError, ValueError):
@@ -455,8 +449,8 @@ class ChromaDBVectorStore:
         """
         try:
             # Get all data from ChromaDB
-            results: Dict[str, Any] = cast(
-                Dict[str, Any],
+            results: dict[str, Any] = cast(
+                dict[str, Any],
                 self.collection.get(include=["metadatas", "embeddings"]),
             )
 
@@ -469,9 +463,7 @@ class ChromaDBVectorStore:
                 elem_metadata = {}
                 for key, value in metadata.items():
                     if key not in ["element_type", "name", "description"]:
-                        if isinstance(value, str) and (
-                            value.startswith("{") or value.startswith("[")
-                        ):
+                        if isinstance(value, str) and (value.startswith(("{", "["))):
                             try:
                                 elem_metadata[key] = json.loads(value)
                             except (json.JSONDecodeError, ValueError):
@@ -519,20 +511,20 @@ class ChromaDBVectorStore:
             filepath: Input file path (JSON)
         """
         try:
-            with open(filepath, "r") as f:
+            with open(filepath) as f:
                 data = json.load(f)
 
             # Clear existing data
             self.clear()
 
             # Batch import
-            ids: List[Any] = []
-            embeddings: List[Any] = []
-            metadatas: List[Any] = []
+            ids: list[Any] = []
+            embeddings: list[Any] = []
+            metadatas: list[Any] = []
 
             for elem_dict in data.get("elements", []):
                 # Prepare metadata
-                chroma_metadata: Dict[str, Any] = {
+                chroma_metadata: dict[str, Any] = {
                     "element_type": elem_dict.get("element_type", "unknown"),
                     "name": elem_dict.get("name", ""),
                     "description": elem_dict.get("description", ""),
@@ -560,7 +552,7 @@ class ChromaDBVectorStore:
             logger.error(f"Failed to import vector store: {e}")
             raise
 
-    def get_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> dict[str, Any]:
         """
         Get store statistics.
 

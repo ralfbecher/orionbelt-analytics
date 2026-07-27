@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Test that ontology generation works correctly after discover_schema(lightweight=True).
 

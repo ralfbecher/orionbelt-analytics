@@ -5,7 +5,7 @@ and format summaries for user-facing messages.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .lifecycle.metadata import VersionMetadataManager
 from .paths import OUTPUT_DIR, get_connection_dir
@@ -13,7 +13,7 @@ from .paths import OUTPUT_DIR, get_connection_dir
 logger = logging.getLogger(__name__)
 
 
-def detect_workspace(connection_id: str) -> Optional[Dict[str, Any]]:
+def detect_workspace(connection_id: str) -> dict[str, Any] | None:
     """Detect an existing workspace for a connection.
 
     Reads metadata.json, checks the workspace section exists, and validates
@@ -41,10 +41,10 @@ def detect_workspace(connection_id: str) -> Optional[Dict[str, Any]]:
             return None
 
         conn_dir = get_connection_dir(connection_id)
-        validated: Dict[str, Any] = {}
+        validated: dict[str, Any] = {}
 
         for schema_name, schema_data in schemas.items():
-            schema_status: Dict[str, Any] = {}
+            schema_status: dict[str, Any] = {}
 
             # Validate schema artifact
             schema_section = schema_data.get("schema", {})
@@ -96,7 +96,7 @@ def detect_workspace(connection_id: str) -> Optional[Dict[str, Any]]:
         if not validated:
             return None
 
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "schemas": validated,
             "updated_at": workspace.get("updated_at"),
             "db_type": workspace.get("db_type"),
@@ -115,7 +115,7 @@ def detect_workspace(connection_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def format_workspace_summary(workspace: Dict[str, Any]) -> str:
+def format_workspace_summary(workspace: dict[str, Any]) -> str:
     """Format workspace detection result for user display.
 
     Args:

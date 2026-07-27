@@ -1,7 +1,7 @@
 """Oxigraph RDF store and SPARQL handler implementations."""
 
 import logging
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 from fastmcp import Context
 
@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 async def store_ontology_in_rdf(
     ctx: Context,
-    schema_name: Optional[str],
-    graph_uri: Optional[str],
+    schema_name: str | None,
+    graph_uri: str | None,
     services: "HandlerContext",
-) -> Union[str, Dict[str, Any]]:
+) -> str | dict[str, Any]:
     """Store current session ontology in persistent RDF store with SPARQL access."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError(
@@ -112,7 +112,7 @@ async def store_ontology_in_rdf(
 
     except Exception as e:
         logger.error(f"Failed to store ontology in RDF: {e}", exc_info=True)
-        return RDFError(f"Failed to store ontology: {str(e)}").to_response()
+        return RDFError(f"Failed to store ontology: {e!s}").to_response()
 
 
 def _detect_sparql_type(sparql_query: str) -> str:
@@ -135,7 +135,7 @@ async def query_sparql(
     sparql_query: str,
     timeout_seconds: int,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute SPARQL query (SELECT, ASK, or CONSTRUCT) against stored ontologies."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError("pyoxigraph not installed").to_response()
@@ -178,14 +178,14 @@ async def query_sparql(
 
     except Exception as e:
         logger.error(f"SPARQL query failed: {e}", exc_info=True)
-        return RDFError(f"SPARQL query failed: {str(e)}").to_response()
+        return RDFError(f"SPARQL query failed: {e!s}").to_response()
 
 
 async def query_sparql_ask(
     ctx: Context,
     sparql_query: str,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Execute SPARQL ASK query (returns true/false)."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError("pyoxigraph not installed").to_response()
@@ -201,7 +201,7 @@ async def query_sparql_ask(
 
     except Exception as e:
         logger.error(f"SPARQL ASK query failed: {e}", exc_info=True)
-        return RDFError(f"SPARQL ASK query failed: {str(e)}").to_response()
+        return RDFError(f"SPARQL ASK query failed: {e!s}").to_response()
 
 
 async def add_rdf_knowledge(
@@ -209,9 +209,9 @@ async def add_rdf_knowledge(
     subject: str,
     predicate: str,
     object_value: str,
-    metadata: Optional[Dict[str, Any]],
+    metadata: dict[str, Any] | None,
     services: "HandlerContext",
-) -> Union[str, Dict[str, Any]]:
+) -> str | dict[str, Any]:
     """Add custom knowledge/metadata to the RDF store."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError("pyoxigraph not installed").to_response()
@@ -238,14 +238,14 @@ async def add_rdf_knowledge(
 
     except Exception as e:
         logger.error(f"Failed to add knowledge: {e}", exc_info=True)
-        return RDFError(f"Failed to add knowledge: {str(e)}").to_response()
+        return RDFError(f"Failed to add knowledge: {e!s}").to_response()
 
 
 async def list_tables_sparql(
     ctx: Context,
-    schema_graph: Optional[str],
+    schema_graph: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List all tables from stored ontology using SPARQL."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError("pyoxigraph not installed").to_response()
@@ -273,15 +273,15 @@ async def list_tables_sparql(
 
     except Exception as e:
         logger.error(f"SPARQL table listing failed: {e}", exc_info=True)
-        return RDFError(f"Failed to list tables: {str(e)}").to_response()
+        return RDFError(f"Failed to list tables: {e!s}").to_response()
 
 
 async def find_columns_by_type_sparql(
     ctx: Context,
     data_type: str,
-    schema_graph: Optional[str],
+    schema_graph: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Find columns by data type using SPARQL."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError("pyoxigraph not installed").to_response()
@@ -304,13 +304,13 @@ async def find_columns_by_type_sparql(
 
     except Exception as e:
         logger.error(f"SPARQL column search failed: {e}", exc_info=True)
-        return RDFError(f"Failed to find columns: {str(e)}").to_response()
+        return RDFError(f"Failed to find columns: {e!s}").to_response()
 
 
 async def get_rdf_store_stats(
     ctx: Context,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get statistics about the persistent RDF store."""
     if not OXIGRAPH_AVAILABLE:
         return DependencyError("pyoxigraph not installed").to_response()
@@ -326,4 +326,4 @@ async def get_rdf_store_stats(
 
     except Exception as e:
         logger.error(f"Failed to get store stats: {e}", exc_info=True)
-        return RDFError(f"Failed to get stats: {str(e)}").to_response()
+        return RDFError(f"Failed to get stats: {e!s}").to_response()

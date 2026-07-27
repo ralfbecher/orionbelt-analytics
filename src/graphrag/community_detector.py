@@ -7,7 +7,7 @@ helping organize large schemas into understandable domains.
 
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 import networkx as nx
 
@@ -25,10 +25,10 @@ class CommunityDetector:
             graph: NetworkX graph of schema relationships
         """
         self.graph = graph
-        self.communities: Dict[int, Set[str]] = {}
-        self.table_to_community: Dict[str, int] = {}
+        self.communities: dict[int, set[str]] = {}
+        self.table_to_community: dict[str, int] = {}
 
-    def detect_communities(self, method: str = "louvain") -> Dict[int, Set[str]]:
+    def detect_communities(self, method: str = "louvain") -> dict[int, set[str]]:
         """
         Detect communities in the schema graph.
 
@@ -47,7 +47,7 @@ class CommunityDetector:
         else:
             raise ValueError(f"Unknown method: {method}")
 
-    def _detect_louvain(self) -> Dict[int, Set[str]]:
+    def _detect_louvain(self) -> dict[int, set[str]]:
         """
         Detect communities using Louvain method.
 
@@ -82,7 +82,7 @@ class CommunityDetector:
             )
             return self._detect_connected_components()
 
-    def _detect_connected_components(self) -> Dict[int, Set[str]]:
+    def _detect_connected_components(self) -> dict[int, set[str]]:
         """
         Detect communities using connected components.
 
@@ -108,7 +108,7 @@ class CommunityDetector:
 
         return self.communities
 
-    def _detect_label_propagation(self) -> Dict[int, Set[str]]:
+    def _detect_label_propagation(self) -> dict[int, set[str]]:
         """
         Detect communities using label propagation.
 
@@ -135,7 +135,7 @@ class CommunityDetector:
 
         return self.communities
 
-    def load_communities(self, data: Dict[str, Any]) -> bool:
+    def load_communities(self, data: dict[str, Any]) -> bool:
         """Restore communities from previously saved state.
 
         Args:
@@ -161,7 +161,7 @@ class CommunityDetector:
         logger.info(f"Restored {len(self.communities)} communities from saved state")
         return True
 
-    def get_community(self, table_name: str) -> Optional[int]:
+    def get_community(self, table_name: str) -> int | None:
         """
         Get community ID for a table.
 
@@ -173,7 +173,7 @@ class CommunityDetector:
         """
         return self.table_to_community.get(table_name)
 
-    def get_community_tables(self, community_id: int) -> Set[str]:
+    def get_community_tables(self, community_id: int) -> set[str]:
         """
         Get all tables in a community.
 
@@ -185,7 +185,7 @@ class CommunityDetector:
         """
         return self.communities.get(community_id, set())
 
-    def get_community_summary(self, community_id: int) -> Dict[str, Any]:
+    def get_community_summary(self, community_id: int) -> dict[str, Any]:
         """
         Get summary information about a community.
 
@@ -213,13 +213,13 @@ class CommunityDetector:
         return {
             "community_id": community_id,
             "table_count": len(tables),
-            "tables": sorted(list(tables)),
+            "tables": sorted(tables),
             "internal_relationships": internal_edges,
             "central_table": central_table,
             "avg_connections": sum(degrees.values()) / len(degrees) if degrees else 0,
         }
 
-    def get_all_summaries(self) -> List[Dict[str, Any]]:
+    def get_all_summaries(self) -> list[dict[str, Any]]:
         """
         Get summaries for all communities.
 
@@ -233,7 +233,7 @@ class CommunityDetector:
 
         return summaries
 
-    def suggest_domain_names(self) -> Dict[int, str]:
+    def suggest_domain_names(self) -> dict[int, str]:
         """
         Suggest domain names for communities based on table names.
 
