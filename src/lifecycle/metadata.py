@@ -11,6 +11,8 @@ import contextlib
 import json
 import logging
 import os
+import tempfile
+import threading
 import weakref
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -21,19 +23,29 @@ from ..utils import parse_timestamp, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Locks serializing concurrent metadata writes, keyed by event loop and then by
-# connection. Keyed by loop because an asyncio.Lock binds to whichever loop first
-# awaits it and raises RuntimeError if reused from another -- and this process
-# does run more than one loop (see get_registered_tool_names in main.py, which
-# calls asyncio.run). A WeakKeyDictionary also means a finished loop's locks are
-# collected instead of accumulating for the process lifetime.
+# Metadata writes are serialized in two tiers, because neither lock type alone
+# is sufficient.
+#
+# Tier 1 -- asyncio.Lock, per (event loop, connection). An asyncio.Lock binds to
+# whichever loop first awaits it and raises RuntimeError if reused from another,
+# and this process does run more than one loop (get_registered_tool_names in
+# main.py calls asyncio.run), so these cannot be shared across loops. Their job
+# is to keep a single loop from queueing many worker threads on the same file.
+# The WeakKeyDictionary lets a finished loop's locks be collected.
+#
+# Tier 2 -- threading.Lock, per connection, process-wide, taken inside the
+# worker thread. This is what actually guarantees mutual exclusion: tier 1 locks
+# in different loops know nothing about each other, so without this two loops
+# would read-modify-write the same metadata.json concurrently and lose updates.
 _metadata_locks: "weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]]" = (
     weakref.WeakKeyDictionary()
 )
+_metadata_thread_locks: dict[str, threading.Lock] = {}
+_thread_lock_registry_guard = threading.Lock()
 
 
 def _get_metadata_lock(connection_id: str) -> asyncio.Lock:
-    """Return the write lock for *connection_id* on the running event loop.
+    """Return the per-loop write lock for *connection_id*.
 
     Args:
         connection_id: Database connection fingerprint.
@@ -48,6 +60,26 @@ def _get_metadata_lock(connection_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         per_loop[connection_id] = lock
     return lock
+
+
+def _get_metadata_thread_lock(connection_id: str) -> threading.Lock:
+    """Return the process-wide write lock for *connection_id*.
+
+    Held inside the worker thread so writers on different event loops -- whose
+    asyncio locks are independent -- still serialize against each other.
+
+    Args:
+        connection_id: Database connection fingerprint.
+
+    Returns:
+        A threading.Lock shared by every writer in this process.
+    """
+    with _thread_lock_registry_guard:
+        lock = _metadata_thread_locks.get(connection_id)
+        if lock is None:
+            lock = threading.Lock()
+            _metadata_thread_locks[connection_id] = lock
+        return lock
 
 
 @dataclass
@@ -147,11 +179,16 @@ class VersionMetadataManager:
         JSON unparseable ("Extra data"). Readers now see either the old file or
         the new one, never a mixture.
         """
-        tmp_file = self.metadata_file.with_name(
-            f"{self.metadata_file.name}.{os.getpid()}.tmp"
+        # mkstemp gives every writer its own temp path. A shared name (e.g. one
+        # derived from the pid) means concurrent writers replace and unlink each
+        # other's file, which produced a storm of "No such file or directory"
+        # failures and lost nearly every update.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self.connection_dir, prefix="metadata.json.", suffix=".tmp"
         )
+        tmp_file = Path(tmp_name)
         try:
-            with open(tmp_file, "w") as f:
+            with os.fdopen(fd, "w") as f:
                 json.dump(self.metadata, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
@@ -444,8 +481,17 @@ async def mutate_workspace_metadata(
     into an unparseable file. Both were reproducible before this existed.
 
     The mutation runs in a worker thread -- the file can be large and the loop
-    must not stall -- with the per-connection asyncio lock held across the whole
-    load/modify/save cycle, not just the save.
+    must not stall -- under two locks held across the whole load/modify/save
+    cycle, not just the save: the per-loop asyncio lock, and the process-wide
+    threading lock that actually provides mutual exclusion between event loops.
+
+    Scope: this serializes writers **within one process**. Two server processes
+    sharing an OUTPUT_DIR are not serialized against each other. The save itself
+    is atomic (unique temp file plus os.replace), so a cross-process race cannot
+    corrupt or tear metadata.json -- but it can still lose an update, because
+    the loser wrote from a stale read. Serializing across processes would need a
+    file lock; that is not implemented, since the supported deployment is one
+    server per output directory.
 
     Args:
         connection_id: Database connection fingerprint.
@@ -455,7 +501,10 @@ async def mutate_workspace_metadata(
     """
 
     def _apply() -> None:
-        mutate(VersionMetadataManager(connection_id, output_dir))
+        # Process-wide lock, held for the whole load/modify/save cycle. The
+        # asyncio lock below only covers writers on this event loop.
+        with _get_metadata_thread_lock(connection_id):
+            mutate(VersionMetadataManager(connection_id, output_dir))
 
     async with _get_metadata_lock(connection_id):
         await asyncio.to_thread(_apply)

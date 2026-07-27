@@ -17,7 +17,10 @@ Both failure modes were reproducible. These tests pin the fixes:
 import ast
 import asyncio
 import json
+import tempfile
+import threading
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -124,6 +127,69 @@ async def test_metadata_file_stays_parseable_under_concurrent_writes(tmp_path):
     await watcher
 
     assert not parse_failures, f"reader saw a torn file: {parse_failures[:3]}"
+
+
+def test_writers_on_separate_event_loops_do_not_lose_updates(tmp_path):
+    """Two tiers of lock are needed; the asyncio one alone is not enough.
+
+    asyncio.Lock cannot be shared across event loops, so the per-loop locks are
+    mutually invisible. Without the process-wide threading.Lock held inside the
+    worker thread, threads each running asyncio.run() bypass one another
+    entirely -- the original reproduction kept 31 of 240 updates and logged a
+    storm of failed os.replace calls.
+    """
+    connection_id = "crossloop-test-conn"
+    threads, per_thread = 8, 30
+
+    def writer(tid: int) -> None:
+        async def go() -> None:
+            for i in range(per_thread):
+
+                def _mutate(mgr: VersionMetadataManager, tid=tid, i=i) -> None:
+                    workspace = mgr.metadata.setdefault("workspace", {"schemas": {}})
+                    workspace["schemas"][f"s_{tid}_{i}"] = {"n": i}
+                    mgr._save_metadata()
+
+                await mutate_workspace_metadata(connection_id, tmp_path, _mutate)
+
+        asyncio.run(go())  # a fresh event loop per thread
+
+    workers = [threading.Thread(target=writer, args=(t,)) for t in range(threads)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+
+    raw = (tmp_path / connection_id / "metadata.json").read_text(encoding="utf-8")
+    data = json.loads(raw)
+    assert len(data["workspace"]["schemas"]) == threads * per_thread
+
+
+def test_concurrent_saves_use_distinct_temp_files(tmp_path):
+    """Each save must get its own temp path.
+
+    A shared temp name (one derived from the pid, say) means concurrent writers
+    replace and unlink each other's file mid-flight.
+    """
+    connection_id = "tempname-test-conn"
+    seen: set[str] = set()
+    lock = threading.Lock()
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        with lock:
+            seen.add(name)
+        return fd, name
+
+    with mock.patch.object(tempfile, "mkstemp", recording_mkstemp):
+        mgr = VersionMetadataManager(connection_id, tmp_path)
+        for i in range(20):
+            mgr.metadata["workspace"] = {"schemas": {f"s{i}": {}}}
+            mgr._save_metadata()
+
+    assert len(seen) == 20, "temp file names were reused across saves"
+    assert not list((tmp_path / connection_id).glob("*.tmp")), "temp file left behind"
 
 
 def test_save_metadata_is_atomic(tmp_path):
