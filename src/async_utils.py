@@ -6,17 +6,16 @@ replacing the 8+ duplicated ThreadPoolExecutor patterns in database_manager.py.
 
 import asyncio
 import logging
+from collections.abc import Coroutine
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Coroutine, TypeVar
+from typing import Any
 
 from .constants import CONNECTION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
 
-
-def run_async(coro: Coroutine[Any, Any, T], timeout: int = CONNECTION_TIMEOUT) -> T:
+def run_async[T](coro: Coroutine[Any, Any, T], timeout: int = CONNECTION_TIMEOUT) -> T:
     """Run an async coroutine from a synchronous context.
 
     Handles the common case in MCP servers where tool handlers are sync

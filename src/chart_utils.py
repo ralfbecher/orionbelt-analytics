@@ -1,7 +1,8 @@
 """Chart generation utilities for OrionBelt Analytics."""
 
 import logging
-from typing import Any, Callable, List, Optional, Tuple, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ def format_measure_name(measure: str) -> str:
     return measure.replace("_", " ").title()
 
 
-def get_quarter_sort_order(values: Any, ascending: bool = True) -> Optional[List[str]]:
+def get_quarter_sort_order(values: Any, ascending: bool = True) -> list[str] | None:
     """Get chronological sort order for quarterly values.
 
     Supports multiple formats:
@@ -48,7 +49,7 @@ def get_quarter_sort_order(values: Any, ascending: bool = True) -> Optional[List
         r"^(\d{4})\s*[\-/]?\s*Q([1-4])$",  # 2024 Q1, 2024-Q1, 2024/Q1
     ]
 
-    def parse_quarter(q_str: Any) -> Optional[Tuple[int, int, str]]:
+    def parse_quarter(q_str: Any) -> tuple[int, int, str] | None:
         """Parse quarter string and return (year, quarter, original_string)."""
         q_str_clean = str(q_str).strip()
 
@@ -81,11 +82,11 @@ def get_quarter_sort_order(values: Any, ascending: bool = True) -> Optional[List
 
 def _get_ordinal_sort_key(
     values: Any,
-) -> Optional[Tuple[Callable[[Any], int], bool]]:
+) -> tuple[Callable[[Any], int], bool] | None:
     """Return a sort-key function if values are weekday names or time-of-day labels.
 
     Supports:
-    - Weekdays: Monday–Sunday (full or 3-letter abbreviations, case-insensitive)
+    - Weekdays: Monday-Sunday (full or 3-letter abbreviations, case-insensitive)
     - 12h times: 9AM, 12PM, 3PM, 6 PM, 9:00AM, 12:00 PM, etc.
 
     Returns (key_func, default_ascending) or None if values are not ordinal.
@@ -118,7 +119,7 @@ def _get_ordinal_sort_key(
     # --- 12-hour time detection ---
     time_pat = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$", re.IGNORECASE)
 
-    def parse_12h(v: Any) -> Optional[int]:
+    def parse_12h(v: Any) -> int | None:
         m = time_pat.match(str(v).strip())
         if not m:
             return None
@@ -169,13 +170,13 @@ def create_plotly_chart(
     # str (single measure), list[str] (multi-measure), or None (heatmap);
     # dispatched at runtime via isinstance / truthiness checks below.
     y_column: Any,
-    color_column: Optional[str],
+    color_column: str | None,
     title: str,
-    chart_style: Optional[str],
+    chart_style: str | None,
     width: int = 800,
     height: int = 600,
-    sort_by: Optional[str] = None,
-    sort_order: Optional[str] = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> Any:
     """Create Plotly chart based on type.
 
@@ -462,7 +463,7 @@ def create_plotly_chart(
 
         if is_quarter_column and effective_sort_by == x_column:
             # Extract quarter and year for proper sorting
-            def parse_quarter(q_str: Any) -> Tuple[int, int]:
+            def parse_quarter(q_str: Any) -> tuple[int, int]:
                 match = re.match(
                     r"^Q([1-4])\s*(\d{4})$", str(q_str).strip(), re.IGNORECASE
                 )
@@ -556,7 +557,7 @@ def create_plotly_chart(
                         mode="lines+markers",
                         name=format_measure_name(measure),
                         yaxis="y2" if value_measures else "y",
-                        line=dict(dash="dash") if value_measures else None,
+                        line={"dash": "dash"} if value_measures else None,
                         showlegend=True,
                     )
                 )
@@ -570,18 +571,20 @@ def create_plotly_chart(
 
             if pct_measures and value_measures:
                 # Dual y-axis configuration
-                layout_config["yaxis"] = dict(
-                    title=", ".join([format_measure_name(m) for m in value_measures]),
-                    side="left",
-                )
-                layout_config["yaxis2"] = dict(
-                    title=", ".join([format_measure_name(m) for m in pct_measures]),
-                    side="right",
-                    overlaying="y",
-                    titlefont=dict(color="gray"),
-                    tickfont=dict(color="gray"),
-                    ticksuffix="%",
-                )
+                layout_config["yaxis"] = {
+                    "title": ", ".join(
+                        [format_measure_name(m) for m in value_measures]
+                    ),
+                    "side": "left",
+                }
+                layout_config["yaxis2"] = {
+                    "title": ", ".join([format_measure_name(m) for m in pct_measures]),
+                    "side": "right",
+                    "overlaying": "y",
+                    "titlefont": {"color": "gray"},
+                    "tickfont": {"color": "gray"},
+                    "ticksuffix": "%",
+                }
             elif pct_measures:
                 layout_config["yaxis_title"] = ", ".join(
                     [format_measure_name(m) for m in pct_measures]
@@ -709,27 +712,31 @@ def create_plotly_chart(
     )
 
     if show_legend:
-        legend_config = dict(
-            orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02
-        )
-        margin_config = dict(b=100, t=60, l=60, r=200)
+        legend_config = {
+            "orientation": "v",
+            "yanchor": "middle",
+            "y": 0.5,
+            "xanchor": "left",
+            "x": 1.02,
+        }
+        margin_config = {"b": 100, "t": 60, "l": 60, "r": 200}
     else:
-        legend_config = dict()
-        margin_config = dict(b=100, t=60, l=60, r=60)
+        legend_config = {}
+        margin_config = {"b": 100, "t": 60, "l": 60, "r": 60}
 
     fig.update_layout(
-        font=dict(size=12),
+        font={"size": 12},
         plot_bgcolor="white",
         paper_bgcolor="white",
         margin=margin_config,
         showlegend=show_legend,
         legend=legend_config,
-        modebar=dict(
-            bgcolor="white",
-            color="gray",
-            activecolor="black",
-            orientation="h",
-        ),
+        modebar={
+            "bgcolor": "white",
+            "color": "gray",
+            "activecolor": "black",
+            "orientation": "h",
+        },
         width=width,
         height=height,
     )
@@ -742,7 +749,7 @@ def save_image_to_tmp(
     chart_id: str,
     format: str,
     connection_id: str,
-) -> Optional[str]:
+) -> str | None:
     """Save image bytes to connection-scoped charts directory and return file path.
 
     Args:

@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastmcp import Context
 
@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 async def reset_cache(
     ctx: Context,
-    cache_type: Optional[str],
+    cache_type: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Reset cached schema and/or ontology data to force re-analysis.
 
     Args:
@@ -62,10 +62,10 @@ async def reset_cache(
 
 async def discover_schema(
     ctx: Context,
-    schema_name: Optional[str],
+    schema_name: str | None,
     lightweight: bool,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Analyze database schema and return table metadata with relationships.
 
     Args:
@@ -498,9 +498,9 @@ async def discover_schema(
 async def get_table_details(
     ctx: Context,
     table_name: str,
-    schema_name: Optional[str],
+    schema_name: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get detailed metadata for a single table.
 
     Args:
@@ -593,7 +593,7 @@ async def get_table_details(
 
     except Exception as e:
         logger.error(f"Failed to get table details for {table_name}: {e}")
-        await ctx.error(f"Failed to analyze table '{table_name}': {str(e)}")
+        await ctx.error(f"Failed to analyze table '{table_name}': {e!s}")
         return {
             "success": False,
             "error": str(e),
@@ -605,10 +605,10 @@ async def get_table_details(
 async def sample_table_data(
     ctx: Context,
     table_name: str,
-    schema_name: Optional[str],
+    schema_name: str | None,
     limit: int,
     services: "HandlerContext",
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Sample data from a specific table for analysis.
 
     Args:
@@ -630,7 +630,7 @@ async def sample_table_data(
         schema_name = session.get_last_analyzed_schema()
 
     db_manager = services.get_session_db_manager(ctx)
-    sample_data: List[Dict[str, Any]] = db_manager.sample_table_data(
+    sample_data: list[dict[str, Any]] = db_manager.sample_table_data(
         table_name, schema_name, limit
     )
 

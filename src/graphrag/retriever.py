@@ -7,7 +7,8 @@ of foreign key relationships and semantic similarity.
 
 import logging
 from collections import defaultdict, deque
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 import networkx as nx
 
@@ -20,9 +21,9 @@ class GraphRetriever:
     def __init__(self) -> None:
         """Initialize the graph retriever."""
         self.graph = nx.DiGraph()
-        self._tables_info: Dict[str, Dict[str, Any]] = {}
+        self._tables_info: dict[str, dict[str, Any]] = {}
 
-    def build_graph(self, tables_info: List[Dict[str, Any]]) -> None:
+    def build_graph(self, tables_info: list[dict[str, Any]]) -> None:
         """
         Build graph from schema information.
 
@@ -66,7 +67,7 @@ class GraphRetriever:
             f"and {self.graph.number_of_edges()} edges"
         )
 
-    def add_to_graph(self, tables_info: List[Dict[str, Any]]) -> None:
+    def add_to_graph(self, tables_info: list[dict[str, Any]]) -> None:
         """Add tables and relationships to the existing graph (accumulative).
 
         Unlike build_graph(), this does NOT clear the graph first.
@@ -115,7 +116,7 @@ class GraphRetriever:
 
     def find_join_path(
         self, from_table: str, to_table: str, max_hops: int = 12
-    ) -> Optional[List[Dict[str, Any]]]:
+    ) -> list[dict[str, Any]] | None:
         """
         Find join path between two tables.
 
@@ -219,7 +220,7 @@ class GraphRetriever:
 
     def get_related_tables(
         self, table_name: str, max_distance: int = 1, direction: str = "both"
-    ) -> Dict[int, List[str]]:
+    ) -> dict[int, list[str]]:
         """
         Get tables related to a given table.
 
@@ -234,7 +235,7 @@ class GraphRetriever:
         if table_name not in self.graph:
             return {}
 
-        related: defaultdict[int, List[str]] = defaultdict(list)
+        related: defaultdict[int, list[str]] = defaultdict(list)
 
         if direction in ["outgoing", "both"]:
             # Tables this table references (FK from)
@@ -287,9 +288,9 @@ class GraphRetriever:
     def _directed_closure(
         self,
         table_name: str,
-        max_hops: Optional[int],
+        max_hops: int | None,
         neighbor_fn: Callable[[str], Any],
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Cycle-safe directed transitive closure from a table.
 
         Edges in the FK DiGraph point finer grain -> coarser grain (a table to
@@ -309,8 +310,8 @@ class GraphRetriever:
             return {"exists": False, "tables": [], "by_hop": {}}
 
         visited = {table_name}
-        order: List[str] = []
-        by_hop: Dict[int, List[str]] = {}
+        order: list[str] = []
+        by_hop: dict[int, list[str]] = {}
         queue = deque([(table_name, 0)])
 
         while queue:
@@ -327,8 +328,8 @@ class GraphRetriever:
         return {"exists": True, "tables": order, "by_hop": by_hop}
 
     def reachable_from(
-        self, table_name: str, max_hops: Optional[int] = None
-    ) -> Dict[str, Any]:
+        self, table_name: str, max_hops: int | None = None
+    ) -> dict[str, Any]:
         """Dimension-capable tables for a query anchored on ``table_name``.
 
         Directed many-to-one closure (``successors``): coarser-grain tables that
@@ -338,8 +339,8 @@ class GraphRetriever:
         return self._directed_closure(table_name, max_hops, self.graph.successors)
 
     def measurable_from(
-        self, table_name: str, max_hops: Optional[int] = None
-    ) -> Dict[str, Any]:
+        self, table_name: str, max_hops: int | None = None
+    ) -> dict[str, Any]:
         """Measure-capable tables for a query anchored on ``table_name``.
 
         Directed one-to-many closure (``predecessors``): finer-grain tables that
@@ -348,7 +349,7 @@ class GraphRetriever:
         """
         return self._directed_closure(table_name, max_hops, self.graph.predecessors)
 
-    def detect_fan_traps(self, tables: List[str]) -> List[Dict[str, Any]]:
+    def detect_fan_traps(self, tables: list[str]) -> list[dict[str, Any]]:
         """
         Detect potential fan-trap scenarios in a set of tables.
 
@@ -379,7 +380,7 @@ class GraphRetriever:
 
         return warnings
 
-    def get_table_metadata(self, table_name: str) -> Optional[Dict[str, Any]]:
+    def get_table_metadata(self, table_name: str) -> dict[str, Any] | None:
         """
         Get full metadata for a table.
 
@@ -391,7 +392,7 @@ class GraphRetriever:
         """
         return self._tables_info.get(table_name)
 
-    def get_graph_summary(self) -> Dict[str, Any]:
+    def get_graph_summary(self) -> dict[str, Any]:
         """
         Get summary statistics of the schema graph.
 
@@ -428,7 +429,7 @@ class GraphRetriever:
             / max(self.graph.number_of_nodes(), 1),
         }
 
-    def load_graph(self, tables_info: List[Dict[str, Any]]) -> bool:
+    def load_graph(self, tables_info: list[dict[str, Any]]) -> bool:
         """Rebuild graph from previously saved tables_info.
 
         This is equivalent to build_graph() but named distinctly to indicate
@@ -445,33 +446,31 @@ class GraphRetriever:
         self.build_graph(tables_info)
         return True
 
-    def export_graph_for_visualization(self) -> Dict[str, Any]:
+    def export_graph_for_visualization(self) -> dict[str, Any]:
         """
         Export graph in format suitable for visualization.
 
         Returns:
             Dictionary with nodes and edges
         """
-        nodes = []
-        for node in self.graph.nodes(data=True):
-            nodes.append(
-                {
-                    "id": node[0],
-                    "label": node[0],
-                    "type": "table",
-                    "column_count": node[1].get("column_count", 0),
-                }
-            )
+        nodes = [
+            {
+                "id": node[0],
+                "label": node[0],
+                "type": "table",
+                "column_count": node[1].get("column_count", 0),
+            }
+            for node in self.graph.nodes(data=True)
+        ]
 
-        edges = []
-        for edge in self.graph.edges(data=True):
-            edges.append(
-                {
-                    "from": edge[0],
-                    "to": edge[1],
-                    "label": f"{edge[2].get('column')} → {edge[2].get('referenced_column')}",
-                    "type": "foreign_key",
-                }
-            )
+        edges = [
+            {
+                "from": edge[0],
+                "to": edge[1],
+                "label": f"{edge[2].get('column')} → {edge[2].get('referenced_column')}",
+                "type": "foreign_key",
+            }
+            for edge in self.graph.edges(data=True)
+        ]
 
         return {"nodes": nodes, "edges": edges}

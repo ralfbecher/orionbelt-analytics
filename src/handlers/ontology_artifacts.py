@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastmcp import Context
 
@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 async def download_ontology(
     ctx: Context,
-    schema_name: Optional[str],
+    schema_name: str | None,
     source: str,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Download ontology as TTL file from RDF store or tmp folder."""
     try:
         session = services.get_session_data(ctx)
@@ -98,7 +98,7 @@ async def download_ontology(
                 logger.error(f"Failed to export from RDF store: {e}")
                 return {
                     "success": False,
-                    "error": f"Failed to export from RDF store: {str(e)}",
+                    "error": f"Failed to export from RDF store: {e!s}",
                     "error_type": "rdf_error",
                     "hint": "Try source='file' to read from tmp folder instead",
                 }
@@ -134,7 +134,7 @@ async def download_ontology(
                     "error_type": "file_not_found",
                 }
 
-            with open(ontology_file_path, "r", encoding="utf-8") as f:
+            with open(ontology_file_path, encoding="utf-8") as f:
                 ontology_ttl = f.read()
 
             file_stat = ontology_file_path.stat()
@@ -161,16 +161,16 @@ async def download_ontology(
         logger.error(f"Error downloading ontology: {e}")
         return {
             "success": False,
-            "error": f"Failed to download ontology: {str(e)}",
+            "error": f"Failed to download ontology: {e!s}",
             "error_type": "internal_error",
         }
 
 
 async def download_r2rml(
     ctx: Context,
-    schema_name: Optional[str],
+    schema_name: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Download R2RML mapping file from tmp folder."""
     try:
         session = services.get_session_data(ctx)
@@ -220,7 +220,7 @@ async def download_r2rml(
                 "hint": "Run discover_schema() to generate R2RML mapping",
             }
 
-        with open(r2rml_file_path, "r", encoding="utf-8") as f:
+        with open(r2rml_file_path, encoding="utf-8") as f:
             r2rml_content = f.read()
 
         file_stat = r2rml_file_path.stat()
@@ -253,6 +253,6 @@ async def download_r2rml(
         logger.error(f"Error downloading R2RML: {e}")
         return {
             "success": False,
-            "error": f"Failed to download R2RML: {str(e)}",
+            "error": f"Failed to download R2RML: {e!s}",
             "error_type": "internal_error",
         }

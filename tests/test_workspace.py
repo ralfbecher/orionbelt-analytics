@@ -151,17 +151,16 @@ class TestAsyncWriteSerialization:
     @pytest.mark.asyncio
     async def test_concurrent_writes_dont_corrupt(self):
         """Multiple concurrent writes produce valid JSON."""
-        tasks = []
-        for i in range(5):
-            tasks.append(
-                update_workspace_section(
-                    connection_id=self.connection_id,
-                    output_dir=self.output_dir,
-                    schema_name=f"schema_{i}",
-                    section="schema",
-                    data={"table_count": i * 10},
-                )
+        tasks = [
+            update_workspace_section(
+                connection_id=self.connection_id,
+                output_dir=self.output_dir,
+                schema_name=f"schema_{i}",
+                section="schema",
+                data={"table_count": i * 10},
             )
+            for i in range(5)
+        ]
 
         await asyncio.gather(*tasks)
 

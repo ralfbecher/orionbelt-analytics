@@ -11,7 +11,7 @@ Each MCP session gets its own SessionData instance containing:
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,22 +20,20 @@ class ConnectionState:
     """Database connection tracking."""
 
     def __init__(self) -> None:
-        self.connection_id: Optional[str] = None
-        self.connected_at: Optional[datetime] = None
-        self.db_manager: Optional[Any] = None  # DatabaseManager (avoid circular import)
+        self.connection_id: str | None = None
+        self.connected_at: datetime | None = None
+        self.db_manager: Any | None = None  # DatabaseManager (avoid circular import)
 
 
 class OntologyState:
     """Ontology generation and loading state."""
 
     def __init__(self) -> None:
-        self.ontology_file: Optional[str] = None
-        self.r2rml_file: Optional[str] = None
-        self.loaded_ontology: Optional[str] = None  # TTL content
-        self.loaded_ontology_path: Optional[str] = None  # File path
-        self.obqc_validator: Optional[
-            Any
-        ] = None  # OBQCValidator (avoid circular import)
+        self.ontology_file: str | None = None
+        self.r2rml_file: str | None = None
+        self.loaded_ontology: str | None = None  # TTL content
+        self.loaded_ontology_path: str | None = None  # File path
+        self.obqc_validator: Any | None = None  # OBQCValidator (avoid circular import)
         self.ontology_enriched: bool = False  # True after semantic names applied
 
 
@@ -43,12 +41,12 @@ class SchemaCache:
     """Cached schema analysis results (multi-schema capable)."""
 
     def __init__(self) -> None:
-        self._cached_schema: Optional[
-            Dict[str, List[Any]]
-        ] = None  # schema_name -> List[TableInfo]
-        self._last_analyzed_schema: Optional[str] = None
+        self._cached_schema: dict[
+            str, list[Any]
+        ] | None = None  # schema_name -> List[TableInfo]
+        self._last_analyzed_schema: str | None = None
 
-    def cache_schema_analysis(self, schema_name: str, tables_info: List[Any]) -> None:
+    def cache_schema_analysis(self, schema_name: str, tables_info: list[Any]) -> None:
         """Cache schema analysis results for reuse."""
         if self._cached_schema is None:
             self._cached_schema = {}
@@ -59,7 +57,7 @@ class SchemaCache:
             f"Cached schema analysis for '{cache_key}': {len(tables_info)} tables"
         )
 
-    def get_cached_schema(self, schema_name: str) -> Optional[List[Any]]:
+    def get_cached_schema(self, schema_name: str) -> list[Any] | None:
         """Get cached schema analysis results if available."""
         if self._cached_schema is None:
             return None
@@ -69,7 +67,7 @@ class SchemaCache:
             logger.debug(f"Using cached schema for '{cache_key}': {len(cached)} tables")
         return cached
 
-    def clear(self, schema_name: Optional[str] = None) -> None:
+    def clear(self, schema_name: str | None = None) -> None:
         """Clear cached schema analysis.
 
         Args:
@@ -87,7 +85,7 @@ class SchemaCache:
             self._last_analyzed_schema = None
             logger.debug("Cleared all schema caches")
 
-    def get_last_analyzed_schema(self) -> Optional[str]:
+    def get_last_analyzed_schema(self) -> str | None:
         """Get the name of the last analyzed schema."""
         return self._last_analyzed_schema
 
@@ -96,9 +94,9 @@ class GraphRAGState:
     """GraphRAG integration state with Future-based init tracking."""
 
     def __init__(self) -> None:
-        self.graphrag_manager: Optional[Any] = None  # GraphRAGManager
+        self.graphrag_manager: Any | None = None  # GraphRAGManager
         self.graphrag_initialized: bool = False
-        self._init_task: Optional[asyncio.Task[Any]] = None
+        self._init_task: asyncio.Task[Any] | None = None
 
 
 class RDFStoreState:
@@ -109,9 +107,9 @@ class RDFStoreState:
     """
 
     def __init__(self) -> None:
-        self.oxigraph_store: Optional[Any] = None  # OxigraphStoreManager
+        self.oxigraph_store: Any | None = None  # OxigraphStoreManager
         self.oxigraph_initialized: bool = False
-        self._init_task: Optional[asyncio.Task[Any]] = None
+        self._init_task: asyncio.Task[Any] | None = None
 
 
 class SchemaState:
@@ -124,7 +122,7 @@ class SchemaState:
 
     def __init__(self, schema_name: str):
         self.schema_name = schema_name
-        self.schema_file: Optional[str] = None
+        self.schema_file: str | None = None
         self.ontology = OntologyState()
 
 
@@ -145,8 +143,8 @@ class SessionData:
         self.graphrag = GraphRAGState()
 
         # Multi-schema state (ontology is per-schema)
-        self._schema_states: Dict[str, SchemaState] = {}
-        self._current_schema: Optional[str] = None
+        self._schema_states: dict[str, SchemaState] = {}
+        self._current_schema: str | None = None
 
         # Activity tracking for idle eviction
         self.created_at: datetime = datetime.now()
@@ -159,7 +157,7 @@ class SessionData:
     # --- Multi-schema management ---
 
     @property
-    def current_schema(self) -> Optional[str]:
+    def current_schema(self) -> str | None:
         """Name of the currently active schema."""
         return self._current_schema
 
@@ -181,7 +179,7 @@ class SessionData:
         return self._schema_states[key]
 
     def get_schema_state(
-        self, schema_name: Optional[str] = None
+        self, schema_name: str | None = None
     ) -> Optional["SchemaState"]:
         """Get SchemaState for a specific or the current schema.
 
@@ -198,7 +196,7 @@ class SessionData:
         return self._schema_states.get(key)
 
     def get_or_create_schema_state(
-        self, schema_name: Optional[str] = None
+        self, schema_name: str | None = None
     ) -> "SchemaState":
         """Get or create SchemaState for a specific or the current schema.
 
@@ -210,7 +208,7 @@ class SessionData:
         return self._schema_states[key]
 
     @property
-    def schema_names(self) -> List[str]:
+    def schema_names(self) -> list[str]:
         """List of all schema names with active state."""
         return list(self._schema_states.keys())
 
@@ -239,74 +237,74 @@ class SessionData:
     # Connection properties (session-scoped, unchanged)
 
     @property
-    def db_manager(self) -> Optional[Any]:
+    def db_manager(self) -> Any | None:
         return self.connection.db_manager
 
     @db_manager.setter
-    def db_manager(self, value: Optional[Any]) -> None:
+    def db_manager(self, value: Any | None) -> None:
         self.connection.db_manager = value
 
     @property
-    def connection_id(self) -> Optional[str]:
+    def connection_id(self) -> str | None:
         return self.connection.connection_id
 
     @connection_id.setter
-    def connection_id(self, value: Optional[str]) -> None:
+    def connection_id(self, value: str | None) -> None:
         self.connection.connection_id = value
 
     @property
-    def connected_at(self) -> Optional[datetime]:
+    def connected_at(self) -> datetime | None:
         return self.connection.connected_at
 
     @connected_at.setter
-    def connected_at(self, value: Optional[datetime]) -> None:
+    def connected_at(self, value: datetime | None) -> None:
         self.connection.connected_at = value
 
     # Ontology properties (per-schema via current schema)
 
     @property
-    def ontology_file(self) -> Optional[str]:
+    def ontology_file(self) -> str | None:
         ss = self._current_schema_state
         return ss.ontology.ontology_file if ss else None
 
     @ontology_file.setter
-    def ontology_file(self, value: Optional[str]) -> None:
+    def ontology_file(self, value: str | None) -> None:
         self._ensure_schema_state().ontology.ontology_file = value
 
     @property
-    def r2rml_file(self) -> Optional[str]:
+    def r2rml_file(self) -> str | None:
         ss = self._current_schema_state
         return ss.ontology.r2rml_file if ss else None
 
     @r2rml_file.setter
-    def r2rml_file(self, value: Optional[str]) -> None:
+    def r2rml_file(self, value: str | None) -> None:
         self._ensure_schema_state().ontology.r2rml_file = value
 
     @property
-    def loaded_ontology(self) -> Optional[str]:
+    def loaded_ontology(self) -> str | None:
         ss = self._current_schema_state
         return ss.ontology.loaded_ontology if ss else None
 
     @loaded_ontology.setter
-    def loaded_ontology(self, value: Optional[str]) -> None:
+    def loaded_ontology(self, value: str | None) -> None:
         self._ensure_schema_state().ontology.loaded_ontology = value
 
     @property
-    def loaded_ontology_path(self) -> Optional[str]:
+    def loaded_ontology_path(self) -> str | None:
         ss = self._current_schema_state
         return ss.ontology.loaded_ontology_path if ss else None
 
     @loaded_ontology_path.setter
-    def loaded_ontology_path(self, value: Optional[str]) -> None:
+    def loaded_ontology_path(self, value: str | None) -> None:
         self._ensure_schema_state().ontology.loaded_ontology_path = value
 
     @property
-    def obqc_validator(self) -> Optional[Any]:
+    def obqc_validator(self) -> Any | None:
         ss = self._current_schema_state
         return ss.ontology.obqc_validator if ss else None
 
     @obqc_validator.setter
-    def obqc_validator(self, value: Optional[Any]) -> None:
+    def obqc_validator(self, value: Any | None) -> None:
         self._ensure_schema_state().ontology.obqc_validator = value
 
     @property
@@ -321,22 +319,22 @@ class SessionData:
     # Schema file (per-schema via current schema)
 
     @property
-    def schema_file(self) -> Optional[str]:
+    def schema_file(self) -> str | None:
         ss = self._current_schema_state
         return ss.schema_file if ss else None
 
     @schema_file.setter
-    def schema_file(self, value: Optional[str]) -> None:
+    def schema_file(self, value: str | None) -> None:
         self._ensure_schema_state().schema_file = value
 
     # GraphRAG properties (connection-scoped, accumulative across schemas)
 
     @property
-    def graphrag_manager(self) -> Optional[Any]:
+    def graphrag_manager(self) -> Any | None:
         return self.graphrag.graphrag_manager
 
     @graphrag_manager.setter
-    def graphrag_manager(self, value: Optional[Any]) -> None:
+    def graphrag_manager(self, value: Any | None) -> None:
         self.graphrag.graphrag_manager = value
 
     @property
@@ -350,11 +348,11 @@ class SessionData:
     # RDF Store properties (connection-scoped, unchanged)
 
     @property
-    def oxigraph_store(self) -> Optional[Any]:
+    def oxigraph_store(self) -> Any | None:
         return self.rdf_store.oxigraph_store
 
     @oxigraph_store.setter
-    def oxigraph_store(self, value: Optional[Any]) -> None:
+    def oxigraph_store(self, value: Any | None) -> None:
         self.rdf_store.oxigraph_store = value
 
     @property
@@ -367,15 +365,15 @@ class SessionData:
 
     # --- Delegated methods ---
 
-    def cache_schema_analysis(self, schema_name: str, tables_info: List[Any]) -> None:
+    def cache_schema_analysis(self, schema_name: str, tables_info: list[Any]) -> None:
         """Cache schema analysis results for reuse."""
         self.schema_cache.cache_schema_analysis(schema_name, tables_info)
 
-    def get_cached_schema(self, schema_name: str) -> Optional[List[Any]]:
+    def get_cached_schema(self, schema_name: str) -> list[Any] | None:
         """Get cached schema analysis results if available."""
         return self.schema_cache.get_cached_schema(schema_name)
 
-    def clear_schema_cache(self, schema_name: Optional[str] = None) -> None:
+    def clear_schema_cache(self, schema_name: str | None = None) -> None:
         """Clear cached schema analysis.
 
         Args:
@@ -383,6 +381,6 @@ class SessionData:
         """
         self.schema_cache.clear(schema_name)
 
-    def get_last_analyzed_schema(self) -> Optional[str]:
+    def get_last_analyzed_schema(self) -> str | None:
         """Get the name of the last analyzed schema."""
         return self.schema_cache.get_last_analyzed_schema()

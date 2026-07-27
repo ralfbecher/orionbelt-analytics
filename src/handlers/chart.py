@@ -1,7 +1,7 @@
 """Chart generation handler implementation."""
 
 import logging
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, cast
 from uuid import uuid4
 
 from fastmcp import Context
@@ -21,18 +21,18 @@ PNG_HEIGHT = 600
 
 async def generate_chart(
     ctx: Context,
-    data_source: Union[List[Dict[str, Any]], str],
+    data_source: list[dict[str, Any]] | str,
     chart_type: str,
     x_column: str,
-    y_column: Optional[Union[str, List[str]]],
-    color_column: Optional[str],
-    title: Optional[str],
+    y_column: str | list[str] | None,
+    color_column: str | None,
+    title: str | None,
     chart_style: str,
-    sort_by: Optional[str],
-    sort_order: Optional[str],
+    sort_by: str | None,
+    sort_order: str | None,
     output_format: str,
     services: "HandlerContext",
-) -> Union[str, List[Union[str, Image]]]:
+) -> str | list[str | Image]:
     """Generate interactive or static charts from query results.
 
     This handler delegates to tools.chart.generate_chart for the core charting
@@ -69,7 +69,7 @@ async def generate_chart(
                     f"data_source must be valid JSON (array of objects), not a string. "
                     f"Received string: {raw_data_source[:100]}... "
                     f"Expected format: [{{'key': 'value'}}, ...] "
-                    f"Parse error: {str(e)}"
+                    f"Parse error: {e!s}"
                 )
 
     # Parse y_column if it's a JSON string list
@@ -85,7 +85,7 @@ async def generate_chart(
     logger.info(
         f"generate_chart called with output_format={output_format}, chart_type={chart_type}"
     )
-    chart_data = cast(List[Dict[str, Any]], data_source)
+    chart_data = cast(list[dict[str, Any]], data_source)
     result = generate_chart_impl(
         chart_data,
         chart_type,

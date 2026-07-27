@@ -18,8 +18,9 @@ provide. This keeps the fields statically callable (no ``Optional[Callable]``
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 def _unset_service(*_args: Any, **_kwargs: Any) -> Any:

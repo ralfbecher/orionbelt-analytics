@@ -1,7 +1,7 @@
 """Databricks SQL database driver."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import quote_plus
 
 from sqlalchemy import MetaData, create_engine, inspect, text
@@ -46,15 +46,15 @@ class DatabricksDriver(DatabaseDriver):
     db_type = "databricks"
 
     def __init__(self, pool_size: int = 5, max_overflow: int = 10):
-        self.engine: Optional[Engine] = None
-        self.metadata: Optional[MetaData] = None
+        self.engine: Engine | None = None
+        self.metadata: MetaData | None = None
         self._pool_size = pool_size
         self._max_overflow = max_overflow
         self._credential_manager = SecureCredentialManager()
-        self._server_hostname: Optional[str] = None
-        self._http_path: Optional[str] = None
-        self._catalog: Optional[str] = None
-        self._schema: Optional[str] = None
+        self._server_hostname: str | None = None
+        self._http_path: str | None = None
+        self._catalog: str | None = None
+        self._schema: str | None = None
 
     # ------------------------------------------------------------------
     # Connection
@@ -166,7 +166,7 @@ class DatabricksDriver(DatabaseDriver):
     # Schema introspection
     # ------------------------------------------------------------------
 
-    def get_schemas(self) -> List[str]:
+    def get_schemas(self) -> list[str]:
         """Get schemas (databases) in the Databricks catalog.
 
         In Databricks Unity Catalog, schemas are also known as databases.
@@ -204,7 +204,7 @@ class DatabricksDriver(DatabaseDriver):
                 logger.error(f"Fallback schema query also failed: {fallback_error}")
                 return []
 
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
         """Get tables in a schema."""
         try:
             schema = schema_name or self._schema
@@ -246,8 +246,8 @@ class DatabricksDriver(DatabaseDriver):
                 return []
 
     def analyze_table(
-        self, table_name: str, schema_name: Optional[str] = None
-    ) -> Optional[TableInfo]:
+        self, table_name: str, schema_name: str | None = None
+    ) -> TableInfo | None:
         """Analyze a Databricks table and return its metadata.
 
         Databricks Unity Catalog supports primary keys and foreign keys (constraints),
@@ -285,7 +285,7 @@ class DatabricksDriver(DatabaseDriver):
                 )
 
                 columns = []
-                foreign_keys: List[Dict[str, Any]] = []
+                foreign_keys: list[dict[str, Any]] = []
                 for col_info in table_columns:
                     column_name = col_info["name"]
                     is_pk = column_name.upper() in primary_keys_upper
@@ -352,8 +352,8 @@ class DatabricksDriver(DatabaseDriver):
     # ------------------------------------------------------------------
 
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """Validate Databricks SQL syntax using EXPLAIN."""
         try:
             assert self.engine is not None
@@ -395,11 +395,11 @@ class DatabricksDriver(DatabaseDriver):
 
         return validation_result
 
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         """Execute Databricks SQL query."""
         import time as time_mod
 
-        result_data: Dict[str, Any] = {
+        result_data: dict[str, Any] = {
             "success": False,
             "data": [],
             "columns": [],
@@ -460,7 +460,7 @@ class DatabricksDriver(DatabaseDriver):
             result_data["error_type"] = "execution_error"
             logger.error(f"Databricks SQL execution failed: {e}")
         except Exception as e:
-            result_data["error"] = f"Unexpected execution error: {str(e)}"
+            result_data["error"] = f"Unexpected execution error: {e!s}"
             result_data["error_type"] = "internal_error"
             logger.error(f"Unexpected Databricks SQL execution error: {e}")
 
@@ -469,9 +469,9 @@ class DatabricksDriver(DatabaseDriver):
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = DEFAULT_SAMPLE_LIMIT,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Sample data from a Databricks table."""
         if not isinstance(limit, int) or limit < MIN_SAMPLE_LIMIT:
             limit = DEFAULT_SAMPLE_LIMIT

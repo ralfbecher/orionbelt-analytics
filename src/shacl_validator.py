@@ -11,7 +11,7 @@ real conformance checking wherever the pieces are present.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from .paths import PROJECT_ROOT
 
@@ -33,7 +33,7 @@ def shacl_available() -> bool:
     return True
 
 
-def validate_ontology(ontology_ttl: str) -> Dict[str, Any]:
+def validate_ontology(ontology_ttl: str) -> dict[str, Any]:
     """Validate ontology Turtle against the OBA SHACL shapes.
 
     Returns a structured report. When validation cannot run (missing dependency

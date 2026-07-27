@@ -1,7 +1,7 @@
 """Abstract base class for database drivers."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..database_manager import TableInfo
 
@@ -31,23 +31,23 @@ class DatabaseDriver(ABC):
         """
 
     @abstractmethod
-    def get_schemas(self) -> List[str]:
+    def get_schemas(self) -> list[str]:
         """Return a list of user-visible schema names."""
 
     @abstractmethod
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
         """Return a list of table names in the given schema."""
 
     @abstractmethod
     def analyze_table(
-        self, table_name: str, schema_name: Optional[str] = None
-    ) -> Optional[TableInfo]:
+        self, table_name: str, schema_name: str | None = None
+    ) -> TableInfo | None:
         """Analyze a table and return its metadata."""
 
     @abstractmethod
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """Perform database-level SQL syntax validation.
 
         Args:
@@ -61,16 +61,16 @@ class DatabaseDriver(ABC):
         """
 
     @abstractmethod
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         """Execute a SQL query and return structured results."""
 
     @abstractmethod
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Return sample rows from a table."""
 
     @abstractmethod

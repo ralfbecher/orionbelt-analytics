@@ -5,7 +5,7 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from fastmcp import Context
 
@@ -23,9 +23,9 @@ async def _restore_workspace_core(
     ctx: Context,
     session: Any,
     connection_id: str,
-    schema_name: Optional[str],
+    schema_name: str | None,
     services: "HandlerContext",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Core workspace restore logic shared by connect_database and cleanup recovery.
 
     Loads schema cache, ontology, GraphRAG, and RDF store from disk into
@@ -68,8 +68,8 @@ async def _restore_workspace_core(
     if not schemas_to_restore:
         return None
 
-    restored: List[str] = []
-    failed: List[str] = []
+    restored: list[str] = []
+    failed: list[str] = []
     any_ontology_enriched = False
 
     # --- Per-schema restore: schema cache + ontology ---
@@ -84,7 +84,7 @@ async def _restore_workspace_core(
             schema_path = conn_dir / schema_file
             if schema_path.exists():
                 try:
-                    with open(schema_path, "r", encoding="utf-8") as f:
+                    with open(schema_path, encoding="utf-8") as f:
                         schema_json = json.load(f)
 
                     tables_raw = schema_json.get("tables", [])
@@ -186,7 +186,7 @@ async def _restore_workspace_core(
     }
 
 
-def _format_restore_summary(result: Dict[str, Any]) -> str:
+def _format_restore_summary(result: dict[str, Any]) -> str:
     """Format a restore result dict into a user-facing markdown summary.
 
     Args:
@@ -212,14 +212,12 @@ def _format_restore_summary(result: Dict[str, Any]) -> str:
 
     if restored:
         lines.append("## Restored")
-        for item in restored:
-            lines.append(f"- {item}")
+        lines.extend(f"- {item}" for item in restored)
 
     if failed:
         lines.append("")
         lines.append("## Not Restored")
-        for item in failed:
-            lines.append(f"- {item}")
+        lines.extend(f"- {item}" for item in failed)
         lines.append("")
         lines.append("Use the relevant tools to regenerate missing components.")
 
@@ -238,8 +236,7 @@ def _format_restore_summary(result: Dict[str, Any]) -> str:
     if skip_tools:
         lines.append("")
         lines.append("## DO NOT CALL (already restored)")
-        for tool in skip_tools:
-            lines.append(f"- {tool}")
+        lines.extend(f"- {tool}" for tool in skip_tools)
 
     lines.append("")
     lines.append("## Ready to Use")
@@ -274,7 +271,7 @@ def _format_restore_summary(result: Dict[str, Any]) -> str:
 async def cleanup_workspace(
     ctx: Context,
     services: "HandlerContext",
-) -> Union[str, Dict[str, Any]]:
+) -> str | dict[str, Any]:
     """Delete all workspace files for the current connection and clear session state.
 
     Removes schema JSON, ontology TTL, R2RML mappings, GraphRAG data,
@@ -292,7 +289,7 @@ async def cleanup_workspace(
     session = services.get_session_data(ctx)
 
     if not session.connection_id:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "No database connection. Call connect_database first.",
             "connection_error",
         )
@@ -358,9 +355,9 @@ async def save_semantic_model(
     ctx: Context,
     model_yaml: str,
     model_name: str,
-    schema_name: Optional[str],
+    schema_name: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Save a semantic model YAML to the workspace for reuse across sessions.
 
     Args:
@@ -377,7 +374,7 @@ async def save_semantic_model(
     session = services.get_session_data(ctx)
 
     if not session.connection_id:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "No database connection. Call connect_database first.",
             "connection_error",
         )
@@ -449,7 +446,7 @@ async def get_semantic_model(
     ctx: Context,
     model_name: str,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Retrieve a stored semantic model YAML by name.
 
     Args:
@@ -464,7 +461,7 @@ async def get_semantic_model(
     session = services.get_session_data(ctx)
 
     if not session.connection_id:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "No database connection. Call connect_database first.",
             "connection_error",
         )
@@ -529,7 +526,7 @@ async def get_semantic_model(
 async def list_semantic_models(
     ctx: Context,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List all stored semantic models for the current connection.
 
     Args:
@@ -543,7 +540,7 @@ async def list_semantic_models(
     session = services.get_session_data(ctx)
 
     if not session.connection_id:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "No database connection. Call connect_database first.",
             "connection_error",
         )

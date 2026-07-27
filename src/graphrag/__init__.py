@@ -26,9 +26,9 @@ from .retriever import GraphRetriever
 from .vector_store import VectorStore
 
 __all__ = [
-    "GraphRAGManager",
-    "SchemaEmbedder",
-    "GraphRetriever",
-    "VectorStore",
     "CommunityDetector",
+    "GraphRAGManager",
+    "GraphRetriever",
+    "SchemaEmbedder",
+    "VectorStore",
 ]

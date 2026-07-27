@@ -3,7 +3,7 @@
 import logging
 import os
 from datetime import datetime
-from typing import List, cast
+from typing import cast
 
 from fastmcp import Context
 
@@ -356,7 +356,7 @@ async def connect_database(
         )
 
 
-async def list_schemas(ctx: Context, services: "HandlerContext") -> List[str]:
+async def list_schemas(ctx: Context, services: "HandlerContext") -> list[str]:
     """Get a list of available schemas from the connected database.
 
     Args:

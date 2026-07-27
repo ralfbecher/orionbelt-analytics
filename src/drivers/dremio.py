@@ -1,7 +1,8 @@
 """Dremio database driver (REST API)."""
 
 import logging
-from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, Optional, Set
+from collections.abc import Coroutine
+from typing import TYPE_CHECKING, Any
 
 from ..async_utils import run_async
 from ..constants import (
@@ -27,7 +28,7 @@ class DremioDriver(DatabaseDriver):
     db_type = "dremio"
 
     def __init__(self) -> None:
-        self._rest_connection: Optional[Dict[str, Any]] = None
+        self._rest_connection: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Dremio client factory (replaces 8 duplicated patterns)
@@ -68,7 +69,7 @@ class DremioDriver(DatabaseDriver):
         return value.replace("'", "''")
 
     @staticmethod
-    def _quote_dremio_identifier(identifier: Optional[str]) -> str:
+    def _quote_dremio_identifier(identifier: str | None) -> str:
         """Quote and escape a Dremio identifier or path safely."""
         if identifier is None:
             return ""
@@ -132,7 +133,7 @@ class DremioDriver(DatabaseDriver):
                 }
 
             # Test connection via factory
-            async def test_dremio_connection() -> Dict[str, Any]:
+            async def test_dremio_connection() -> dict[str, Any]:
                 async with await self._create_dremio_client() as client:
                     return await client.test_connection()
 
@@ -179,12 +180,12 @@ class DremioDriver(DatabaseDriver):
     # Schema introspection
     # ------------------------------------------------------------------
 
-    def get_schemas(self) -> List[str]:
-        async def fetch_schemas() -> List[str]:
+    def get_schemas(self) -> list[str]:
+        async def fetch_schemas() -> list[str]:
             try:
                 async with await self._create_dremio_client() as client:
                     catalogs = await client.get_catalogs()
-                    schemas: Set[str] = set()
+                    schemas: set[str] = set()
 
                     logger.debug(f"Dremio catalogs response: {catalogs}")
 
@@ -225,7 +226,7 @@ class DremioDriver(DatabaseDriver):
                             ):
                                 schemas.add(catalog_name)
 
-                    schema_list = sorted(list(schemas))
+                    schema_list = sorted(schemas)
 
                     if not schema_list:
                         logger.info("No catalogs found, using default Dremio spaces")
@@ -246,8 +247,8 @@ class DremioDriver(DatabaseDriver):
     async def _add_dremio_children_recursive(
         self,
         client: "DremioClient",
-        path: List[str],
-        schemas: Set[str],
+        path: list[str],
+        schemas: set[str],
         max_depth: int = 3,
         current_depth: int = 0,
     ) -> None:
@@ -304,8 +305,8 @@ class DremioDriver(DatabaseDriver):
         except Exception as e:
             logger.warning(f"Failed to get children for path {'.'.join(path)}: {e}")
 
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
-        async def fetch_tables() -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
+        async def fetch_tables() -> list[str]:
             try:
                 async with await self._create_dremio_client() as client:
                     if not schema_name:
@@ -339,7 +340,7 @@ class DremioDriver(DatabaseDriver):
                                     )
                             if table_name:
                                 tables.append(table_name)
-                        return sorted(list(set(tables)))
+                        return sorted(set(tables))
                     else:
                         logger.error(
                             f"Failed to get Dremio tables: {result.get('error')}"
@@ -353,9 +354,9 @@ class DremioDriver(DatabaseDriver):
         return run_async(fetch_tables(), timeout=CONNECTION_TIMEOUT)
 
     def analyze_table(
-        self, table_name: str, schema_name: Optional[str] = None
-    ) -> Optional[TableInfo]:
-        async def fetch_table_info() -> Optional[TableInfo]:
+        self, table_name: str, schema_name: str | None = None
+    ) -> TableInfo | None:
+        async def fetch_table_info() -> TableInfo | None:
             try:
                 nonlocal table_name, schema_name
                 async with await self._create_dremio_client() as client:
@@ -429,9 +430,9 @@ class DremioDriver(DatabaseDriver):
     # ------------------------------------------------------------------
 
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        async def validate_query() -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
+        async def validate_query() -> dict[str, Any]:
             try:
                 async with await self._create_dremio_client() as client:
                     explain_sql = f"EXPLAIN PLAN FOR {sql_query}"
@@ -476,14 +477,14 @@ class DremioDriver(DatabaseDriver):
         except Exception as e:
             validation_result["is_valid"] = True
             validation_result["warnings"].append(
-                f"Could not validate syntax via Dremio: {str(e)}"
+                f"Could not validate syntax via Dremio: {e!s}"
             )
             return validation_result
 
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         import time as time_mod
 
-        result_data: Dict[str, Any] = {
+        result_data: dict[str, Any] = {
             "success": False,
             "data": [],
             "columns": [],
@@ -498,7 +499,7 @@ class DremioDriver(DatabaseDriver):
         try:
             start_time = time_mod.time()
 
-            async def run_dremio_query() -> Dict[str, Any]:
+            async def run_dremio_query() -> dict[str, Any]:
                 async with await self._create_dremio_client() as client:
                     return await client.execute_query(sql_query, limit)
 
@@ -533,7 +534,7 @@ class DremioDriver(DatabaseDriver):
                 logger.error(f"Dremio query failed: {result_data['error']}")
 
         except Exception as e:
-            result_data["error"] = f"Dremio execution error: {str(e)}"
+            result_data["error"] = f"Dremio execution error: {e!s}"
             result_data["error_type"] = "dremio_connection_error"
             logger.error(f"Dremio query execution failed: {e}")
 
@@ -542,16 +543,16 @@ class DremioDriver(DatabaseDriver):
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = DEFAULT_SAMPLE_LIMIT,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         if not isinstance(limit, int) or limit < MIN_SAMPLE_LIMIT:
             limit = DEFAULT_SAMPLE_LIMIT
         elif limit > MAX_SAMPLE_LIMIT:
             limit = MAX_SAMPLE_LIMIT
             logger.warning(f"Sample limit capped at {MAX_SAMPLE_LIMIT}")
 
-        async def fetch_sample() -> List[Dict[str, Any]]:
+        async def fetch_sample() -> list[dict[str, Any]]:
             try:
                 async with await self._create_dremio_client() as client:
                     if schema_name:
@@ -566,7 +567,7 @@ class DremioDriver(DatabaseDriver):
                     result = await client.execute_query(query, limit)
 
                     if result.get("success"):
-                        sample_rows: List[Dict[str, Any]] = result.get("data", [])
+                        sample_rows: list[dict[str, Any]] = result.get("data", [])
                         return sample_rows
                     else:
                         error_msg = result.get("error", "Unknown error")
@@ -580,7 +581,7 @@ class DremioDriver(DatabaseDriver):
 
             except Exception as e:
                 logger.error(f"Error sampling Dremio table {table_name}: {e}")
-                raise RuntimeError(f"Error sampling Dremio table: {str(e)}")
+                raise RuntimeError(f"Error sampling Dremio table: {e!s}")
 
         return run_async(fetch_sample(), timeout=CONNECTION_TIMEOUT)
 
@@ -592,7 +593,7 @@ class DremioDriver(DatabaseDriver):
         if not self._rest_connection:
             return False
 
-        async def test_dremio() -> Dict[str, Any]:
+        async def test_dremio() -> dict[str, Any]:
             async with await self._create_dremio_client() as client:
                 return await client.test_connection()
 

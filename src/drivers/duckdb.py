@@ -1,7 +1,7 @@
 """DuckDB/MotherDuck database driver."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Engine
@@ -42,12 +42,12 @@ class DuckDBDriver(DatabaseDriver):
     db_type = "duckdb"
 
     def __init__(self, pool_size: int = 5, max_overflow: int = 10):
-        self.engine: Optional[Engine] = None
-        self.metadata: Optional[MetaData] = None
+        self.engine: Engine | None = None
+        self.metadata: MetaData | None = None
         self._pool_size = pool_size
         self._max_overflow = max_overflow
         self._credential_manager = SecureCredentialManager()
-        self._database_path: Optional[str] = None
+        self._database_path: str | None = None
         self._is_motherduck: bool = False
 
     # ------------------------------------------------------------------
@@ -82,17 +82,16 @@ class DuckDBDriver(DatabaseDriver):
                     connection_string = "duckdb:///md:"
 
                 database_name = database_path[3:]  # Remove "md:" prefix
-                if database_name:
-                    if not identifier_validator.validate_identifier(database_name):
-                        audit_log_security_event(
-                            "invalid_identifier_attempt",
-                            {"identifier": database_name[:50]},
-                            SecurityLevel.MEDIUM,
-                        )
-                        logger.error(
-                            f"Invalid MotherDuck database name: {database_name}"
-                        )
-                        return False
+                if database_name and not identifier_validator.validate_identifier(
+                    database_name
+                ):
+                    audit_log_security_event(
+                        "invalid_identifier_attempt",
+                        {"identifier": database_name[:50]},
+                        SecurityLevel.MEDIUM,
+                    )
+                    logger.error(f"Invalid MotherDuck database name: {database_name}")
+                    return False
             else:
                 # Local DuckDB connection
                 if database_path == ":memory:":
@@ -104,10 +103,7 @@ class DuckDBDriver(DatabaseDriver):
 
             # DuckDB uses StaticPool for in-memory, NullPool for file-based
             poolclass: type[Pool]
-            if database_path == ":memory:":
-                poolclass = StaticPool
-            else:
-                poolclass = NullPool
+            poolclass = StaticPool if database_path == ":memory:" else NullPool
 
             self.engine = create_engine(
                 connection_string,
@@ -157,7 +153,7 @@ class DuckDBDriver(DatabaseDriver):
     # Schema introspection
     # ------------------------------------------------------------------
 
-    def get_schemas(self) -> List[str]:
+    def get_schemas(self) -> list[str]:
         """Get schemas in DuckDB database.
 
         DuckDB uses 'main' as the default schema. Additional schemas can be created
@@ -185,7 +181,7 @@ class DuckDBDriver(DatabaseDriver):
             logger.error(f"Failed to get DuckDB schemas: {e}")
             return ["main"]  # Return default schema on error
 
-    def get_tables(self, schema_name: Optional[str] = None) -> List[str]:
+    def get_tables(self, schema_name: str | None = None) -> list[str]:
         """Get tables in a schema."""
         try:
             schema = schema_name or "main"
@@ -208,8 +204,8 @@ class DuckDBDriver(DatabaseDriver):
             return []
 
     def analyze_table(
-        self, table_name: str, schema_name: Optional[str] = None
-    ) -> Optional[TableInfo]:
+        self, table_name: str, schema_name: str | None = None
+    ) -> TableInfo | None:
         """Analyze a DuckDB table and return its metadata."""
         try:
             schema = schema_name or "main"
@@ -238,7 +234,7 @@ class DuckDBDriver(DatabaseDriver):
                 )
 
                 columns = []
-                foreign_keys: List[Dict[str, Any]] = []
+                foreign_keys: list[dict[str, Any]] = []
                 for col_info in table_columns:
                     column_name = col_info["name"]
                     is_pk = column_name.upper() in primary_keys_upper
@@ -305,8 +301,8 @@ class DuckDBDriver(DatabaseDriver):
     # ------------------------------------------------------------------
 
     def validate_sql_syntax(
-        self, sql_query: str, validation_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, sql_query: str, validation_result: dict[str, Any]
+    ) -> dict[str, Any]:
         """Validate DuckDB SQL syntax using EXPLAIN."""
         try:
             assert self.engine is not None
@@ -338,11 +334,11 @@ class DuckDBDriver(DatabaseDriver):
 
         return validation_result
 
-    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> Dict[str, Any]:
+    def execute_sql_query(self, sql_query: str, limit: int = 1000) -> dict[str, Any]:
         """Execute DuckDB SQL query."""
         import time as time_mod
 
-        result_data: Dict[str, Any] = {
+        result_data: dict[str, Any] = {
             "success": False,
             "data": [],
             "columns": [],
@@ -404,7 +400,7 @@ class DuckDBDriver(DatabaseDriver):
             result_data["error_type"] = "execution_error"
             logger.error(f"DuckDB SQL execution failed: {e}")
         except Exception as e:
-            result_data["error"] = f"Unexpected execution error: {str(e)}"
+            result_data["error"] = f"Unexpected execution error: {e!s}"
             result_data["error_type"] = "internal_error"
             logger.error(f"Unexpected DuckDB SQL execution error: {e}")
 
@@ -413,9 +409,9 @@ class DuckDBDriver(DatabaseDriver):
     def sample_table_data(
         self,
         table_name: str,
-        schema_name: Optional[str] = None,
+        schema_name: str | None = None,
         limit: int = DEFAULT_SAMPLE_LIMIT,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Sample data from a DuckDB table."""
         if not isinstance(limit, int) or limit < MIN_SAMPLE_LIMIT:
             limit = DEFAULT_SAMPLE_LIMIT

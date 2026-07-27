@@ -229,6 +229,7 @@ class TestMCPToolsAsync:
         mock_db_manager.connect_postgresql.return_value = True
         mock_session_data.db_manager = mock_db_manager
 
+        # The function raises exception (no internal error handling)
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
         ), patch(
@@ -364,10 +365,10 @@ class TestMCPToolsAsync:
                 "POSTGRES_USERNAME": "testuser",
                 "POSTGRES_PASSWORD": "testpass",
             },
+        ), pytest.raises(
+            Exception, match="Connection error"
         ):
-            # The function raises exception (no internal error handling)
-            with pytest.raises(Exception, match="Connection error"):
-                await main_module.connect_database(mock_ctx, db_type="postgresql")
+            await main_module.connect_database(mock_ctx, db_type="postgresql")
 
     async def test_list_schemas_success(self, mock_ctx, mock_session_data):
         """Test successful schema listing with session isolation."""
@@ -375,6 +376,7 @@ class TestMCPToolsAsync:
         mock_db_manager.get_schemas.return_value = ["public", "private", "analytics"]
         mock_session_data.db_manager = mock_db_manager
 
+        # The function raises exception (no internal error handling)
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
         ):
@@ -394,10 +396,8 @@ class TestMCPToolsAsync:
 
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
-        ):
-            # The function raises exception (no internal error handling)
-            with pytest.raises(RuntimeError, match="No database connection"):
-                await main_module.list_schemas(mock_ctx)
+        ), pytest.raises(RuntimeError, match="No database connection"):
+            await main_module.list_schemas(mock_ctx)
 
     async def test_discover_schema_success(
         self, mock_ctx, mock_session_data, sample_users_table, sample_orders_table
@@ -411,6 +411,7 @@ class TestMCPToolsAsync:
         ]
         mock_session_data.db_manager = mock_db_manager
 
+        # The function raises exception (no internal error handling)
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
         ), patch("src.server_state.get_session_id", return_value="test-session"), patch(
@@ -447,10 +448,8 @@ class TestMCPToolsAsync:
 
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
-        ):
-            # The function raises exception (no internal error handling)
-            with pytest.raises(RuntimeError, match="No database connection"):
-                await main_module.discover_schema(mock_ctx, "public")
+        ), pytest.raises(RuntimeError, match="No database connection"):
+            await main_module.discover_schema(mock_ctx, "public")
 
     async def test_generate_ontology_success(
         self, mock_ctx, mock_session_data, sample_users_table
@@ -471,6 +470,7 @@ class TestMCPToolsAsync:
             "@prefix ns: <http://example.com/ontology/> ."
         )
 
+        # The function raises exception (no internal error handling)
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
         ), patch(
@@ -556,12 +556,8 @@ class TestMCPToolsAsync:
 
         with patch("src.main.get_session_data", return_value=mock_session_data), patch(
             "src.main.get_session_db_manager", return_value=mock_db_manager
-        ):
-            # The function raises exception (no internal error handling)
-            with pytest.raises(ValueError, match="Invalid table name format"):
-                await main_module.sample_table_data(
-                    mock_ctx, "invalid-table", "public", 10
-                )
+        ), pytest.raises(ValueError, match="Invalid table name format"):
+            await main_module.sample_table_data(mock_ctx, "invalid-table", "public", 10)
 
 
 class TestOntologyGenerator(unittest.TestCase):

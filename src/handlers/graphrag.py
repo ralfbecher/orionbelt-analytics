@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
 
 from fastmcp import Context
 
@@ -19,7 +19,7 @@ from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 logger = logging.getLogger(__name__)
 
 
-def _table_info_to_dict(table_info: Any) -> Dict[str, Any]:
+def _table_info_to_dict(table_info: Any) -> dict[str, Any]:
     """Convert a TableInfo object to a dictionary for GraphRAG/ontology consumption."""
     return {
         "name": table_info.name,
@@ -53,7 +53,7 @@ def _table_info_to_dict(table_info: Any) -> Dict[str, Any]:
 
 async def _auto_generate_ontology_background(
     schema_name: str,
-    tables_info: List[Any],
+    tables_info: list[Any],
     session: Any,
     ctx: Context,
 ) -> None:
@@ -113,7 +113,7 @@ async def _auto_generate_ontology_background(
 
 async def _auto_initialize_graphrag_background(
     schema_name: str,
-    tables_info: List[Any],
+    tables_info: list[Any],
     session: Any,
     ctx: Context,
 ) -> None:
@@ -200,7 +200,7 @@ async def _auto_initialize_graphrag_background(
 
 async def initialize_graphrag(
     ctx: Context,
-    schema_name: Optional[str],
+    schema_name: str | None,
     embedding_model: str,
     services: "HandlerContext",
 ) -> str:
@@ -252,7 +252,7 @@ async def initialize_graphrag(
             return cast(
                 str,
                 services.create_error_response(
-                    f"Failed to fetch schema: {str(e)}", "database_error"
+                    f"Failed to fetch schema: {e!s}", "database_error"
                 ),
             )
 
@@ -339,7 +339,7 @@ async def initialize_graphrag(
         return cast(
             str,
             services.create_error_response(
-                f"GraphRAG initialization failed: {str(e)}", "graphrag_error"
+                f"GraphRAG initialization failed: {e!s}", "graphrag_error"
             ),
         )
 
@@ -348,14 +348,14 @@ async def graphrag_search(
     ctx: Context,
     query: str,
     top_k: int,
-    element_type: Optional[str],
+    element_type: str | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Search schema using natural language via GraphRAG semantic search."""
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -378,7 +378,7 @@ async def graphrag_search(
     except Exception as e:
         logger.error(f"GraphRAG search failed: {e}", exc_info=True)
         err = services.create_error_response(
-            f"GraphRAG search failed: {str(e)}", "graphrag_error"
+            f"GraphRAG search failed: {e!s}", "graphrag_error"
         )
         return err
 
@@ -389,12 +389,12 @@ async def graphrag_query_context(
     max_tables: int,
     max_columns: int,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get optimized context for SQL query generation using GraphRAG."""
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -424,7 +424,7 @@ async def graphrag_query_context(
     except Exception as e:
         logger.error(f"GraphRAG query context failed: {e}", exc_info=True)
         err = services.create_error_response(
-            f"GraphRAG query context failed: {str(e)}", "graphrag_error"
+            f"GraphRAG query context failed: {e!s}", "graphrag_error"
         )
         return err
 
@@ -435,12 +435,12 @@ async def graphrag_find_join_path(
     to_table: str,
     max_hops: int,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Find join path between two tables using GraphRAG graph traversal."""
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -480,7 +480,7 @@ async def graphrag_find_join_path(
     except Exception as e:
         logger.error(f"GraphRAG find join path failed: {e}", exc_info=True)
         err = services.create_error_response(
-            f"GraphRAG find join path failed: {str(e)}", "graphrag_error"
+            f"GraphRAG find join path failed: {e!s}", "graphrag_error"
         )
         return err
 
@@ -488,14 +488,14 @@ async def graphrag_find_join_path(
 async def reachable_from(
     ctx: Context,
     table: str,
-    max_hops: Optional[int],
+    max_hops: int | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dimension-capable tables for a query anchored on ``table`` (many-to-one closure)."""
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -531,7 +531,7 @@ async def reachable_from(
     except Exception as e:
         logger.error(f"reachable_from failed: {e}", exc_info=True)
         err = services.create_error_response(
-            f"reachable_from failed: {str(e)}", "graphrag_error"
+            f"reachable_from failed: {e!s}", "graphrag_error"
         )
         return err
 
@@ -539,14 +539,14 @@ async def reachable_from(
 async def measurable_from(
     ctx: Context,
     table: str,
-    max_hops: Optional[int],
+    max_hops: int | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Measure-capable tables for a query anchored on ``table`` (one-to-many closure)."""
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -582,17 +582,17 @@ async def measurable_from(
     except Exception as e:
         logger.error(f"measurable_from failed: {e}", exc_info=True)
         err = services.create_error_response(
-            f"measurable_from failed: {str(e)}", "graphrag_error"
+            f"measurable_from failed: {e!s}", "graphrag_error"
         )
         return err
 
 
 async def plan_composite_query(
     ctx: Context,
-    facts: List[str],
-    dimensions: Optional[List[str]],
+    facts: list[str],
+    dimensions: list[str] | None,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Advise a Composite Fact Layer (CFL) decomposition for a multi-fact query.
 
     Detects whether the requested facts are independent grains (disjoint
@@ -604,7 +604,7 @@ async def plan_composite_query(
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -709,12 +709,12 @@ async def plan_composite_query(
 async def graphrag_overview(
     ctx: Context,
     services: "HandlerContext",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get GraphRAG schema overview with statistics and communities."""
     session = services.get_session_data(ctx)
 
     if not session.graphrag_initialized or session.graphrag_manager is None:
-        err: Dict[str, Any] = services.create_error_response(
+        err: dict[str, Any] = services.create_error_response(
             "GraphRAG not initialized. Please call discover_schema() first.",
             "graphrag_not_initialized",
         )
@@ -730,6 +730,6 @@ async def graphrag_overview(
     except Exception as e:
         logger.error(f"GraphRAG overview failed: {e}", exc_info=True)
         err = services.create_error_response(
-            f"GraphRAG overview failed: {str(e)}", "graphrag_error"
+            f"GraphRAG overview failed: {e!s}", "graphrag_error"
         )
         return err

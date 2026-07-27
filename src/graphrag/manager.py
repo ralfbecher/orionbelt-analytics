@@ -8,7 +8,7 @@ to provide intelligent schema navigation and context-aware query generation.
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from .community_detector import CommunityDetector
 from .embedder import SchemaEmbedder
@@ -42,8 +42,8 @@ class GraphRAGManager:
         self,
         embedding_model: str = "tfidf",
         embedding_dimension: int = 384,
-        connection_id: Optional[str] = None,
-        schema_name: Optional[str] = None,
+        connection_id: str | None = None,
+        schema_name: str | None = None,
     ):
         """
         Initialize GraphRAG manager.
@@ -56,8 +56,11 @@ class GraphRAGManager:
         """
         self.embedder = SchemaEmbedder(embedding_model=embedding_model)
 
-        # Use ChromaDB if available, otherwise fallback to JSON-based storage
-        self.vector_store: Union["ChromaDBVectorStore", "VectorStore"]
+        # Use ChromaDB if available, otherwise fallback to JSON-based storage.
+        # Quoted deliberately: neither name is guaranteed bound at runtime --
+        # ChromaDBVectorStore is unbound if the import above raised ImportError,
+        # and VectorStore is TYPE_CHECKING-only plus locally imported below.
+        self.vector_store: "ChromaDBVectorStore | VectorStore"  # noqa: UP037
         if CHROMADB_AVAILABLE:
             self.vector_store = ChromaDBVectorStore(
                 connection_id=connection_id or "default",
@@ -72,15 +75,15 @@ class GraphRAGManager:
             logger.warning("Using JSON-based vector store (ChromaDB not available)")
 
         self.graph_retriever = GraphRetriever()
-        self.community_detector: Optional[CommunityDetector] = None
+        self.community_detector: CommunityDetector | None = None
 
         self._initialized = False
-        self._schema_name: Optional[str] = schema_name
-        self._schema_names: List[str] = []
+        self._schema_name: str | None = schema_name
+        self._schema_names: list[str] = []
         self._connection_id: str = connection_id or "default"
 
     def initialize_from_schema(
-        self, tables_info: List[Dict[str, Any]], schema_name: str = "default"
+        self, tables_info: list[dict[str, Any]], schema_name: str = "default"
     ) -> None:
         """
         Initialize GraphRAG from schema metadata.
@@ -121,7 +124,7 @@ class GraphRAGManager:
         logger.info("GraphRAG initialization complete")
 
     def accumulate_schema(
-        self, tables_info: List[Dict[str, Any]], schema_name: str = "default"
+        self, tables_info: list[dict[str, Any]], schema_name: str = "default"
     ) -> None:
         """Add a schema's tables to an already-initialized GraphRAG (accumulative).
 
@@ -168,8 +171,8 @@ class GraphRAGManager:
         )
 
     def search_schema(
-        self, query: str, top_k: int = 5, element_type: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, query: str, top_k: int = 5, element_type: str | None = None
+    ) -> list[dict[str, Any]]:
         """
         Search schema using natural language.
 
@@ -213,7 +216,7 @@ class GraphRAGManager:
         top_k: int = 5,
         include_related: bool = True,
         max_related_distance: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Find tables relevant to a natural language query.
 
@@ -234,7 +237,7 @@ class GraphRAGManager:
 
         primary_tables = [r["element"]["name"] for r in table_results]
 
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "primary_tables": table_results,
             "related_tables": {},
             "communities": {},
@@ -298,7 +301,7 @@ class GraphRAGManager:
 
     def get_query_context(
         self, query: str, max_tables: int = 5, max_columns: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get optimized context for SQL query generation.
 
@@ -372,7 +375,7 @@ class GraphRAGManager:
 
         return context
 
-    def get_schema_overview(self) -> Dict[str, Any]:
+    def get_schema_overview(self) -> dict[str, Any]:
         """
         Get high-level schema overview.
 
@@ -382,7 +385,7 @@ class GraphRAGManager:
         if not self._initialized:
             raise RuntimeError("GraphRAG not initialized")
 
-        overview: Dict[str, Any] = {
+        overview: dict[str, Any] = {
             "schema_name": self._schema_name,
             "vector_store_stats": self.vector_store.get_statistics(),
             "graph_summary": self.graph_retriever.get_graph_summary(),
@@ -516,7 +519,7 @@ class GraphRAGManager:
 
         if graph_path.exists():
             try:
-                with open(graph_path, "r") as f:
+                with open(graph_path) as f:
                     graph_data = json.load(f)
 
                 tables_info = graph_data.get("tables_info")
@@ -551,7 +554,7 @@ class GraphRAGManager:
 
         if communities_path.exists():
             try:
-                with open(communities_path, "r") as f:
+                with open(communities_path) as f:
                     communities_data = json.load(f)
 
                 self.community_detector = CommunityDetector(self.graph_retriever.graph)
