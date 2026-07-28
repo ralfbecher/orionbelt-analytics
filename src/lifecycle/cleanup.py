@@ -106,6 +106,13 @@ class DataCleanupManager:
                     f"Failed to delete GraphRAG version {version.version}: {e}"
                 )
                 errors.append({"version": version.version, "error": str(e)})
+                # This version survives the run, so whatever it still points at
+                # has to be protected for the rest of it. The survivor set was
+                # built before the loop and counts every candidate as doomed --
+                # without this, a later candidate sharing the collection would
+                # delete a store the failed version's metadata still names.
+                if version.graphrag_collection:
+                    live_collections.add(version.graphrag_collection)
 
         return {"deleted": deleted, "errors": errors, "dry_run": dry_run}
 
@@ -173,6 +180,10 @@ class DataCleanupManager:
                     f"Failed to delete Ontology version {version.version}: {e}"
                 )
                 errors.append({"version": version.version, "error": str(e)})
+                # Kept for retry, so its named graph must survive the rest of
+                # the run -- see the matching note in cleanup_graphrag.
+                if version.ontology_graph_uri:
+                    live_graphs.add(version.ontology_graph_uri)
 
         return {"deleted": deleted, "errors": errors, "dry_run": dry_run}
 
