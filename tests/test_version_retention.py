@@ -149,11 +149,11 @@ def test_first_version_has_no_delta(tmp_path):
     assert _mgr(tmp_path).open_version(SCHEMA, "h", 1, 1).changes is None
 
 
-def test_update_active_version_fills_the_ontology_half(tmp_path):
+def test_update_version_fills_the_ontology_half(tmp_path):
     mgr = _mgr(tmp_path)
     mgr.open_version(SCHEMA, "h", 2, 6)
 
-    updated = mgr.update_active_version(
+    updated = mgr.update_version(
         SCHEMA,
         {"ontology_ttl_file": "ontology_x.ttl", "ontology_triple_count": 412},
     )
@@ -163,17 +163,17 @@ def test_update_active_version_fills_the_ontology_half(tmp_path):
     assert mgr.get_current_version(SCHEMA).ontology_triple_count == 412
 
 
-def test_update_active_version_ignores_unknown_fields(tmp_path):
+def test_update_version_ignores_unknown_fields(tmp_path):
     mgr = _mgr(tmp_path)
     mgr.open_version(SCHEMA, "h", 2, 6)
-    assert mgr.update_active_version(SCHEMA, {"not_a_field": 1}) is None
+    assert mgr.update_version(SCHEMA, {"not_a_field": 1}) is None
 
 
-def test_update_active_version_cannot_rewrite_identity(tmp_path):
+def test_update_version_cannot_rewrite_identity(tmp_path):
     """version and created_at define the record; a producer must not move them."""
     mgr = _mgr(tmp_path)
     opened = mgr.open_version(SCHEMA, "h", 2, 6)
-    mgr.update_active_version(SCHEMA, {"version": 99, "created_at": "1999-01-01"})
+    mgr.update_version(SCHEMA, {"version": 99, "created_at": "1999-01-01"})
 
     current = mgr.get_current_version(SCHEMA)
     assert current.version == opened.version
@@ -181,16 +181,63 @@ def test_update_active_version_cannot_rewrite_identity(tmp_path):
 
 
 def test_update_without_an_open_version_is_a_no_op(tmp_path):
-    assert (
-        _mgr(tmp_path).update_active_version(SCHEMA, {"ontology_triple_count": 1})
-        is None
+    assert _mgr(tmp_path).update_version(SCHEMA, {"ontology_triple_count": 1}) is None
+
+
+def test_update_targets_a_specific_version(tmp_path):
+    """A producer must be able to write to the generation it was started for."""
+    mgr = _mgr(tmp_path)
+    mgr.open_version(SCHEMA, "h1", 1, 1)
+    mgr.open_version(SCHEMA, "h2", 2, 2)  # v1 is now archived
+
+    updated = mgr.update_version(SCHEMA, {"ontology_triple_count": 99}, version=1)
+
+    by_number = {v.version: v for v in mgr.get_versions(SCHEMA)}
+    assert updated.version == 1
+    assert by_number[1].ontology_triple_count == 99
+    assert by_number[2].ontology_triple_count == 0, "the newer version is untouched"
+
+
+def test_update_of_an_unknown_version_is_a_no_op(tmp_path):
+    mgr = _mgr(tmp_path)
+    mgr.open_version(SCHEMA, "h", 1, 1)
+    assert mgr.update_version(SCHEMA, {"ontology_triple_count": 5}, version=42) is None
+
+
+async def test_a_slow_producer_cannot_capture_a_newer_version(tmp_path):
+    """The seam the race lived in: resolve the version early, write to it late.
+
+    GraphRAG init and AUTO_ONTOLOGY generation run in the background and can
+    still be going when a second discover_schema for the same schema opens a
+    newer version. Resolving "the active version" at completion time stamped
+    the first run's snapshots, TTL file and triple counts onto a generation
+    they had nothing to do with.
+    """
+    started_for = await open_schema_version(CONN, tmp_path, SCHEMA, _tables(2))
+
+    # A rediscovery lands while the slow producer is still working.
+    await open_schema_version(CONN, tmp_path, SCHEMA, _tables(5))
+
+    await update_schema_version(
+        CONN,
+        tmp_path,
+        SCHEMA,
+        {"graphrag_vector_count": 500, "ontology_triple_count": 900},
+        version=started_for,
     )
+
+    by_number = {v.version: v for v in _mgr(tmp_path).get_versions(SCHEMA)}
+    assert by_number[1].graphrag_vector_count == 500
+    assert (
+        by_number[2].graphrag_vector_count == 0
+    ), "the newer generation must not inherit the older run's output"
+    assert by_number[2].ontology_triple_count == 0
 
 
 def test_versions_survive_a_reload(tmp_path):
     mgr = _mgr(tmp_path)
     mgr.open_version(SCHEMA, "h", 2, 6)
-    mgr.update_active_version(SCHEMA, {"graphrag_vector_count": 77})
+    mgr.update_version(SCHEMA, {"graphrag_vector_count": 77})
 
     assert _mgr(tmp_path).get_current_version(SCHEMA).graphrag_vector_count == 77
 
@@ -317,7 +364,7 @@ def _history(mgr: VersionMetadataManager, count: int, age_days: int) -> None:
     """Record *count* versions, all archived and aged, plus a live one on top."""
     for i in range(count):
         mgr.open_version(SCHEMA, f"h{i}", 1, 1)
-        mgr.update_active_version(
+        mgr.update_version(
             SCHEMA,
             {
                 "ontology_ttl_file": f"ontology_v{i + 1}.ttl",

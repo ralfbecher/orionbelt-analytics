@@ -43,7 +43,7 @@ MUTATORS = {
     "update_workspace_rdf_store",
     "mark_version_deleted",
     "open_version",
-    "update_active_version",
+    "update_version",
 }
 
 CONNECTION_ID = "concurrency-test-conn"

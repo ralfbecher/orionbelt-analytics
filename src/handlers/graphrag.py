@@ -25,30 +25,29 @@ from ..utils import utc_now, write_text_file
 logger = logging.getLogger(__name__)
 
 
-async def _save_graphrag_state(session: Any, schema_name: str) -> None:
-    """Persist GraphRAG state and record its half of the schema's open version.
+async def _save_graphrag_state(
+    session: Any, schema_name: str, version: int | None
+) -> None:
+    """Persist GraphRAG state and record its half of a specific version.
 
-    The snapshot is taken under the version ``discover_schema`` opened, which
-    gives retention per-version files to prune. A missing version -- no
-    connection, or a schema discovered before version recording existed --
-    just means no snapshot; the unversioned current-state files that restore
-    reads are written either way.
+    *version* is the generation this work was started for, resolved by the
+    caller before the task was scheduled -- not looked up here. Initialization
+    can run for a long time, and a second ``discover_schema`` for the same
+    schema during that window opens a newer version; resolving on completion
+    would stamp this run's snapshots and vector counts onto a generation they
+    do not belong to.
+
+    A missing version -- no connection, or a schema discovered before version
+    recording existed -- just means no snapshot; the unversioned current-state
+    files that restore reads are written either way.
 
     Args:
         session: Session data holding the GraphRAG manager and connection id.
         schema_name: Schema whose version to record against.
+        version: The version number this work belongs to, if known.
     """
     manager = session.graphrag_manager
     output_dir = ensure_output_dir()
-
-    version: int | None = None
-    if session.connection_id:
-        try:
-            version = await get_active_version_number(
-                session.connection_id, OUTPUT_DIR, schema_name
-            )
-        except Exception as e:
-            logger.warning(f"Failed to read active version: {e}")
 
     snapshot_files = await asyncio.to_thread(
         manager.save_state, output_dir, version, schema_name
@@ -67,6 +66,7 @@ async def _save_graphrag_state(session: Any, schema_name: str) -> None:
                 "graphrag_collection": manager.vector_collection_name,
                 "graphrag_files": snapshot_files,
             },
+            version=version,
         )
     except Exception as e:
         logger.warning(f"Failed to record GraphRAG version state: {e}")
@@ -109,11 +109,16 @@ async def _auto_generate_ontology_background(
     tables_info: list[Any],
     session: Any,
     ctx: Context,
+    version: int | None = None,
 ) -> None:
     """Background task: Auto-generate ontology after GraphRAG completes.
 
     Uses direct schema state access (not convenience properties) to avoid
     race conditions when the user switches schemas during background work.
+
+    *version* is the generation this work was started for. It is recorded
+    against explicitly, because a second discover_schema for the same schema
+    can open a newer version while this task is still running.
     """
     from ..config import config_manager
 
@@ -196,6 +201,7 @@ async def _auto_generate_ontology_background(
                             "ontology_graph_uri": graph_uri,
                             "ontology_triple_count": triple_count,
                         },
+                        version=version,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to write workspace metadata: {e}")
@@ -217,11 +223,16 @@ async def _auto_initialize_graphrag_background(
     tables_info: list[Any],
     session: Any,
     ctx: Context,
+    version: int | None = None,
 ) -> None:
     """Background task: Auto-initialize or accumulate GraphRAG after schema analysis.
 
     GraphRAG is connection-scoped and accumulative. If already initialized,
     new schema tables are added to the existing graph and vector store.
+
+    *version* is the generation discover_schema opened before scheduling this
+    task. It is threaded through rather than resolved on completion so a
+    rediscovery of the same schema mid-run cannot capture this run's output.
     """
     try:
         start_time = time.time()
@@ -247,7 +258,7 @@ async def _auto_initialize_graphrag_background(
                 tables_info=tables_dict, schema_name=schema_name
             )
 
-        await _save_graphrag_state(session, schema_name)
+        await _save_graphrag_state(session, schema_name, version)
 
         elapsed = time.time() - start_time
         session.graphrag_initialized = True
@@ -288,6 +299,7 @@ async def _auto_initialize_graphrag_background(
                 tables_info=tables_info,
                 session=session,
                 ctx=ctx,
+                version=version,
             )
 
     except Exception as e:
@@ -369,6 +381,17 @@ async def initialize_graphrag(
 
     eff_schema = effective_schema or "default"
 
+    # Bound to the generation current when this call started; embedding a large
+    # schema is slow enough for a rediscovery to land before it finishes.
+    target_version: int | None = None
+    if session.connection_id:
+        try:
+            target_version = await get_active_version_number(
+                session.connection_id, OUTPUT_DIR, eff_schema
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read active version: {e}")
+
     try:
         if session.graphrag_manager is None:
             session.graphrag_manager = GraphRAGManager(
@@ -388,7 +411,7 @@ async def initialize_graphrag(
 
         session.graphrag_initialized = True
 
-        await _save_graphrag_state(session, eff_schema)
+        await _save_graphrag_state(session, eff_schema, target_version)
 
         total_tables = session.graphrag_manager.graph_retriever.graph.number_of_nodes()
         schemas = session.graphrag_manager._schema_names

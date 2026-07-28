@@ -10,7 +10,11 @@ from fastmcp import Context
 
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
-from ..lifecycle.metadata import open_schema_version, update_workspace_section
+from ..lifecycle.metadata import (
+    get_active_version_number,
+    open_schema_version,
+    update_workspace_section,
+)
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..r2rml_generator import R2RMLGenerator
 from ..utils import utc_now, write_json_file, write_text_file
@@ -20,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 async def _open_schema_version(
     session: Any, schema_name: str | None, tables: list[Any]
-) -> None:
+) -> int | None:
     """Record a new version for a schema that was just discovered.
 
     Never fatal: version history is bookkeeping alongside the discovery, and a
@@ -30,9 +34,14 @@ async def _open_schema_version(
         session: Session data holding the connection fingerprint.
         schema_name: Schema that was discovered.
         tables: The discovered table objects.
+
+    Returns:
+        The version number opened, or None if it could not be recorded. Pass it
+        to the background producers so their output lands on the generation they
+        were started for, not on whichever is active when they finish.
     """
     if not session.connection_id or not tables:
-        return
+        return None
     try:
         version = await open_schema_version(
             connection_id=session.connection_id,
@@ -43,8 +52,31 @@ async def _open_schema_version(
         logger.debug(
             f"Opened version {version} for schema '{schema_name or 'default'}'"
         )
+        return version
     except Exception as e:
         logger.warning(f"Failed to record schema version: {e}")
+        return None
+
+
+async def _active_schema_version(session: Any, schema_name: str) -> int | None:
+    """The schema's current version number, or None if it has no history.
+
+    Args:
+        session: Session data holding the connection fingerprint.
+        schema_name: Schema to look up.
+
+    Returns:
+        The active version number, if any.
+    """
+    if not session.connection_id:
+        return None
+    try:
+        return await get_active_version_number(
+            session.connection_id, OUTPUT_DIR, schema_name
+        )
+    except Exception as e:
+        logger.warning(f"Failed to read active schema version: {e}")
+        return None
 
 
 async def reset_cache(
@@ -164,12 +196,20 @@ async def discover_schema(
             logger.info(
                 f"GraphRAG auto-init triggered for cached schema: {effective_schema or 'default'}"
             )
+            # No new version: nothing was rediscovered. Bind to the generation
+            # current *now* rather than letting the task resolve it on
+            # completion, so a discover_schema that lands meanwhile does not
+            # capture this task's output.
+            cached_version = await _active_schema_version(
+                session, effective_schema or "default"
+            )
             task = asyncio.create_task(
                 services.auto_initialize_graphrag_background(
                     schema_name=effective_schema or "default",
                     tables_info=cached_tables,
                     session=session,
                     ctx=ctx,
+                    version=cached_version,
                 )
             )
             session.graphrag.track_init_task(task)
@@ -258,7 +298,9 @@ async def discover_schema(
 
         # Open the version before GraphRAG is kicked off below: the background
         # task looks up the active version to snapshot its state under.
-        await _open_schema_version(session, schema_name, table_info_objects)
+        schema_version = await _open_schema_version(
+            session, schema_name, table_info_objects
+        )
 
         lightweight_result = {
             "schema": schema_name or "default",
@@ -296,6 +338,7 @@ async def discover_schema(
                     tables_info=table_info_objects,
                     session=session,
                     ctx=ctx,
+                    version=schema_version,
                 )
             )
             session.graphrag.track_init_task(task)
@@ -349,7 +392,9 @@ async def discover_schema(
 
     # Open the version before GraphRAG is kicked off further down: the
     # background task looks up the active version to snapshot its state under.
-    await _open_schema_version(session, schema_name, table_info_objects)
+    schema_version = await _open_schema_version(
+        session, schema_name, table_info_objects
+    )
 
     # Both artifact families and the metadata naming them are produced under
     # one lock. Two overlapping discover_schema calls for the same schema
@@ -529,6 +574,7 @@ async def discover_schema(
                     tables_info=table_info_objects,
                     session=services.get_session_data(ctx),
                     ctx=ctx,
+                    version=schema_version,
                 )
             )
             session = services.get_session_data(ctx)

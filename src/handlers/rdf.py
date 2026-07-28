@@ -14,6 +14,7 @@ from ..exceptions import (
 )
 from ..handler_context import HandlerContext
 from ..lifecycle.metadata import (
+    get_active_version_number,
     update_schema_version,
     update_workspace_rdf,
     update_workspace_section,
@@ -69,6 +70,18 @@ async def store_ontology_in_rdf(
         if not graph_uri:
             graph_uri = schema_graph_uri(effective_schema)
 
+        # Resolved before the load, which can take a while on a large ontology:
+        # a discover_schema landing meanwhile would otherwise send this graph
+        # URI and triple count to a generation that never loaded them.
+        target_version: int | None = None
+        if session.connection_id:
+            try:
+                target_version = await get_active_version_number(
+                    session.connection_id, OUTPUT_DIR, effective_schema
+                )
+            except Exception as e:
+                logger.warning(f"Failed to read active version: {e}")
+
         triple_count = store.load_ontology(
             ontology_ttl=ontology_ttl, graph_uri=graph_uri, schema_name=effective_schema
         )
@@ -116,6 +129,7 @@ async def store_ontology_in_rdf(
                         "ontology_graph_uri": graph_uri,
                         "ontology_triple_count": triple_count,
                     },
+                    version=target_version,
                 )
             except Exception as e:
                 logger.warning(f"Failed to write workspace metadata: {e}")

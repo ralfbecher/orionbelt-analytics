@@ -311,6 +311,7 @@ async def generate_ontology(
             session.obqc_validator = None
 
             # Write workspace metadata for ontology section
+            target_version: int | None = None
             if session.connection_id:
                 try:
                     await update_workspace_section(
@@ -326,10 +327,13 @@ async def generate_ontology(
                             "generated_at": utc_now().isoformat(),
                         },
                     )
-                    # Record the ontology half of the version discovery opened.
-                    # The triple count is not known until the RDF load below,
-                    # so it is filled in there rather than guessed here.
-                    await update_schema_version(
+                    # Record the ontology half of the version discovery opened,
+                    # and hold on to which version that was: the RDF load below
+                    # is slow, and a rediscovery during it would otherwise send
+                    # the triple count to a different generation than the file.
+                    # The count is not known until that load, so it is filled in
+                    # there rather than guessed here.
+                    target_version = await update_schema_version(
                         connection_id=session.connection_id,
                         output_dir=OUTPUT_DIR,
                         schema_name=schema_name or "default",
@@ -458,6 +462,7 @@ async def generate_ontology(
                                         "ontology_triple_count": triple_count,
                                         "ontology_graph_uri": graph_uri,
                                     },
+                                    version=target_version,
                                 )
                         except Exception as e:
                             logger.warning(f"Failed to write workspace metadata: {e}")

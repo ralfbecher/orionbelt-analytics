@@ -433,7 +433,7 @@ class VersionMetadataManager:
 
         Called from ``discover_schema``: discovery is what defines a generation,
         and ontology generation plus GraphRAG initialization fill in their
-        halves afterwards via :meth:`update_active_version`.
+        halves afterwards via :meth:`update_version`.
 
         Args:
             schema_name: Schema name.
@@ -490,24 +490,36 @@ class VersionMetadataManager:
         )
         return opened
 
-    def update_active_version(
-        self, schema_name: str, updates: dict[str, Any]
+    def update_version(
+        self,
+        schema_name: str,
+        updates: dict[str, Any],
+        version: int | None = None,
     ) -> VersionInfo | None:
-        """Merge *updates* into the schema's active version record.
+        """Merge *updates* into one of a schema's version records.
 
         Used by the producers that complete a generation after discovery opened
-        it -- ontology generation and GraphRAG initialization. If no version is
-        open the update is dropped rather than inventing one: those producers
-        can legitimately run against a schema discovered before this feature
-        existed, or with recording disabled.
+        it -- ontology generation and GraphRAG initialization. If the target
+        version does not exist the update is dropped rather than inventing one:
+        those producers can legitimately run against a schema discovered before
+        this feature existed, or with recording disabled.
+
+        Pass *version* to address a specific generation. Producers must, because
+        several of them finish long after they started -- background GraphRAG
+        init, AUTO_ONTOLOGY generation, an Oxigraph load -- and a second
+        ``discover_schema`` for the same schema during that window opens a newer
+        version. Resolving "the active version" at completion time would then
+        stamp the first run's snapshots, TTL file and triple counts onto a
+        generation they have nothing to do with.
 
         Args:
             schema_name: Schema name.
             updates: VersionInfo field names to new values. Unknown keys are
                 ignored so a caller cannot silently corrupt the record shape.
+            version: Version number to update; the active one if omitted.
 
         Returns:
-            The updated version, or None if the schema has no active version.
+            The updated version, or None if no matching version exists.
         """
         known = {f.name for f in fields(VersionInfo)} - {"version", "created_at"}
         applicable = {k: v for k, v in updates.items() if k in known}
@@ -515,7 +527,12 @@ class VersionMetadataManager:
             return None
 
         for entry in reversed(self._version_entries(schema_name)):
-            if entry.get("status") != "active":
+            matches = (
+                entry.get("version") == version
+                if version is not None
+                else entry.get("status") == "active"
+            )
+            if not matches:
                 continue
             entry.update(applicable)
             self._save_metadata()
@@ -1013,24 +1030,30 @@ async def update_schema_version(
     output_dir: Path,
     schema_name: str,
     updates: dict[str, Any],
+    version: int | None = None,
 ) -> int | None:
-    """Fill in part of a schema's open version.
+    """Fill in part of one of a schema's versions.
+
+    Callers that started work against a known generation should pass *version*
+    -- see :meth:`VersionMetadataManager.update_version` for why resolving the
+    active version at completion time is unsafe.
 
     Args:
         connection_id: Database connection fingerprint.
         output_dir: Base output directory.
-        schema_name: Schema whose active version to update.
+        schema_name: Schema whose version to update.
         updates: VersionInfo field names to new values.
+        version: Version number to update; the active one if omitted.
 
     Returns:
-        The version number updated, or None if no version was open.
+        The version number updated, or None if no matching version exists.
     """
     updated: int | None = None
 
     def _mutate(mgr: VersionMetadataManager) -> None:
         nonlocal updated
-        version = mgr.update_active_version(schema_name, updates)
-        updated = version.version if version else None
+        target = mgr.update_version(schema_name, updates, version)
+        updated = target.version if target else None
 
     await mutate_workspace_metadata(connection_id, output_dir, _mutate)
     return updated
