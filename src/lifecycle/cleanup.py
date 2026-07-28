@@ -5,12 +5,15 @@ Implements automatic cleanup of old GraphRAG and RDF ontology versions
 based on retention policies.
 """
 
+import asyncio
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from ..paths import OUTPUT_DIR
 from ..utils import parse_timestamp, utc_now
-from .metadata import VersionMetadataManager
+from .metadata import VersionInfo, VersionMetadataManager, mutate_workspace_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -18,25 +21,17 @@ logger = logging.getLogger(__name__)
 class DataCleanupManager:
     """Manages cleanup of old GraphRAG and RDF data based on retention policies.
 
-    Currently unwired. This is the per-version retention design from Phase 3B,
-    whose entry points (``cleanup_all``, ``cleanup_all_connections``) were
-    removed as dead code once ``AUTO_CLEANUP_ON_STARTUP`` shipped separately in
-    ``server.py`` as simpler whole-workspace-age retention. Nothing instantiates
-    this class today.
+    Retention is per *version*: each ``discover_schema`` opens a generation that
+    ontology generation and GraphRAG initialization then fill in, and this class
+    deletes the artifacts of generations that have aged out of the policy. It is
+    the counterpart to ``lifecycle/artifacts.py``, which prunes superseded files
+    eagerly by count -- this one prunes whole recorded versions by age, and
+    leaves a record of what it removed.
 
-    .. warning::
-       Reviving it requires a concurrency fix first. The methods below mutate
-       metadata.json through ``metadata_mgr.mark_version_deleted()``, which
-       bypasses the per-connection lock in ``lifecycle/metadata.py``. That is
-       only harmless while the API stays synchronous and uncalled -- and the
-       original design invoked it from async paths (startup, post-analysis, and
-       an MCP tool), which is exactly where it would race. An unserialized
-       read-modify-write of metadata.json reproducibly drops other writers'
-       sections and can leave the file unparseable.
-
-       Route the writes through ``mutate_workspace_metadata()`` before calling
-       any of this from async code, and drop the matching exemption in
-       ``tests/test_metadata_concurrency.py`` at the same time.
+    Every metadata write goes through ``mutate_workspace_metadata()``, so the
+    read-modify-write of metadata.json is serialized against the workspace
+    writers in the handlers. Deleting files and RDF graphs is offloaded with
+    ``asyncio.to_thread`` -- both touch disk and neither belongs on the loop.
     """
 
     def __init__(self, connection_id: str, output_dir: Path):
@@ -52,7 +47,7 @@ class DataCleanupManager:
         self.connection_dir = output_dir / connection_id
         self.metadata_mgr = VersionMetadataManager(connection_id, output_dir)
 
-    def cleanup_graphrag(
+    async def cleanup_graphrag(
         self, schema_name: str, dry_run: bool = True
     ) -> dict[str, Any]:
         """
@@ -76,17 +71,17 @@ class DataCleanupManager:
                 "reason": "All versions within retention policy",
             }
 
+        max_age = self.metadata_mgr.get_retention_policy().graphrag_max_age_days
         deleted = []
         errors = []
 
         for version in versions_to_delete:
             try:
                 if not dry_run:
-                    # Delete ChromaDB collection or JSON files
-                    self._delete_graphrag_files(schema_name, version.version)
-
-                    # Mark as deleted in metadata
-                    self.metadata_mgr.mark_version_deleted(
+                    await asyncio.to_thread(
+                        self._delete_graphrag_files, schema_name, version
+                    )
+                    await self._mark_version_deleted(
                         schema_name, version.version, "graphrag"
                     )
 
@@ -97,19 +92,20 @@ class DataCleanupManager:
                         "version": version.version,
                         "age_days": age_days,
                         "created_at": version.created_at,
-                        "reason": f"Age {age_days} days exceeds max {self.metadata_mgr.get_retention_policy().graphrag_max_age_days} days",
+                        "files": version.graphrag_files,
+                        "reason": (f"Age {age_days} days exceeds max {max_age} days"),
                     }
                 )
 
             except Exception as e:
-                logger.error(
+                logger.exception(
                     f"Failed to delete GraphRAG version {version.version}: {e}"
                 )
                 errors.append({"version": version.version, "error": str(e)})
 
         return {"deleted": deleted, "errors": errors, "dry_run": dry_run}
 
-    def cleanup_ontology(
+    async def cleanup_ontology(
         self,
         schema_name: str,
         dry_run: bool = True,
@@ -137,28 +133,21 @@ class DataCleanupManager:
                 "reason": "All versions within retention policy",
             }
 
+        max_age = self.metadata_mgr.get_retention_policy().ontology_max_age_days
+        live_graphs = self._graph_uris_still_in_use(schema_name)
         deleted = []
         errors = []
 
         for version in versions_to_delete:
             try:
                 if not dry_run:
-                    # Delete TTL file
-                    ttl_path = self.output_dir / version.ontology_ttl_file
-                    if ttl_path.exists():
-                        ttl_path.unlink()
-
-                    # Delete named graph from Oxigraph (if store provided)
-                    if oxigraph_store and version.ontology_graph_uri:
-                        try:
-                            oxigraph_store.delete_graph(version.ontology_graph_uri)
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to delete graph {version.ontology_graph_uri}: {e}"
-                            )
-
-                    # Mark as deleted in metadata
-                    self.metadata_mgr.mark_version_deleted(
+                    await asyncio.to_thread(
+                        self._delete_ontology_artifacts,
+                        version,
+                        oxigraph_store,
+                        live_graphs,
+                    )
+                    await self._mark_version_deleted(
                         schema_name, version.version, "ontology"
                     )
 
@@ -171,45 +160,180 @@ class DataCleanupManager:
                         "created_at": version.created_at,
                         "graph_uri": version.ontology_graph_uri,
                         "ttl_file": version.ontology_ttl_file,
-                        "reason": f"Age {age_days} days exceeds max {self.metadata_mgr.get_retention_policy().ontology_max_age_days} days",
+                        "reason": (f"Age {age_days} days exceeds max {max_age} days"),
                     }
                 )
 
             except Exception as e:
-                logger.error(
+                logger.exception(
                     f"Failed to delete Ontology version {version.version}: {e}"
                 )
                 errors.append({"version": version.version, "error": str(e)})
 
         return {"deleted": deleted, "errors": errors, "dry_run": dry_run}
 
-    def _delete_graphrag_files(self, schema_name: str, version: int) -> None:
+    async def _mark_version_deleted(
+        self, schema_name: str, version: int, data_type: str
+    ) -> None:
+        """Record a version as deleted, serialized against other metadata writers.
+
+        Args:
+            schema_name: Schema name.
+            version: Version number that was deleted.
+            data_type: "graphrag", "ontology" or "all".
+        """
+
+        def _mutate(mgr: VersionMetadataManager) -> None:
+            mgr.mark_version_deleted(schema_name, version, data_type)
+            # Adopt the state that was just persisted, inside the lock. This
+            # instance's view is read between calls -- _graph_uris_still_in_use
+            # and the ChromaDB ownership guard both consult it -- and a stale
+            # copy would let the second version in a run be judged against the
+            # history as it stood before the first. Re-running mark_version_
+            # deleted on our own manager instead would be a second, unserialized
+            # write of metadata.json: the exact race this lock exists to stop.
+            self.metadata_mgr.metadata = deepcopy(mgr.metadata)
+
+        await mutate_workspace_metadata(self.connection_id, self.output_dir, _mutate)
+
+    def _graph_uris_still_in_use(self, schema_name: str) -> set[str]:
+        """Named graphs referenced by versions that are not being deleted.
+
+        Successive generations of one schema reuse the same named graph URI
+        (``schema_graph_uri`` is derived from the schema name), so deleting the
+        graph because an *old* version referenced it would take the current
+        ontology's triples with it.
+
+        Args:
+            schema_name: Schema whose versions to inspect.
+
+        Returns:
+            Graph URIs that must be preserved.
+        """
+        doomed = {
+            v.version
+            for v in self.metadata_mgr.get_versions_to_cleanup(
+                schema_name, data_type="ontology"
+            )
+        }
+        return {
+            v.ontology_graph_uri
+            for v in self.metadata_mgr.get_versions(schema_name)
+            if v.ontology_graph_uri
+            and v.ontology_status != "deleted"
+            and v.version not in doomed
+        }
+
+    def _delete_ontology_artifacts(
+        self,
+        version: VersionInfo,
+        oxigraph_store: Any | None,
+        live_graphs: set[str],
+    ) -> None:
+        """Delete one version's TTL file and, if unreferenced, its named graph.
+
+        Args:
+            version: Version being cleaned up.
+            oxigraph_store: Store to delete the named graph from, if available.
+            live_graphs: Graph URIs still referenced by surviving versions.
+        """
+        if version.ontology_ttl_file:
+            ttl_path = self.connection_dir / version.ontology_ttl_file
+            if ttl_path.exists():
+                ttl_path.unlink()
+                logger.info(f"Deleted {ttl_path}")
+
+        graph_uri = version.ontology_graph_uri
+        if not (oxigraph_store and graph_uri):
+            return
+        if graph_uri in live_graphs:
+            logger.info(
+                f"Kept named graph <{graph_uri}>: still referenced by a "
+                "surviving version"
+            )
+            return
+        try:
+            oxigraph_store.delete_graph(graph_uri)
+        except Exception as e:
+            logger.warning(f"Failed to delete graph {graph_uri}: {e}")
+
+    def _delete_graphrag_files(self, schema_name: str, version: VersionInfo) -> None:
         """
         Delete GraphRAG files for a specific version.
 
         Args:
             schema_name: Schema name
-            version: Version number
+            version: Version being cleaned up
         """
-        # Check for ChromaDB collection
-        chromadb_dir = self.output_dir / "chromadb" / self.connection_id
-        if chromadb_dir.exists():
-            # ChromaDB collections are managed by ChromaDB itself
-            # We'll need to use the ChromaDB client to delete collections
-            # For now, just log
-            logger.info(
-                f"ChromaDB collection cleanup for version {version} (managed by ChromaDB)"
-            )
+        self._delete_chromadb_collection(schema_name, version)
 
-        # Check for JSON files (legacy or backup)
-        json_patterns = [
-            f"vector_store_{schema_name}_v{version}.json",
-            f"graph_{schema_name}_v{version}.json",
-            f"communities_{schema_name}_v{version}.json",
+        # Snapshot files recorded when the version was saved. Older workspaces
+        # predate the recording, so fall back to the conventional names.
+        names = version.graphrag_files or [
+            f"vector_store_{schema_name}_v{version.version}.json",
+            f"graph_{schema_name}_v{version.version}.json",
+            f"communities_{schema_name}_v{version.version}.json",
         ]
 
-        for pattern in json_patterns:
-            file_path = self.connection_dir / pattern
+        for name in names:
+            file_path = self.connection_dir / name
             if file_path.exists():
                 file_path.unlink()
                 logger.info(f"Deleted {file_path}")
+
+    def _delete_chromadb_collection(
+        self, schema_name: str, version: VersionInfo
+    ) -> None:
+        """Delete this version's ChromaDB collection, if it owns one outright.
+
+        GraphRAG is connection-scoped and accumulative by design: one collection
+        holds every schema's vectors so cross-schema search and join discovery
+        work. Successive versions therefore share a collection rather than each
+        getting their own, and dropping it because an archived version referenced
+        it would wipe the live vector store for every schema on the connection.
+
+        So the delete is guarded by ownership -- it runs only when no surviving
+        version references the same collection. Today that makes it a no-op
+        whenever the schema still has a live version, which is the correct
+        outcome and the reason this is a guard rather than an unconditional
+        delete.
+
+        Args:
+            schema_name: Schema name.
+            version: Version being cleaned up.
+        """
+        collection = version.graphrag_collection
+        if not collection:
+            return
+
+        still_referenced = any(
+            other.graphrag_collection == collection
+            and other.version != version.version
+            and other.graphrag_status != "deleted"
+            for other in self.metadata_mgr.get_versions(schema_name)
+        )
+        if still_referenced:
+            logger.info(
+                f"Kept ChromaDB collection '{collection}': still referenced by "
+                "a surviving version"
+            )
+            return
+
+        try:
+            import chromadb
+        except ImportError:
+            logger.info(f"ChromaDB not installed; skipping collection '{collection}'")
+            return
+
+        db_path = OUTPUT_DIR / "chromadb" / self.connection_id
+        if not db_path.exists():
+            return
+
+        try:
+            client = chromadb.PersistentClient(path=str(db_path))
+            client.delete_collection(collection)
+            logger.info(f"Deleted ChromaDB collection '{collection}'")
+        except Exception as e:
+            # A collection that is already gone is the expected case when
+            # cleanup reruns; anything else is worth a line but not a failure.
+            logger.warning(f"Could not delete ChromaDB collection '{collection}': {e}")

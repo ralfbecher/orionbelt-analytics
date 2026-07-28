@@ -10,12 +10,41 @@ from fastmcp import Context
 
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
-from ..lifecycle.metadata import update_workspace_section
+from ..lifecycle.metadata import open_schema_version, update_workspace_section
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..r2rml_generator import R2RMLGenerator
 from ..utils import utc_now, write_json_file, write_text_file
 
 logger = logging.getLogger(__name__)
+
+
+async def _open_schema_version(
+    session: Any, schema_name: str | None, tables: list[Any]
+) -> None:
+    """Record a new version for a schema that was just discovered.
+
+    Never fatal: version history is bookkeeping alongside the discovery, and a
+    metadata failure must not cost the caller the schema they asked for.
+
+    Args:
+        session: Session data holding the connection fingerprint.
+        schema_name: Schema that was discovered.
+        tables: The discovered table objects.
+    """
+    if not session.connection_id or not tables:
+        return
+    try:
+        version = await open_schema_version(
+            connection_id=session.connection_id,
+            output_dir=OUTPUT_DIR,
+            schema_name=schema_name or "default",
+            tables=tables,
+        )
+        logger.debug(
+            f"Opened version {version} for schema '{schema_name or 'default'}'"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record schema version: {e}")
 
 
 async def reset_cache(
@@ -227,6 +256,10 @@ async def discover_schema(
             f"Cached {len(table_info_objects)} tables for generate_ontology() reuse"
         )
 
+        # Open the version before GraphRAG is kicked off below: the background
+        # task looks up the active version to snapshot its state under.
+        await _open_schema_version(session, schema_name, table_info_objects)
+
         lightweight_result = {
             "schema": schema_name or "default",
             "table_count": len(tables),
@@ -313,6 +346,10 @@ async def discover_schema(
 
     session = services.get_session_data(ctx)
     session.cache_schema_analysis(schema_name or "", table_info_objects)
+
+    # Open the version before GraphRAG is kicked off further down: the
+    # background task looks up the active version to snapshot its state under.
+    await _open_schema_version(session, schema_name, table_info_objects)
 
     # Both artifact families and the metadata naming them are produced under
     # one lock. Two overlapping discover_schema calls for the same schema

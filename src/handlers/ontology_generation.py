@@ -14,6 +14,7 @@ from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifac
 from ..lifecycle.metadata import (
     mark_ontology_persisted,
     ontology_is_current,
+    update_schema_version,
     update_workspace_rdf,
     update_workspace_section,
 )
@@ -325,6 +326,18 @@ async def generate_ontology(
                             "generated_at": utc_now().isoformat(),
                         },
                     )
+                    # Record the ontology half of the version discovery opened.
+                    # The triple count is not known until the RDF load below,
+                    # so it is filled in there rather than guessed here.
+                    await update_schema_version(
+                        connection_id=session.connection_id,
+                        output_dir=OUTPUT_DIR,
+                        schema_name=schema_name or "default",
+                        updates={
+                            "ontology_ttl_file": ontology_filename,
+                            "ontology_graph_uri": graph_uri or "",
+                        },
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to write workspace metadata: {e}")
 
@@ -432,6 +445,20 @@ async def generate_ontology(
                                     "initialized_at": utc_now().isoformat(),
                                 },
                             )
+                            # Only now is the triple count known. Gated on
+                            # `marked` for the same reason that flag is: if a
+                            # newer generation superseded this one, its counts
+                            # are the ones the version should carry.
+                            if marked:
+                                await update_schema_version(
+                                    connection_id=session.connection_id,
+                                    output_dir=OUTPUT_DIR,
+                                    schema_name=schema_name or "default",
+                                    updates={
+                                        "ontology_triple_count": triple_count,
+                                        "ontology_graph_uri": graph_uri,
+                                    },
+                                )
                         except Exception as e:
                             logger.warning(f"Failed to write workspace metadata: {e}")
 

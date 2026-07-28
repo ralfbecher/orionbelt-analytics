@@ -12,13 +12,62 @@ from ..exceptions import ConnectionError
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
-from ..lifecycle.metadata import update_workspace_section
+from ..lifecycle.metadata import (
+    get_active_version_number,
+    update_schema_version,
+    update_workspace_section,
+)
 from ..ontology_generator import OntologyGenerator
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..utils import utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
+
+
+async def _save_graphrag_state(session: Any, schema_name: str) -> None:
+    """Persist GraphRAG state and record its half of the schema's open version.
+
+    The snapshot is taken under the version ``discover_schema`` opened, which
+    gives retention per-version files to prune. A missing version -- no
+    connection, or a schema discovered before version recording existed --
+    just means no snapshot; the unversioned current-state files that restore
+    reads are written either way.
+
+    Args:
+        session: Session data holding the GraphRAG manager and connection id.
+        schema_name: Schema whose version to record against.
+    """
+    manager = session.graphrag_manager
+    output_dir = ensure_output_dir()
+
+    version: int | None = None
+    if session.connection_id:
+        try:
+            version = await get_active_version_number(
+                session.connection_id, OUTPUT_DIR, schema_name
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read active version: {e}")
+
+    snapshot_files = await asyncio.to_thread(manager.save_state, output_dir, version)
+
+    if version is None or not session.connection_id:
+        return
+
+    try:
+        await update_schema_version(
+            connection_id=session.connection_id,
+            output_dir=OUTPUT_DIR,
+            schema_name=schema_name,
+            updates={
+                "graphrag_vector_count": manager.vector_count,
+                "graphrag_collection": manager.vector_collection_name,
+                "graphrag_files": snapshot_files,
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record GraphRAG version state: {e}")
 
 
 def _table_info_to_dict(table_info: Any) -> dict[str, Any]:
@@ -162,8 +211,7 @@ async def _auto_initialize_graphrag_background(
                 tables_info=tables_dict, schema_name=schema_name
             )
 
-        output_dir = ensure_output_dir()
-        await asyncio.to_thread(session.graphrag_manager.save_state, output_dir)
+        await _save_graphrag_state(session, schema_name)
 
         elapsed = time.time() - start_time
         session.graphrag_initialized = True
@@ -304,8 +352,7 @@ async def initialize_graphrag(
 
         session.graphrag_initialized = True
 
-        output_dir = ensure_output_dir()
-        await asyncio.to_thread(session.graphrag_manager.save_state, output_dir)
+        await _save_graphrag_state(session, eff_schema)
 
         total_tables = session.graphrag_manager.graph_retriever.graph.number_of_nodes()
         schemas = session.graphrag_manager._schema_names

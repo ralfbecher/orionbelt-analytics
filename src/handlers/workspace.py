@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from fastmcp import Context
 from ..database_manager import TableInfo
 from ..graphrag import GraphRAGManager
 from ..handler_context import HandlerContext
+from ..lifecycle.cleanup import DataCleanupManager
 from ..lifecycle.metadata import VersionMetadataManager, mutate_workspace_metadata
 from ..oxigraph_store import OXIGRAPH_AVAILABLE
 from ..paths import (
@@ -362,6 +364,85 @@ async def cleanup_workspace(
     result += "Call discover_schema() to start building a new workspace.\n"
 
     return result
+
+
+async def cleanup_old_versions(
+    ctx: Context,
+    schema_name: str | None,
+    dry_run: bool,
+    services: "HandlerContext",
+) -> dict[str, Any]:
+    """Apply the per-version retention policy to a schema's history.
+
+    Unlike ``cleanup_workspace``, which removes everything for the connection,
+    this deletes only the artifacts of *archived* versions that have aged past
+    the retention policy, leaving the current generation and recent history
+    intact.
+
+    Args:
+        ctx: FastMCP context
+        schema_name: Schema whose history to prune; the last analyzed one if omitted
+        dry_run: Report what would be deleted without deleting it
+        services: Handler service bundle
+
+    Returns:
+        Per-schema report of the versions removed or eligible for removal
+    """
+    session = services.get_session_data(ctx)
+
+    if not session.connection_id:
+        err: dict[str, Any] = services.create_error_response(
+            "No database connection. Call connect_database first.",
+            "connection_error",
+        )
+        return err
+
+    target = schema_name or session.get_last_analyzed_schema() or "default"
+
+    manager = DataCleanupManager(session.connection_id, OUTPUT_DIR)
+    policy = manager.metadata_mgr.get_retention_policy()
+
+    graphrag_report = await manager.cleanup_graphrag(target, dry_run=dry_run)
+    ontology_report = await manager.cleanup_ontology(
+        target,
+        dry_run=dry_run,
+        oxigraph_store=session.oxigraph_store,
+    )
+
+    # Read history *after* cleanup so the listing reflects the result the caller
+    # is being told about, not the state before it.
+    history = [
+        {
+            "version": v.version,
+            "created_at": v.created_at,
+            "status": v.status,
+            "table_count": v.table_count,
+            "column_count": v.column_count,
+            "ontology_file": v.ontology_ttl_file,
+            "ontology_triples": v.ontology_triple_count,
+            "graphrag_vectors": v.graphrag_vector_count,
+        }
+        for v in manager.metadata_mgr.get_versions(target)
+    ]
+
+    deleted_count = len(graphrag_report.get("deleted", [])) + len(
+        ontology_report.get("deleted", [])
+    )
+    verb = "would be removed" if dry_run else "removed"
+    await ctx.info(
+        f"Retention for schema '{target}': {deleted_count} version artifact "
+        f"group(s) {verb}"
+    )
+
+    return {
+        "success": True,
+        "schema": target,
+        "dry_run": dry_run,
+        "retention_policy": asdict(policy),
+        "graphrag": graphrag_report,
+        "ontology": ontology_report,
+        "versions": history,
+    }
 
 
 async def save_semantic_model(

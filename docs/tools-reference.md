@@ -621,6 +621,29 @@ Add a custom triple (subject-predicate-object) to the RDF store to enrich the on
 - Useful for layering business annotations onto a generated ontology
 - Added triples are queryable via `query_sparql`
 
+---
+
+### 24. cleanup_old_versions
+
+Prune old ontology and GraphRAG versions for one schema according to the retention policy. Unlike `cleanup_workspace`, this keeps the current generation and recent history -- it deletes only *archived* versions that have aged out.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `schema_name` | string | No | Last analyzed | Schema whose version history to prune |
+| `dry_run` | boolean | No | `true` | Report what would be deleted without deleting it |
+
+**Returns:** Dictionary with `schema`, `dry_run`, `retention_policy`, per-area `graphrag` and `ontology` reports, and `versions` -- the schema's remaining history.
+
+**Key Features:**
+- Defaults to a dry run, so the first call is always safe to make
+- A version must exceed both the keep-count and the age threshold; at least 2 are always kept
+- Retention comes from `GRAPHRAG_KEEP_VERSIONS`, `GRAPHRAG_MAX_AGE_DAYS`, `ONTOLOGY_KEEP_VERSIONS`, `ONTOLOGY_MAX_AGE_DAYS` -- see [Configuration](configuration.md#per-version-retention)
+- Named graphs and ChromaDB collections are only deleted when no surviving version still references them, since generations share both
+
+---
+
 > **Note:** Server metadata (name, version, supported databases, capabilities) is provided
 > automatically via the MCP `initialize` handshake and the server `instructions`, and the live
 > tool list via `tools/list` -- so no dedicated `get_server_info` tool is needed.

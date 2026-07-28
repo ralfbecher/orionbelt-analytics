@@ -8,14 +8,15 @@ Also manages workspace state for session restore across reconnections.
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import tempfile
 import threading
 import weakref
-from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +92,13 @@ def _get_metadata_thread_lock(connection_id: str) -> threading.Lock:
 
 @dataclass
 class VersionInfo:
-    """Information about a specific version."""
+    """Information about a specific version.
+
+    A version is one *generation cycle* for a schema. ``discover_schema`` opens
+    it, and ``generate_ontology`` and GraphRAG initialization fill in their
+    halves as they complete -- so a version is partially populated for as long
+    as the workflow that produces it is still running.
+    """
 
     version: int
     created_at: str  # ISO format
@@ -101,19 +108,73 @@ class VersionInfo:
 
     # GraphRAG info
     graphrag_vector_count: int
-    graphrag_status: str  # "active" or "archived"
+    graphrag_status: str  # "active", "archived" or "deleted"
 
     # Ontology info
     ontology_graph_uri: str
     ontology_triple_count: int
     ontology_ttl_file: str
-    ontology_status: str  # "active" or "archived"
+    ontology_status: str  # "active", "archived" or "deleted"
 
     # Changes from previous version (if any)
     changes: dict[str, Any] | None = None
 
     # Overall status
-    status: str = "active"  # "active" or "archived"
+    status: str = "active"  # "active", "archived" or "deleted"
+
+    # ChromaDB collection backing this version's vectors. Recorded so cleanup
+    # can tell whether the collection is still referenced by a live version
+    # before deleting it -- see DataCleanupManager._delete_graphrag_files.
+    graphrag_collection: str = ""
+
+    # Per-version GraphRAG snapshot files, relative to the connection dir.
+    # These are what cleanup deletes; the unversioned files that load_state
+    # reads are the current-generation pointer and are never candidates.
+    graphrag_files: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "VersionInfo":
+        """Build a VersionInfo from a stored dict, tolerating schema drift.
+
+        metadata.json outlives any single release: a file written by a newer
+        build can carry fields this one does not know, and a workspace written
+        by an older build lacks fields added since. Unknown keys are dropped and
+        missing optional ones fall back to their defaults, so neither direction
+        raises TypeError while loading a workspace.
+
+        Args:
+            data: One entry of a schema's ``versions`` array.
+
+        Returns:
+            The parsed version record.
+        """
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def _env_int(name: str) -> int | None:
+    """Read a positive integer environment variable.
+
+    Args:
+        name: Environment variable name.
+
+    Returns:
+        The parsed value, or None if unset, unparseable, or below 1. Invalid
+        values are logged and ignored rather than raising, so a typo in .env
+        degrades to the default instead of failing server startup.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw!r}; ignoring")
+        return None
+    if value < 1:
+        logger.warning(f"Invalid {name}={raw!r} (must be >= 1); ignoring")
+        return None
+    return value
 
 
 @dataclass
@@ -125,6 +186,40 @@ class RetentionPolicy:
     ontology_keep_versions: int = 5
     ontology_max_age_days: int = 60
     min_versions: int = 2  # Always keep at least this many
+
+    @classmethod
+    def from_metadata(cls, stored: dict[str, Any] | None) -> "RetentionPolicy":
+        """Build a policy from stored metadata, letting the environment win.
+
+        Precedence is environment > the workspace's recorded policy > the
+        dataclass default. The environment wins because it is how an operator
+        changes retention for a server that already has workspaces on disk --
+        the recorded copy is a snapshot of whatever was in force when the
+        workspace was created, and would otherwise pin it forever.
+
+        Unknown keys in *stored* are ignored: metadata.json is long-lived and a
+        policy field removed in a later release must not break loading.
+
+        Args:
+            stored: The ``retention_policy`` section of metadata.json, if any.
+
+        Returns:
+            The effective retention policy.
+        """
+        known = {f.name for f in fields(cls)}
+        values: dict[str, Any] = {k: v for k, v in (stored or {}).items() if k in known}
+
+        for field_name, env_name in (
+            ("graphrag_keep_versions", "GRAPHRAG_KEEP_VERSIONS"),
+            ("graphrag_max_age_days", "GRAPHRAG_MAX_AGE_DAYS"),
+            ("ontology_keep_versions", "ONTOLOGY_KEEP_VERSIONS"),
+            ("ontology_max_age_days", "ONTOLOGY_MAX_AGE_DAYS"),
+        ):
+            from_env = _env_int(env_name)
+            if from_env is not None:
+                values[field_name] = from_env
+
+        return cls(**values)
 
 
 class VersionMetadataManager:
@@ -226,10 +321,207 @@ class VersionMetadataManager:
         # Find active version
         for v_dict in reversed(versions):
             if v_dict.get("status") == "active":
-                return VersionInfo(**v_dict)
+                return VersionInfo.from_dict(v_dict)
 
         # Fallback to latest
-        return VersionInfo(**versions[-1])
+        return VersionInfo.from_dict(versions[-1])
+
+    def get_versions(self, schema_name: str) -> list[VersionInfo]:
+        """All recorded versions for a schema, oldest first.
+
+        Args:
+            schema_name: Schema name.
+
+        Returns:
+            The schema's version history, empty if it has none.
+        """
+        schema_meta = self.get_schema_metadata(schema_name)
+        if not schema_meta:
+            return []
+        return [VersionInfo.from_dict(v) for v in schema_meta.get("versions", [])]
+
+    def _version_entries(self, schema_name: str) -> list[dict[str, Any]]:
+        """The raw ``versions`` list for a schema, creating the path if absent.
+
+        Returns the live list so callers can mutate it in place; the caller is
+        responsible for persisting.
+
+        Args:
+            schema_name: Schema name.
+
+        Returns:
+            The mutable list of version dicts.
+        """
+        schemas = self.metadata.setdefault("schemas", {})
+        schema_meta = schemas.setdefault(schema_name, {})
+        entries: list[dict[str, Any]] = schema_meta.setdefault("versions", [])
+        return entries
+
+    def _migrate_legacy_versions(self, schema_name: str) -> bool:
+        """Seed a version 1 for a workspace that predates version recording.
+
+        Workspaces created before this feature have a populated ``workspace``
+        section but no ``versions`` array, so their current generation would be
+        invisible to history and -- worse -- the next ``open_version`` would
+        record version 1 as though nothing had come before. Seeding from what
+        the workspace already knows keeps the existing artifacts in the history
+        instead of orphaning them.
+
+        Only the fields the workspace actually recorded are carried over; the
+        rest keep their zero values, which is honest about what is unknown
+        rather than inventing counts.
+
+        Args:
+            schema_name: Schema name.
+
+        Returns:
+            True if a version was seeded, False if there was nothing to migrate.
+        """
+        if self._version_entries(schema_name):
+            return False
+
+        workspace_schema = self.get_workspace_schema(schema_name)
+        if not workspace_schema:
+            return False
+
+        schema_section = workspace_schema.get("schema") or {}
+        ontology_section = workspace_schema.get("ontology") or {}
+        graphrag_section = workspace_schema.get("graphrag") or {}
+
+        # Nothing worth recording -- an empty workspace shell is not a version.
+        if not (schema_section or ontology_section or graphrag_section):
+            return False
+
+        created_at = (
+            schema_section.get("analyzed_at")
+            or ontology_section.get("generated_at")
+            or (self.get_workspace() or {}).get("updated_at")
+            or utc_now().isoformat()
+        )
+
+        seeded = VersionInfo(
+            version=1,
+            created_at=created_at,
+            schema_hash=schema_section.get("schema_hash", ""),
+            table_count=int(schema_section.get("table_count", 0) or 0),
+            column_count=int(schema_section.get("column_count", 0) or 0),
+            graphrag_vector_count=int(graphrag_section.get("vector_count", 0) or 0),
+            graphrag_status="active" if graphrag_section else "archived",
+            ontology_graph_uri=ontology_section.get("graph_uri", "") or "",
+            ontology_triple_count=int(ontology_section.get("triple_count", 0) or 0),
+            ontology_ttl_file=ontology_section.get("ontology_file", "") or "",
+            ontology_status="active" if ontology_section else "archived",
+            changes={"migrated_from_workspace": True},
+            status="active",
+            graphrag_collection=graphrag_section.get("collection", "") or "",
+        )
+        self._version_entries(schema_name).append(asdict(seeded))
+        logger.info(
+            f"Seeded version 1 for schema '{schema_name}' from existing "
+            f"workspace state (connection {self.connection_id})"
+        )
+        return True
+
+    def open_version(
+        self,
+        schema_name: str,
+        schema_hash: str,
+        table_count: int,
+        column_count: int,
+    ) -> VersionInfo:
+        """Start a new version for a schema, archiving the one it supersedes.
+
+        Called from ``discover_schema``: discovery is what defines a generation,
+        and ontology generation plus GraphRAG initialization fill in their
+        halves afterwards via :meth:`update_active_version`.
+
+        Args:
+            schema_name: Schema name.
+            schema_hash: Fingerprint of the discovered structure.
+            table_count: Number of tables discovered.
+            column_count: Total number of columns across those tables.
+
+        Returns:
+            The newly opened version.
+        """
+        self._migrate_legacy_versions(schema_name)
+        entries = self._version_entries(schema_name)
+
+        previous = None
+        for entry in entries:
+            if entry.get("status") == "active":
+                previous = entry
+            # Archive every still-live record; only the new version is active.
+            for key in ("status", "graphrag_status", "ontology_status"):
+                if entry.get(key) == "active":
+                    entry[key] = "archived"
+
+        next_number = max((int(e.get("version", 0)) for e in entries), default=0) + 1
+
+        changes: dict[str, Any] | None = None
+        if previous is not None:
+            changes = {
+                "previous_version": int(previous.get("version", 0)),
+                "table_count_delta": table_count
+                - int(previous.get("table_count", 0) or 0),
+                "schema_changed": previous.get("schema_hash", "") != schema_hash,
+            }
+
+        opened = VersionInfo(
+            version=next_number,
+            created_at=utc_now().isoformat(),
+            schema_hash=schema_hash,
+            table_count=table_count,
+            column_count=column_count,
+            graphrag_vector_count=0,
+            graphrag_status="active",
+            ontology_graph_uri="",
+            ontology_triple_count=0,
+            ontology_ttl_file="",
+            ontology_status="active",
+            changes=changes,
+            status="active",
+        )
+        entries.append(asdict(opened))
+        self._save_metadata()
+        logger.debug(
+            f"Opened version {next_number} for schema '{schema_name}' "
+            f"(connection {self.connection_id})"
+        )
+        return opened
+
+    def update_active_version(
+        self, schema_name: str, updates: dict[str, Any]
+    ) -> VersionInfo | None:
+        """Merge *updates* into the schema's active version record.
+
+        Used by the producers that complete a generation after discovery opened
+        it -- ontology generation and GraphRAG initialization. If no version is
+        open the update is dropped rather than inventing one: those producers
+        can legitimately run against a schema discovered before this feature
+        existed, or with recording disabled.
+
+        Args:
+            schema_name: Schema name.
+            updates: VersionInfo field names to new values. Unknown keys are
+                ignored so a caller cannot silently corrupt the record shape.
+
+        Returns:
+            The updated version, or None if the schema has no active version.
+        """
+        known = {f.name for f in fields(VersionInfo)} - {"version", "created_at"}
+        applicable = {k: v for k, v in updates.items() if k in known}
+        if not applicable:
+            return None
+
+        for entry in reversed(self._version_entries(schema_name)):
+            if entry.get("status") != "active":
+                continue
+            entry.update(applicable)
+            self._save_metadata()
+            return VersionInfo.from_dict(entry)
+
+        return None
 
     def get_versions_to_cleanup(
         self,
@@ -250,11 +542,11 @@ class VersionMetadataManager:
         if not schema_meta:
             return []
 
-        versions = [VersionInfo(**v) for v in schema_meta.get("versions", [])]
+        versions = [VersionInfo.from_dict(v) for v in schema_meta.get("versions", [])]
         if not versions:
             return []
 
-        policy = RetentionPolicy(**self.metadata.get("retention_policy", {}))
+        policy = self.get_retention_policy()
 
         # Separate logic for GraphRAG vs Ontology
         if data_type == "graphrag":
@@ -345,12 +637,20 @@ class VersionMetadataManager:
             if age_days > max_age_days:
                 to_delete.append(version)
 
-        # Safety check: ensure we keep minimum versions
+        # Safety check: ensure we keep minimum versions.
+        #
+        # Unreachable while keep_count >= min_versions, since to_delete is drawn
+        # from sorted_versions[:-keep_count] and so always leaves keep_count
+        # behind. It becomes reachable now that keep_count is operator-settable
+        # (GRAPHRAG_KEEP_VERSIONS=1 with min_versions=2, say).
+        #
+        # Spare the *newest* candidates, not the oldest: to_delete is ordered
+        # oldest-first, so trimming from the front would keep the stalest
+        # versions and delete the ones most likely to be worth rolling back to.
         remaining = len(sorted_versions) - len(to_delete)
         if remaining < min_versions:
-            # Delete fewer to maintain minimum
             excess = min_versions - remaining
-            to_delete = to_delete[excess:]
+            to_delete = to_delete[:-excess] if excess < len(to_delete) else []
 
         return to_delete
 
@@ -382,8 +682,8 @@ class VersionMetadataManager:
         self._save_metadata()
 
     def get_retention_policy(self) -> RetentionPolicy:
-        """Get current retention policy."""
-        return RetentionPolicy(**self.metadata.get("retention_policy", {}))
+        """Get the effective retention policy (environment overrides stored)."""
+        return RetentionPolicy.from_metadata(self.metadata.get("retention_policy"))
 
     # --- Workspace State Management ---
 
@@ -638,6 +938,127 @@ async def mark_ontology_persisted(
 
     await mutate_workspace_metadata(connection_id, output_dir, _mutate)
     return applied
+
+
+def schema_fingerprint(tables: Iterable[Any]) -> tuple[str, int, int]:
+    """Summarize a discovered schema as (hash, table count, column count).
+
+    The hash covers table names and their column names, sorted, so it is stable
+    across the order the driver happens to return objects in and changes only
+    when the structure does. It is a change detector for version history, not a
+    security primitive.
+
+    Accepts anything table-shaped -- ``.name``, optional ``.schema``, and
+    ``.columns`` whose entries have ``.name`` -- rather than importing the
+    driver's TableInfo, which would point this module's dependencies the wrong
+    way.
+
+    Args:
+        tables: Discovered table objects.
+
+    Returns:
+        Tuple of (schema hash, table count, total column count).
+    """
+    entries: list[str] = []
+    column_count = 0
+    table_count = 0
+
+    for table in tables:
+        table_count += 1
+        columns = getattr(table, "columns", None) or []
+        names = sorted(str(getattr(c, "name", c)) for c in columns)
+        column_count += len(names)
+        qualified = f"{getattr(table, 'schema', '') or ''}.{getattr(table, 'name', '')}"
+        entries.append(f"{qualified}({','.join(names)})")
+
+    digest = hashlib.sha256("|".join(sorted(entries)).encode()).hexdigest()[:16]
+    return digest, table_count, column_count
+
+
+async def open_schema_version(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+    tables: Iterable[Any],
+) -> int | None:
+    """Open a new version for a freshly discovered schema.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema that was discovered.
+        tables: The discovered table objects (see :func:`schema_fingerprint`).
+
+    Returns:
+        The new version number, or None if it could not be recorded.
+    """
+    schema_hash, table_count, column_count = schema_fingerprint(tables)
+    opened: int | None = None
+
+    def _mutate(mgr: VersionMetadataManager) -> None:
+        nonlocal opened
+        opened = mgr.open_version(
+            schema_name,
+            schema_hash=schema_hash,
+            table_count=table_count,
+            column_count=column_count,
+        ).version
+
+    await mutate_workspace_metadata(connection_id, output_dir, _mutate)
+    return opened
+
+
+async def update_schema_version(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+    updates: dict[str, Any],
+) -> int | None:
+    """Fill in part of a schema's open version.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema whose active version to update.
+        updates: VersionInfo field names to new values.
+
+    Returns:
+        The version number updated, or None if no version was open.
+    """
+    updated: int | None = None
+
+    def _mutate(mgr: VersionMetadataManager) -> None:
+        nonlocal updated
+        version = mgr.update_active_version(schema_name, updates)
+        updated = version.version if version else None
+
+    await mutate_workspace_metadata(connection_id, output_dir, _mutate)
+    return updated
+
+
+async def get_active_version_number(
+    connection_id: str,
+    output_dir: Path,
+    schema_name: str,
+) -> int | None:
+    """The schema's open version number, or None if it has no history.
+
+    Args:
+        connection_id: Database connection fingerprint.
+        output_dir: Base output directory.
+        schema_name: Schema to look up.
+
+    Returns:
+        The active version number, if any.
+    """
+
+    def _read() -> int | None:
+        mgr = VersionMetadataManager(connection_id, output_dir)
+        current = mgr.get_current_version(schema_name)
+        return current.version if current else None
+
+    async with _get_metadata_lock(connection_id):
+        return await asyncio.to_thread(_read)
 
 
 async def update_workspace_rdf(

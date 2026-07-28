@@ -572,6 +572,34 @@ async def cleanup_workspace(ctx: Context) -> str:
 
 
 @mcp.tool()
+async def cleanup_old_versions(
+    ctx: Context,
+    schema_name: _Identifier | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Prune old ontology and GraphRAG versions for a schema per the retention policy.
+
+    Unlike cleanup_workspace(), which removes everything for the connection, this
+    deletes only archived versions that have aged past the retention policy —
+    the current generation and recent history are kept. Also returns the schema's
+    remaining version history.
+
+    Retention is controlled by GRAPHRAG_KEEP_VERSIONS, GRAPHRAG_MAX_AGE_DAYS,
+    ONTOLOGY_KEEP_VERSIONS and ONTOLOGY_MAX_AGE_DAYS.
+
+    Args:
+        schema_name: Schema whose history to prune (last analyzed schema if omitted)
+        dry_run: Report what would be deleted without deleting it (default True)
+    """
+    return await _h_workspace.cleanup_old_versions(
+        ctx,
+        schema_name,
+        dry_run,
+        services=_services(),
+    )
+
+
+@mcp.tool()
 async def save_semantic_model(
     ctx: Context,
     model_yaml: _DocBody,
