@@ -660,6 +660,106 @@ async def test_a_failed_collection_delete_keeps_the_version(tmp_path, monkeypatc
     assert reloaded[1].graphrag_status != "deleted"
 
 
+async def test_a_failed_version_protects_its_collection_for_the_rest_of_the_run(
+    tmp_path, monkeypatch
+):
+    """A kept-for-retry version must not have its collection deleted under it.
+
+    The survivor set is built before the loop and counts every candidate as
+    doomed. When the first candidate's cleanup fails it stays for retry -- so
+    without putting its collection back, the *next* candidate sharing that
+    collection still saw it as unreferenced and deleted it, leaving the failed
+    version's metadata naming a store that no longer exists.
+    """
+    monkeypatch.setenv("GRAPHRAG_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("GRAPHRAG_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+    versions = mgr.metadata["schemas"][SCHEMA]["versions"]
+    # Both doomed versions are backed by the same collection.
+    versions[0]["graphrag_collection"] = "schema_public"
+    versions[1]["graphrag_collection"] = "schema_public"
+    mgr._save_metadata()
+    (tmp_path / "chromadb" / CONN).mkdir(parents=True, exist_ok=True)
+
+    client = mock.Mock()
+    client.list_collections.return_value = [_collection("schema_public")]
+    client.delete_collection.side_effect = RuntimeError("chromadb unavailable")
+
+    with (
+        mock.patch("src.lifecycle.cleanup.OUTPUT_DIR", tmp_path),
+        mock.patch("chromadb.PersistentClient", return_value=client),
+    ):
+        report = await DataCleanupManager(CONN, tmp_path).cleanup_graphrag(
+            SCHEMA, dry_run=False
+        )
+
+    assert report["errors"]
+    assert (
+        client.delete_collection.call_count == 1
+    ), "the second candidate must not retry a collection the first still holds"
+    reloaded = {v.version: v for v in _mgr(tmp_path).get_versions(SCHEMA)}
+    assert reloaded[1].graphrag_status != "deleted"
+
+
+async def test_a_failed_version_protects_its_graph_for_the_rest_of_the_run(
+    tmp_path, monkeypatch
+):
+    """Same contract for named graphs, which generations share by default."""
+    monkeypatch.setenv("ONTOLOGY_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("ONTOLOGY_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+    versions = mgr.metadata["schemas"][SCHEMA]["versions"]
+    versions[0]["ontology_graph_uri"] = "urn:graph:shared"
+    versions[1]["ontology_graph_uri"] = "urn:graph:shared"
+    mgr._save_metadata()
+
+    store = mock.Mock()
+    store.delete_graph.side_effect = RuntimeError("oxigraph unavailable")
+
+    report = await DataCleanupManager(CONN, tmp_path).cleanup_ontology(
+        SCHEMA, dry_run=False, oxigraph_store=store
+    )
+
+    assert report["errors"]
+    assert (
+        store.delete_graph.call_count == 1
+    ), "the second candidate must not drop a graph the first still references"
+    reloaded = {v.version: v for v in _mgr(tmp_path).get_versions(SCHEMA)}
+    assert reloaded[1].ontology_status != "deleted"
+
+
+async def test_the_survivor_scan_runs_once_per_cleanup(tmp_path, monkeypatch):
+    """The connection-wide scan is hoisted out of the per-candidate loop.
+
+    It walks every version of every schema, so doing it per deletion candidate
+    made cleanup O(candidates x schemas x versions) on workspaces with many
+    schemas. Computing the survivor set up front also makes the outcome
+    independent of the order candidates are processed in.
+    """
+    monkeypatch.setenv("GRAPHRAG_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("GRAPHRAG_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=6, age_days=100)
+    for other in ("analytics", "sales", "hr"):
+        mgr.open_version(other, "h", 1, 1)
+
+    manager = DataCleanupManager(CONN, tmp_path)
+    candidates = manager.metadata_mgr.get_versions_to_cleanup(SCHEMA, "graphrag")
+    assert len(candidates) > 1, "need several candidates for the check to mean anything"
+
+    with mock.patch.object(
+        manager, "_all_versions", wraps=manager._all_versions
+    ) as scan:
+        await manager.cleanup_graphrag(SCHEMA, dry_run=False)
+
+    assert scan.call_count == 1, (
+        f"scanned the whole workspace {scan.call_count}x for "
+        f"{len(candidates)} candidates"
+    )
+
+
 async def test_a_graph_shared_with_another_schema_survives(tmp_path, monkeypatch):
     """An explicit graph_uri can point two schemas at one named graph."""
     monkeypatch.setenv("ONTOLOGY_KEEP_VERSIONS", "1")

@@ -72,6 +72,7 @@ class DataCleanupManager:
             }
 
         max_age = self.metadata_mgr.get_retention_policy().graphrag_max_age_days
+        live_collections = self._collections_still_in_use(schema_name)
         deleted = []
         errors = []
 
@@ -79,7 +80,10 @@ class DataCleanupManager:
             try:
                 if not dry_run:
                     await asyncio.to_thread(
-                        self._delete_graphrag_files, schema_name, version
+                        self._delete_graphrag_files,
+                        schema_name,
+                        version,
+                        live_collections,
                     )
                     await self._mark_version_deleted(
                         schema_name, version.version, "graphrag"
@@ -102,6 +106,13 @@ class DataCleanupManager:
                     f"Failed to delete GraphRAG version {version.version}: {e}"
                 )
                 errors.append({"version": version.version, "error": str(e)})
+                # This version survives the run, so whatever it still points at
+                # has to be protected for the rest of it. The survivor set was
+                # built before the loop and counts every candidate as doomed --
+                # without this, a later candidate sharing the collection would
+                # delete a store the failed version's metadata still names.
+                if version.graphrag_collection:
+                    live_collections.add(version.graphrag_collection)
 
         return {"deleted": deleted, "errors": errors, "dry_run": dry_run}
 
@@ -169,6 +180,10 @@ class DataCleanupManager:
                     f"Failed to delete Ontology version {version.version}: {e}"
                 )
                 errors.append({"version": version.version, "error": str(e)})
+                # Kept for retry, so its named graph must survive the rest of
+                # the run -- see the matching note in cleanup_graphrag.
+                if version.ontology_graph_uri:
+                    live_graphs.add(version.ontology_graph_uri)
 
         return {"deleted": deleted, "errors": errors, "dry_run": dry_run}
 
@@ -185,13 +200,13 @@ class DataCleanupManager:
 
         def _mutate(mgr: VersionMetadataManager) -> None:
             mgr.mark_version_deleted(schema_name, version, data_type)
-            # Adopt the state that was just persisted, inside the lock. This
-            # instance's view is read between calls -- _graph_uris_still_in_use
-            # and the ChromaDB ownership guard both consult it -- and a stale
-            # copy would let the second version in a run be judged against the
-            # history as it stood before the first. Re-running mark_version_
-            # deleted on our own manager instead would be a second, unserialized
-            # write of metadata.json: the exact race this lock exists to stop.
+            # Adopt the state that was just persisted, inside the lock, so this
+            # instance's view does not go stale mid-run. The cleanup_old_versions
+            # handler reads it back through get_versions() to report the
+            # remaining history, which would otherwise still show the versions
+            # this run just deleted. Re-running mark_version_deleted on our own
+            # manager instead would be a second, unserialized write of
+            # metadata.json: the exact race this lock exists to stop.
             self.metadata_mgr.metadata = deepcopy(mgr.metadata)
 
         await mutate_workspace_metadata(self.connection_id, self.output_dir, _mutate)
@@ -205,6 +220,9 @@ class DataCleanupManager:
         to the schema being cleaned would let it delete a resource another
         schema is still using.
 
+        Walks the whole workspace, so callers build their survivor set once per
+        cleanup run rather than per deletion candidate.
+
         Returns:
             (schema name, version) for every schema in the workspace.
         """
@@ -213,6 +231,55 @@ class DataCleanupManager:
             for schema_name in self.metadata_mgr.metadata.get("schemas", {})
             for version in self.metadata_mgr.get_versions(schema_name)
         ]
+
+    def _surviving_references(
+        self, schema_name: str, data_type: str, attribute: str
+    ) -> set[str]:
+        """Resource ids held by versions that will outlive this cleanup run.
+
+        A doomed version's resource is only safe to delete when nothing that
+        survives the run points at it. Computed once up front, which makes the
+        result independent of the order candidates happen to be processed in --
+        the earlier per-candidate check saw already-processed versions as
+        deleted and not-yet-processed ones as live, so whether a shared resource
+        went depended on where in the loop it was reached.
+
+        Args:
+            schema_name: Schema being cleaned up.
+            data_type: "graphrag" or "ontology" -- which retention list defines
+                the doomed set.
+            attribute: VersionInfo field naming the resource.
+
+        Returns:
+            Resource ids that must be preserved.
+        """
+        doomed = {
+            v.version
+            for v in self.metadata_mgr.get_versions_to_cleanup(
+                schema_name, data_type=data_type
+            )
+        }
+        status_field = f"{data_type}_status"
+        return {
+            getattr(version, attribute)
+            for other_schema, version in self._all_versions()
+            if getattr(version, attribute)
+            and getattr(version, status_field) != "deleted"
+            and not (other_schema == schema_name and version.version in doomed)
+        }
+
+    def _collections_still_in_use(self, schema_name: str) -> set[str]:
+        """ChromaDB collections referenced by versions surviving this run.
+
+        Args:
+            schema_name: Schema being cleaned up.
+
+        Returns:
+            Collection names that must be preserved.
+        """
+        return self._surviving_references(
+            schema_name, "graphrag", "graphrag_collection"
+        )
 
     def _graph_uris_still_in_use(self, schema_name: str) -> set[str]:
         """Named graphs referenced by versions that are not being deleted.
@@ -229,19 +296,7 @@ class DataCleanupManager:
         Returns:
             Graph URIs that must be preserved.
         """
-        doomed = {
-            v.version
-            for v in self.metadata_mgr.get_versions_to_cleanup(
-                schema_name, data_type="ontology"
-            )
-        }
-        return {
-            version.ontology_graph_uri
-            for other_schema, version in self._all_versions()
-            if version.ontology_graph_uri
-            and version.ontology_status != "deleted"
-            and not (other_schema == schema_name and version.version in doomed)
-        }
+        return self._surviving_references(schema_name, "ontology", "ontology_graph_uri")
 
     def _delete_ontology_artifacts(
         self,
@@ -278,15 +333,21 @@ class DataCleanupManager:
         # the caller record the failure and leave the version intact to retry.
         oxigraph_store.delete_graph(graph_uri)
 
-    def _delete_graphrag_files(self, schema_name: str, version: VersionInfo) -> None:
+    def _delete_graphrag_files(
+        self,
+        schema_name: str,
+        version: VersionInfo,
+        live_collections: set[str],
+    ) -> None:
         """
         Delete GraphRAG files for a specific version.
 
         Args:
             schema_name: Schema name
             version: Version being cleaned up
+            live_collections: Collections held by versions surviving this run
         """
-        self._delete_chromadb_collection(schema_name, version)
+        self._delete_chromadb_collection(version, live_collections)
 
         # Snapshot files recorded when the version was saved. Older workspaces
         # predate the recording, so fall back to the conventional names.
@@ -303,9 +364,9 @@ class DataCleanupManager:
                 logger.info(f"Deleted {file_path}")
 
     def _delete_chromadb_collection(
-        self, schema_name: str, version: VersionInfo
+        self, version: VersionInfo, live_collections: set[str]
     ) -> None:
-        """Delete this version's ChromaDB collection, if it owns one outright.
+        """Delete this version's ChromaDB collection, if nothing else holds it.
 
         GraphRAG is connection-scoped and accumulative by design: one collection
         holds every schema's vectors so cross-schema search and join discovery
@@ -315,30 +376,20 @@ class DataCleanupManager:
 
         So the delete is guarded by ownership -- it runs only when no surviving
         version references the same collection. Today that makes it a no-op
-        whenever the schema still has a live version, which is the correct
-        outcome and the reason this is a guard rather than an unconditional
-        delete.
+        whenever any schema on the connection still has a live version, which is
+        the correct outcome and the reason this is a guard rather than an
+        unconditional delete.
 
         Args:
-            schema_name: Schema name.
             version: Version being cleaned up.
+            live_collections: Collections held by versions surviving this run,
+                computed once by the caller (see _collections_still_in_use).
         """
         collection = version.graphrag_collection
         if not collection:
             return
 
-        # Scanned across every schema on the connection, not just this one.
-        # The collection is connection-scoped by design, so analytics can be
-        # backed by the same collection public is being cleaned out of --
-        # checking only public's history would delete a store still serving
-        # analytics.
-        still_referenced = any(
-            other.graphrag_collection == collection
-            and not (other_schema == schema_name and other.version == version.version)
-            and other.graphrag_status != "deleted"
-            for other_schema, other in self._all_versions()
-        )
-        if still_referenced:
+        if collection in live_collections:
             logger.info(
                 f"Kept ChromaDB collection '{collection}': still referenced by "
                 "a surviving version"
