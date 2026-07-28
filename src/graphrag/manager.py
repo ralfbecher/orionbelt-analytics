@@ -421,26 +421,41 @@ class GraphRAGManager:
             return 0
         return int(stats.get("total_elements", 0) or 0)
 
-    def save_state(self, output_dir: Path, version: int | None = None) -> list[str]:
+    def save_state(
+        self,
+        output_dir: Path,
+        version: int | None = None,
+        snapshot_schema: str | None = None,
+    ) -> list[str]:
         """
         Save GraphRAG state to disk.
 
         Saves combined state (all accumulated schemas) plus per-schema files
         for backward compatibility with workspace metadata.
 
-        When *version* is given, each per-schema file is also written under a
-        ``_v{version}`` name. Those copies are the per-version history that
-        retention prunes; the unversioned files stay the current-generation
-        pointer that :meth:`load_state` reads, so they are never deletion
-        candidates and restore cannot be broken by cleanup.
+        When *version* and *snapshot_schema* are both given, that one schema's
+        files are also written under a ``_v{version}`` name. Those copies are
+        the per-version history that retention prunes; the unversioned files
+        stay the current-generation pointer that :meth:`load_state` reads, so
+        they are never deletion candidates and restore cannot be broken by
+        cleanup.
+
+        Snapshotting is deliberately restricted to a single schema. Version
+        numbers are per schema, and this manager holds every accumulated schema
+        on the connection -- so applying one schema's version number across all
+        of them would overwrite ``vector_store_public_v1.json`` when *analytics*
+        v1 is saved, and hand ownership of public's snapshot to analytics's
+        version record. Cleanup would then delete another schema's history.
 
         Args:
             output_dir: Output directory
             version: Version number to snapshot under, or None for no snapshot.
+            snapshot_schema: The one schema to snapshot; required for a snapshot
+                to be taken, and must be the schema *version* belongs to.
 
         Returns:
             Names of the versioned snapshot files written, relative to the
-            connection directory. Empty when *version* is None.
+            connection directory. Empty when no snapshot was taken.
         """
         output_dir = Path(output_dir)
         snapshot_files: list[str] = []
@@ -473,7 +488,6 @@ class GraphRAGManager:
                 json.dump(communities_data, f, indent=2)
 
         # Also save per-schema files (backward compat with workspace metadata)
-        suffix = f"_v{version}" if version is not None else ""
         for schema_name in self._schema_names:
             vector_store_path = connection_dir / f"vector_store_{schema_name}.json"
             self.vector_store.save(vector_store_path)
@@ -504,12 +518,12 @@ class GraphRAGManager:
                 with open(schema_communities_path, "w") as f:
                     json.dump(communities_data, f, indent=2)
 
-            if not suffix:
+            # Snapshot only the schema whose version number this is.
+            if version is None or schema_name != snapshot_schema:
                 continue
 
-            # Snapshot this generation. Copied from the files just written
-            # rather than re-serialized, so the snapshot is byte-identical to
-            # the state restore would load.
+            # Copied from the files just written rather than re-serialized, so
+            # the snapshot is byte-identical to the state restore would load.
             for current in (
                 vector_store_path,
                 per_schema_graph_path,
@@ -517,7 +531,9 @@ class GraphRAGManager:
             ):
                 if current is None or not current.exists():
                     continue
-                snapshot = current.with_name(f"{current.stem}{suffix}{current.suffix}")
+                snapshot = current.with_name(
+                    f"{current.stem}_v{version}{current.suffix}"
+                )
                 try:
                     shutil.copy2(current, snapshot)
                 except OSError as e:

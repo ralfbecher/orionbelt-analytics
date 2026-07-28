@@ -13,7 +13,11 @@ from ..exceptions import (
     ValidationError,
 )
 from ..handler_context import HandlerContext
-from ..lifecycle.metadata import update_workspace_rdf, update_workspace_section
+from ..lifecycle.metadata import (
+    update_schema_version,
+    update_workspace_rdf,
+    update_workspace_section,
+)
 from ..oxigraph_store import OXIGRAPH_AVAILABLE, schema_graph_uri
 from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..utils import read_text_file, utc_now
@@ -96,6 +100,21 @@ async def store_ontology_in_rdf(
                         "initialized": True,
                         "graph_uris": [graph_uri],
                         "initialized_at": utc_now().isoformat(),
+                    },
+                )
+                # This is the documented path for generate_ontology(
+                # auto_persist=False), which leaves the version with no graph
+                # URI and a zero triple count. Without recording them here the
+                # version never learns which graph it loaded, and retention
+                # could not delete that graph when the version aged out.
+                await update_schema_version(
+                    connection_id=session.connection_id,
+                    output_dir=OUTPUT_DIR,
+                    schema_name=effective_schema,
+                    updates={
+                        "ontology_ttl_file": session.ontology_file,
+                        "ontology_graph_uri": graph_uri,
+                        "ontology_triple_count": triple_count,
                     },
                 )
             except Exception as e:

@@ -50,7 +50,9 @@ async def _save_graphrag_state(session: Any, schema_name: str) -> None:
         except Exception as e:
             logger.warning(f"Failed to read active version: {e}")
 
-    snapshot_files = await asyncio.to_thread(manager.save_state, output_dir, version)
+    snapshot_files = await asyncio.to_thread(
+        manager.save_state, output_dir, version, schema_name
+    )
 
     if version is None or not session.connection_id:
         return
@@ -145,6 +147,8 @@ async def _auto_generate_ontology_background(
             previous_ontology_file = schema_state.ontology.ontology_file
             schema_state.ontology.ontology_file = ontology_file.name
 
+            graph_uri = ""
+            triple_count = 0
             if OXIGRAPH_AVAILABLE:
                 try:
                     # Direct store access for background task (connection-scoped)
@@ -163,9 +167,41 @@ async def _auto_generate_ontology_background(
             logger.info(f"Ontology auto-generated successfully ({elapsed:.2f}s)")
             logger.info(f"Saved to: {ontology_file.name}")
 
-            # Pruned last, and never touching what the session previously
-            # pointed at: this path writes no persisted metadata, so the
-            # in-memory reference is the only record the older file is in use.
+            # Record the same way the foreground handler does. discover_schema
+            # opened a version before this task was scheduled, so without this
+            # an auto-generated ontology leaves that version with no TTL file,
+            # no graph URI and a zero triple count -- and retention could never
+            # clean up the graph it loaded.
+            if session.connection_id:
+                try:
+                    await update_workspace_section(
+                        connection_id=session.connection_id,
+                        output_dir=OUTPUT_DIR,
+                        schema_name=schema_name,
+                        section="ontology",
+                        data={
+                            "ontology_file": ontology_file.name,
+                            "enriched": False,
+                            "graph_uri": graph_uri,
+                            "persisted_to_rdf": bool(graph_uri),
+                            "generated_at": utc_now().isoformat(),
+                        },
+                    )
+                    await update_schema_version(
+                        connection_id=session.connection_id,
+                        output_dir=OUTPUT_DIR,
+                        schema_name=schema_name,
+                        updates={
+                            "ontology_ttl_file": ontology_file.name,
+                            "ontology_graph_uri": graph_uri,
+                            "ontology_triple_count": triple_count,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to write workspace metadata: {e}")
+
+            # Pruned last, once metadata durably names the new file, and never
+            # touching what the session previously pointed at.
             await prune_superseded_artifacts(
                 ontology_file,
                 protect=[previous_ontology_file] if previous_ontology_file else [],

@@ -583,40 +583,70 @@ async def test_active_version_of_an_unknown_schema_is_none(tmp_path):
 # --- versioned GraphRAG snapshots -------------------------------------------
 
 
-def test_save_state_without_a_version_writes_no_snapshots(tmp_path):
+def _fake_manager(schemas: list[str], payload: str = "{}"):
+    """A GraphRAGManager with just enough wired up to exercise save_state."""
     from src.graphrag.manager import GraphRAGManager
 
     manager = GraphRAGManager.__new__(GraphRAGManager)
     manager._connection_id = CONN
-    manager._schema_names = []
-    manager.graph_retriever = mock.Mock()
-    manager.graph_retriever._tables_info = {}
-    manager.graph_retriever.export_graph_for_visualization.return_value = {}
-    manager.community_detector = None
-
-    assert manager.save_state(tmp_path) == []
-
-
-def test_save_state_snapshots_each_per_schema_file(tmp_path):
-    from src.graphrag.manager import GraphRAGManager
-
-    manager = GraphRAGManager.__new__(GraphRAGManager)
-    manager._connection_id = CONN
-    manager._schema_names = [SCHEMA]
+    manager._schema_names = schemas
     manager.graph_retriever = mock.Mock()
     manager.graph_retriever._tables_info = {}
     manager.graph_retriever.export_graph_for_visualization.return_value = {}
     manager.community_detector = None
     manager.vector_store = mock.Mock()
-    manager.vector_store.save.side_effect = lambda p: Path(p).write_text("{}")
+    manager.vector_store.save.side_effect = lambda p: Path(p).write_text(payload)
+    return manager
 
-    written = manager.save_state(tmp_path, version=3)
+
+def test_save_state_without_a_version_writes_no_snapshots(tmp_path):
+    assert _fake_manager([]).save_state(tmp_path) == []
+
+
+def test_save_state_snapshots_each_per_schema_file(tmp_path):
+    manager = _fake_manager([SCHEMA])
+
+    written = manager.save_state(tmp_path, version=3, snapshot_schema=SCHEMA)
 
     assert f"vector_store_{SCHEMA}_v3.json" in written
     assert f"graph_{SCHEMA}_v3.json" in written
     assert (
         tmp_path / CONN / f"vector_store_{SCHEMA}.json"
     ).exists(), "the unversioned current-state file must still be written"
+
+
+def test_snapshot_is_confined_to_the_schema_being_recorded(tmp_path):
+    """One schema's version number must not snapshot every accumulated schema.
+
+    GraphRAG is connection-scoped, so this manager holds every schema on the
+    connection, but version numbers are per schema. Snapshotting all of them
+    under the version being recorded overwrote public's v1 when analytics v1
+    was saved, and handed public's snapshot to analytics's version record --
+    so cleaning up analytics v1 would have deleted public's history.
+    """
+    manager = _fake_manager(["public", "analytics"], payload='{"state": "first"}')
+    manager.save_state(tmp_path, version=1, snapshot_schema="public")
+    public_v1 = tmp_path / CONN / "vector_store_public_v1.json"
+    original = public_v1.read_text(encoding="utf-8")
+
+    # analytics is discovered next and accumulates; its own v1 is recorded.
+    manager.vector_store.save.side_effect = lambda p: Path(p).write_text(
+        '{"state": "after-analytics"}'
+    )
+    written = manager.save_state(tmp_path, version=1, snapshot_schema="analytics")
+
+    assert (
+        public_v1.read_text(encoding="utf-8") == original
+    ), "another schema's save must not rewrite public's snapshot"
+    assert not any(
+        "public" in name for name in written
+    ), "analytics's version must not claim ownership of public's files"
+    assert (tmp_path / CONN / "vector_store_analytics_v1.json").exists()
+
+
+def test_no_snapshot_without_a_named_schema(tmp_path):
+    """A version number alone is ambiguous on a multi-schema connection."""
+    assert _fake_manager(["public", "analytics"]).save_state(tmp_path, version=1) == []
 
 
 # --- end to end through the handler -----------------------------------------
@@ -685,6 +715,114 @@ async def test_discover_schema_records_a_version(tmp_path, monkeypatch):
     assert recorded.table_count == 2
     assert recorded.column_count == 2
     assert recorded.schema_hash
+
+
+async def test_auto_generated_ontology_reaches_the_version(tmp_path, monkeypatch):
+    """AUTO_ONTOLOGY=true must fill in the version discovery opened.
+
+    This background path wrote no persisted metadata at all, so an
+    auto-generated ontology left the version with no TTL file, no graph URI and
+    a zero triple count -- and retention could never clean up the graph it had
+    loaded into Oxigraph.
+    """
+    import types
+    from unittest.mock import Mock, patch
+
+    from src.database_manager import ColumnInfo, TableInfo
+    from src.handlers import graphrag as graphrag_handler
+
+    await open_schema_version(CONN, tmp_path, SCHEMA, _tables(1))
+
+    tables = [
+        TableInfo(
+            name="customers",
+            schema=SCHEMA,
+            columns=[
+                ColumnInfo(
+                    name="id",
+                    data_type="INTEGER",
+                    is_nullable=False,
+                    is_primary_key=True,
+                    is_foreign_key=False,
+                )
+            ],
+            primary_keys=["id"],
+            foreign_keys=[],
+            row_count=1,
+        )
+    ]
+
+    store = Mock()
+    store.load_ontology.return_value = 314
+
+    session = Mock()
+    session.connection_id = CONN
+    session.oxigraph_store = store
+    session.get_or_create_schema_state.return_value = types.SimpleNamespace(
+        ontology=types.SimpleNamespace(ontology_file=None)
+    )
+
+    conn_dir = tmp_path / CONN
+    conn_dir.mkdir(parents=True, exist_ok=True)
+    with (
+        patch("src.handlers.graphrag.OUTPUT_DIR", tmp_path),
+        patch("src.handlers.graphrag.get_connection_dir", return_value=conn_dir),
+        patch("src.handlers.graphrag.OXIGRAPH_AVAILABLE", True),
+    ):
+        await graphrag_handler._auto_generate_ontology_background(
+            schema_name=SCHEMA, tables_info=tables, session=session, ctx=None
+        )
+
+    recorded = _mgr(tmp_path).get_current_version(SCHEMA)
+    assert recorded.ontology_ttl_file.endswith(".ttl")
+    assert recorded.ontology_triple_count == 314
+    assert recorded.ontology_graph_uri
+
+
+async def test_manual_rdf_store_records_the_graph(tmp_path, monkeypatch):
+    """store_ontology_in_rdf is the documented auto_persist=False follow-up.
+
+    Without recording here the version never learns which graph was loaded, so
+    retention cannot delete that graph when the version ages out.
+    """
+    from unittest.mock import AsyncMock, Mock, patch
+
+    from src.handlers import rdf as rdf_handler
+
+    await open_schema_version(CONN, tmp_path, SCHEMA, _tables(1))
+
+    conn_dir = tmp_path / CONN
+    conn_dir.mkdir(parents=True, exist_ok=True)
+    (conn_dir / "ontology_public.ttl").write_text("@prefix x: <urn:x> .")
+
+    store = Mock()
+    store.load_ontology.return_value = 271
+
+    ctx = Mock()
+    ctx.info = AsyncMock()
+
+    session = Mock()
+    session.connection_id = CONN
+    session.ontology_file = "ontology_public.ttl"
+    session.get_last_analyzed_schema.return_value = SCHEMA
+
+    services = Mock()
+    services.get_session_data.return_value = session
+    services.get_oxigraph_store.return_value = store
+
+    with (
+        patch("src.handlers.rdf.OUTPUT_DIR", tmp_path),
+        patch("src.handlers.rdf.get_connection_dir", return_value=conn_dir),
+        patch("src.handlers.rdf.OXIGRAPH_AVAILABLE", True),
+    ):
+        await rdf_handler.store_ontology_in_rdf(
+            ctx, schema_name=SCHEMA, graph_uri=None, services=services
+        )
+
+    recorded = _mgr(tmp_path).get_current_version(SCHEMA)
+    assert recorded.ontology_triple_count == 271
+    assert recorded.ontology_graph_uri, "the loaded graph URI must be recorded"
+    assert recorded.ontology_ttl_file == "ontology_public.ttl"
 
 
 async def test_a_second_discovery_archives_the_first(tmp_path, monkeypatch):
