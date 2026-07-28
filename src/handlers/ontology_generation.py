@@ -12,8 +12,10 @@ from ..database_manager import ColumnInfo, TableInfo
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import (
+    get_active_version_number,
     mark_ontology_persisted,
     ontology_is_current,
+    update_schema_version,
     update_workspace_rdf,
     update_workspace_section,
 )
@@ -246,6 +248,20 @@ async def generate_ontology(
         )
         return err
 
+    # Bound before the slow work below, not after it. Generation plus SHACL
+    # validation are the long poles in this handler, and a discover_schema
+    # landing during them opens a newer version -- which would then be credited
+    # with this run's TTL file and treated as current for RDF auto-persist.
+    session = services.get_session_data(ctx)
+    target_version: int | None = None
+    if session.connection_id:
+        try:
+            target_version = await get_active_version_number(
+                session.connection_id, OUTPUT_DIR, schema_name or "default"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read active version: {e}")
+
     generator = services.server_state.get_ontology_generator(base_uri=base_uri)
     # rdflib work is CPU-bound (~876 ms per 2.65 MB of Turtle); off the loop
     # so it does not freeze every concurrent session.
@@ -324,6 +340,20 @@ async def generate_ontology(
                             "persisted_to_rdf": False,
                             "generated_at": utc_now().isoformat(),
                         },
+                    )
+                    # Recorded against the version captured before generation
+                    # started, so this TTL lands on the generation it was built
+                    # from. The triple count is not known until the RDF load
+                    # below, so it is filled in there against the same version.
+                    await update_schema_version(
+                        connection_id=session.connection_id,
+                        output_dir=OUTPUT_DIR,
+                        schema_name=schema_name or "default",
+                        updates={
+                            "ontology_ttl_file": ontology_filename,
+                            "ontology_graph_uri": graph_uri or "",
+                        },
+                        version=target_version,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to write workspace metadata: {e}")
@@ -432,6 +462,21 @@ async def generate_ontology(
                                     "initialized_at": utc_now().isoformat(),
                                 },
                             )
+                            # Only now is the triple count known. Gated on
+                            # `marked` for the same reason that flag is: if a
+                            # newer generation superseded this one, its counts
+                            # are the ones the version should carry.
+                            if marked:
+                                await update_schema_version(
+                                    connection_id=session.connection_id,
+                                    output_dir=OUTPUT_DIR,
+                                    schema_name=schema_name or "default",
+                                    updates={
+                                        "ontology_triple_count": triple_count,
+                                        "ontology_graph_uri": graph_uri,
+                                    },
+                                    version=target_version,
+                                )
                         except Exception as e:
                             logger.warning(f"Failed to write workspace metadata: {e}")
 

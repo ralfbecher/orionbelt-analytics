@@ -211,6 +211,10 @@ DATABRICKS_SCHEMA=default
 | `ARTIFACT_KEEP_VERSIONS` | `3` | Generations of each ontology / schema / R2RML file to keep per schema. Older ones are pruned when a new one is written. Minimum 1 |
 | `AUTO_CLEANUP_ON_STARTUP` | `false` | Delete whole workspaces at startup: `false` (keep all), `true` (orphaned, or older than `WORKSPACE_MAX_AGE_DAYS`), `all` (delete every workspace). See [Startup workspace cleanup](#startup-workspace-cleanup) |
 | `WORKSPACE_MAX_AGE_DAYS` | `30` | Age threshold for `AUTO_CLEANUP_ON_STARTUP=true`, measured from the workspace's last update. Ignored in the other modes |
+| `GRAPHRAG_KEEP_VERSIONS` | `3` | Archived GraphRAG snapshots kept per schema. See [Per-version retention](#per-version-retention) |
+| `GRAPHRAG_MAX_AGE_DAYS` | `30` | Age past which an archived GraphRAG snapshot may be deleted |
+| `ONTOLOGY_KEEP_VERSIONS` | `5` | Archived ontology versions kept per schema |
+| `ONTOLOGY_MAX_AGE_DAYS` | `60` | Age past which an archived ontology version may be deleted |
 | `ONTOLOGY_BASE_URI` | `http://example.com/ontology/` | Base URI for generated RDF ontologies |
 | `R2RML_BASE_IRI` | `http://mycompany.com/` | Base IRI for R2RML subject templates |
 | `OUTPUT_DIR` | `tmp` | Directory for generated files (relative to project root) |
@@ -251,7 +255,31 @@ There is no partial or per-artifact cleanup. The `chromadb/` and `oxigraph/` par
 
 **Age comes from metadata, not the filesystem.** The `true` mode reads `workspace.updated_at` out of `metadata.json` rather than looking at file modification times, so touching files on disk does not keep a workspace alive.
 
-> **Note on per-version retention.** An earlier design kept the last *N* versions of GraphRAG and ontology data per schema, configured by `GRAPHRAG_KEEP_VERSIONS`, `GRAPHRAG_MAX_AGE_DAYS`, `ONTOLOGY_KEEP_VERSIONS` and `ONTOLOGY_MAX_AGE_DAYS`. That mechanism is **not wired up** -- those four variables are read nowhere in the code and setting them has no effect, so they are intentionally absent from `.env.template`. The retention policy defaults are still recorded in each workspace's `metadata.json`, and `DataCleanupManager` still implements the logic, but nothing invokes it. Only the whole-workspace cleanup described above actually runs.
+### Per-version retention
+
+Startup cleanup deletes whole workspaces; this deletes individual **versions** inside a workspace that is still in use.
+
+Every `discover_schema` call opens a version for that schema, and `generate_ontology` and GraphRAG initialization fill in their halves as they complete. The result is a history under `schemas.{name}.versions` in `metadata.json` recording, per generation: the schema fingerprint and table/column counts, the ontology TTL file, its named graph and triple count, and the GraphRAG vector count and snapshot files. Opening a new version archives the one before it -- only the newest is `active`.
+
+Retention applies to **archived** versions only, so the current generation is never a candidate:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GRAPHRAG_KEEP_VERSIONS` | `3` | Archived GraphRAG snapshots to keep per schema |
+| `GRAPHRAG_MAX_AGE_DAYS` | `30` | Age past which an archived GraphRAG snapshot is eligible for deletion |
+| `ONTOLOGY_KEEP_VERSIONS` | `5` | Archived ontology versions to keep per schema |
+| `ONTOLOGY_MAX_AGE_DAYS` | `60` | Age past which an archived ontology version is eligible for deletion |
+
+A version must exceed **both** the count and the age threshold to be deleted, and at least `min_versions` (2) are always kept regardless. These are read at cleanup time and override the copy recorded in `metadata.json`, so changing them takes effect on workspaces that already exist. Invalid or sub-1 values are logged and ignored rather than failing startup.
+
+Cleanup is **manual**: call the `cleanup_old_versions` tool, which defaults to `dry_run=true` so you can see what would go before anything does. It reports the effective policy, what was (or would be) deleted, and the schema's remaining history.
+
+Two deletions are deliberately guarded rather than unconditional:
+
+- **Named graphs.** Successive generations of a schema reuse the same graph URI, so the graph is only dropped from Oxigraph when no surviving version still references it.
+- **ChromaDB collections.** GraphRAG is connection-scoped and accumulative by design -- one collection holds every schema's vectors so cross-schema search and join discovery work -- so versions share a collection rather than each owning one. The collection is deleted only when no surviving version references it, which in practice means it stays as long as the schema has a live version. Per-version GraphRAG *files* are pruned normally.
+
+Ontology, schema and R2RML **files** are additionally pruned by count as they are written, independently of this, via `ARTIFACT_KEEP_VERSIONS`.
 
 ### Security Notes
 

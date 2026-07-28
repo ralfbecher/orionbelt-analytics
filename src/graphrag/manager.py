@@ -7,6 +7,7 @@ to provide intelligent schema navigation and context-aware query generation.
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -399,17 +400,65 @@ class GraphRAGManager:
 
         return overview
 
-    def save_state(self, output_dir: Path) -> None:
+    @property
+    def vector_collection_name(self) -> str:
+        """Name of the backing ChromaDB collection, or "" when not using one.
+
+        Recorded on each version so retention can tell whether a collection is
+        still referenced by a live version before deleting it. Empty for the
+        JSON fallback store, which has no collections.
+        """
+        collection = getattr(self.vector_store, "collection", None)
+        return str(getattr(collection, "name", "") or "")
+
+    @property
+    def vector_count(self) -> int:
+        """Number of elements currently in the vector store, 0 if unavailable."""
+        try:
+            stats = self.vector_store.get_statistics()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"Failed to read vector store statistics: {e}")
+            return 0
+        return int(stats.get("total_elements", 0) or 0)
+
+    def save_state(
+        self,
+        output_dir: Path,
+        version: int | None = None,
+        snapshot_schema: str | None = None,
+    ) -> list[str]:
         """
         Save GraphRAG state to disk.
 
         Saves combined state (all accumulated schemas) plus per-schema files
         for backward compatibility with workspace metadata.
 
+        When *version* and *snapshot_schema* are both given, that one schema's
+        files are also written under a ``_v{version}`` name. Those copies are
+        the per-version history that retention prunes; the unversioned files
+        stay the current-generation pointer that :meth:`load_state` reads, so
+        they are never deletion candidates and restore cannot be broken by
+        cleanup.
+
+        Snapshotting is deliberately restricted to a single schema. Version
+        numbers are per schema, and this manager holds every accumulated schema
+        on the connection -- so applying one schema's version number across all
+        of them would overwrite ``vector_store_public_v1.json`` when *analytics*
+        v1 is saved, and hand ownership of public's snapshot to analytics's
+        version record. Cleanup would then delete another schema's history.
+
         Args:
             output_dir: Output directory
+            version: Version number to snapshot under, or None for no snapshot.
+            snapshot_schema: The one schema to snapshot; required for a snapshot
+                to be taken, and must be the schema *version* belongs to.
+
+        Returns:
+            Names of the versioned snapshot files written, relative to the
+            connection directory. Empty when no snapshot was taken.
         """
         output_dir = Path(output_dir)
+        snapshot_files: list[str] = []
 
         # Create connection-specific subdirectory to prevent collisions
         connection_dir = output_dir / self._connection_id
@@ -457,19 +506,48 @@ class GraphRAGManager:
             with open(per_schema_graph_path, "w") as f:
                 json.dump(per_schema_data, f, indent=2)
 
+            schema_communities_path: Path | None = None
             if self.community_detector:
-                communities_path = connection_dir / f"communities_{schema_name}.json"
+                schema_communities_path = (
+                    connection_dir / f"communities_{schema_name}.json"
+                )
                 communities_data = {
                     "summaries": self.community_detector.get_all_summaries(),
                     "domain_names": self.community_detector.suggest_domain_names(),
                 }
-                with open(communities_path, "w") as f:
+                with open(schema_communities_path, "w") as f:
                     json.dump(communities_data, f, indent=2)
+
+            # Snapshot only the schema whose version number this is.
+            if version is None or schema_name != snapshot_schema:
+                continue
+
+            # Copied from the files just written rather than re-serialized, so
+            # the snapshot is byte-identical to the state restore would load.
+            for current in (
+                vector_store_path,
+                per_schema_graph_path,
+                schema_communities_path,
+            ):
+                if current is None or not current.exists():
+                    continue
+                snapshot = current.with_name(
+                    f"{current.stem}_v{version}{current.suffix}"
+                )
+                try:
+                    shutil.copy2(current, snapshot)
+                except OSError as e:
+                    # A missing snapshot costs history for this generation, not
+                    # correctness of the live state -- do not fail the save.
+                    logger.warning(f"Failed to snapshot {current.name}: {e}")
+                    continue
+                snapshot_files.append(snapshot.name)
 
         logger.info(
             f"Saved GraphRAG state to {connection_dir} "
             f"(schemas: {self._schema_names})"
         )
+        return snapshot_files
 
     def load_state(self, output_dir: Path) -> bool:
         """Restore GraphRAG state from disk.
