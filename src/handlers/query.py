@@ -131,9 +131,9 @@ async def validate_sql_syntax(
             if not obqc_result.is_valid:
                 validation_result["is_valid"] = False
                 if not validation_result.get("error"):
-                    validation_result[
-                        "error"
-                    ] = "OBQC validation failed - see obqc_issues for details"
+                    validation_result["error"] = (
+                        "OBQC validation failed - see obqc_issues for details"
+                    )
                 validation_result["error_type"] = (
                     validation_result.get("error_type") or "obqc_error"
                 )

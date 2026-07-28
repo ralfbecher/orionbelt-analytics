@@ -43,9 +43,9 @@ class SchemaCache:
     """Cached schema analysis results (multi-schema capable)."""
 
     def __init__(self) -> None:
-        self._cached_schema: dict[
-            str, list[Any]
-        ] | None = None  # schema_name -> List[TableInfo]
+        self._cached_schema: dict[str, list[Any]] | None = (
+            None  # schema_name -> List[TableInfo]
+        )
         self._last_analyzed_schema: str | None = None
 
     def cache_schema_analysis(self, schema_name: str, tables_info: list[Any]) -> None:

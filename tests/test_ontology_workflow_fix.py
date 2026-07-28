@@ -139,12 +139,13 @@ def mock_context():
 async def test_lightweight_caches_for_ontology(mock_context, mock_db_manager, tmp_path):
     """Test that lightweight mode caches full TableInfo for generate_ontology()."""
 
-    with patch("src.main.get_session_db_manager", return_value=mock_db_manager), patch(
-        "src.main.get_session_data"
-    ) as mock_session_data, patch(
-        "src.handlers.ontology_generation.ensure_output_dir", return_value=tmp_path
-    ), patch(
-        "src.main.get_session_safe_filename", return_value="test"
+    with (
+        patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+        patch("src.main.get_session_data") as mock_session_data,
+        patch(
+            "src.handlers.ontology_generation.ensure_output_dir", return_value=tmp_path
+        ),
+        patch("src.main.get_session_safe_filename", return_value="test"),
     ):
         # Mock session data
         session = Mock()
@@ -193,15 +194,15 @@ async def test_lightweight_caches_for_ontology(mock_context, mock_db_manager, tm
 async def test_ontology_uses_lightweight_cache(mock_context, mock_db_manager, tmp_path):
     """Test that generate_ontology() works with data cached by lightweight mode."""
 
-    with patch("src.main.get_session_db_manager", return_value=mock_db_manager), patch(
-        "src.main.get_session_data"
-    ) as mock_session_data, patch(
-        "src.handlers.ontology_generation.ensure_output_dir", return_value=tmp_path
-    ), patch(
-        "src.main.get_session_safe_filename", return_value="test"
-    ), patch(
-        "src.main._server_state"
-    ) as mock_server_state:
+    with (
+        patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+        patch("src.main.get_session_data") as mock_session_data,
+        patch(
+            "src.handlers.ontology_generation.ensure_output_dir", return_value=tmp_path
+        ),
+        patch("src.main.get_session_safe_filename", return_value="test"),
+        patch("src.main._server_state") as mock_server_state,
+    ):
         # Prepare cached tables (simulating what lightweight mode would cache)
         cached_tables = [
             TableInfo(
@@ -300,15 +301,15 @@ async def test_full_workflow_lightweight_to_ontology(
 ):
     """Integration test: lightweight analyze -> generate ontology."""
 
-    with patch("src.main.get_session_db_manager", return_value=mock_db_manager), patch(
-        "src.main.get_session_data"
-    ) as mock_session_data, patch(
-        "src.handlers.ontology_generation.ensure_output_dir", return_value=tmp_path
-    ), patch(
-        "src.main.get_session_safe_filename", return_value="test"
-    ), patch(
-        "src.main._server_state"
-    ) as mock_server_state:
+    with (
+        patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+        patch("src.main.get_session_data") as mock_session_data,
+        patch(
+            "src.handlers.ontology_generation.ensure_output_dir", return_value=tmp_path
+        ),
+        patch("src.main.get_session_safe_filename", return_value="test"),
+        patch("src.main._server_state") as mock_server_state,
+    ):
         # Real session-like behavior
         cached_data = {}
 

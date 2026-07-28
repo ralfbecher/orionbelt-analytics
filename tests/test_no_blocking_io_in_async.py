@@ -224,9 +224,7 @@ def test_async_callers_do_not_invoke_blocking_sync_helpers():
             name = (
                 func.id
                 if isinstance(func, ast.Name)
-                else func.attr
-                if isinstance(func, ast.Attribute)
-                else None
+                else func.attr if isinstance(func, ast.Attribute) else None
             )
             if name not in blocking_helpers:
                 continue

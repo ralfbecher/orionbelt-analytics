@@ -97,7 +97,7 @@ dev = [
     "pytest-mock>=3.15.0,<4.0.0",
     "pytest-benchmark>=5.1.0,<6.0.0",
     # Code formatting and linting
-    "black>=23.12.0,<24.0.0",
+    "black>=26.5.0,<27.0.0",
     "isort>=5.13.0,<6.0.0",
     "flake8>=7.0.0,<8.0.0",
     "mypy>=1.8.0,<2.0.0",
@@ -162,10 +162,8 @@ select = [
 
 [tool.black]
 line-length = 88
-# Highest syntax level the pinned black (>=23.12,<24) understands. The runtime
-# target is still Python 3.13 (see requires-python); this only bounds the syntax
-# black may emit. Bump to py313 when black is upgraded to >=24.10.
-target-version = ['py312']
+# Matches requires-python (>=3.13); bounds the syntax black may emit.
+target-version = ['py313']
 include = '\.pyi?$'
 extend-exclude = '''
 /(

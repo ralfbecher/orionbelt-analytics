@@ -477,9 +477,11 @@ class ChromaDBVectorStore:
                     "name": metadata.get("name", ""),
                     "description": metadata.get("description", ""),
                     "metadata": elem_metadata,
-                    "embedding": embedding.tolist()
-                    if hasattr(embedding, "tolist")
-                    else embedding,
+                    "embedding": (
+                        embedding.tolist()
+                        if hasattr(embedding, "tolist")
+                        else embedding
+                    ),
                 }
                 elements.append(element_dict)
 

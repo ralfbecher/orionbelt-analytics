@@ -228,8 +228,9 @@ class TestSecureCredentialManager(unittest.TestCase):
     def test_encryption_without_master_password(self) -> None:
         """Test that encryption fails without master password."""
         # Patch load_dotenv and os.getenv to prevent loading from .env file
-        with patch("src.security.load_dotenv"), patch(
-            "src.security.os.getenv", return_value=None
+        with (
+            patch("src.security.load_dotenv"),
+            patch("src.security.os.getenv", return_value=None),
         ):
             manager = SecureCredentialManager()
 

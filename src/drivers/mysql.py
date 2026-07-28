@@ -135,14 +135,12 @@ class MySQLDriver(DatabaseDriver):
 
     def get_schemas(self) -> list[str]:
         excluded_schemas = "', '".join(MYSQL_SYSTEM_SCHEMAS)
-        query = text(
-            f"""
+        query = text(f"""
             SELECT SCHEMA_NAME
             FROM information_schema.SCHEMATA
             WHERE SCHEMA_NAME NOT IN ('{excluded_schemas}')
             ORDER BY SCHEMA_NAME
-        """
-        )
+        """)
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -157,25 +155,21 @@ class MySQLDriver(DatabaseDriver):
             assert self.engine is not None
             with self.engine.connect() as conn:
                 if schema_name:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT TABLE_NAME
                         FROM information_schema.TABLES
                         WHERE TABLE_SCHEMA = :schema_name
                         AND TABLE_TYPE = 'BASE TABLE'
                         ORDER BY TABLE_NAME
-                    """
-                    )
+                    """)
                     result = conn.execute(query, {"schema_name": schema_name})
                 else:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT TABLE_NAME
                         FROM information_schema.TABLES
                         WHERE TABLE_TYPE = 'BASE TABLE'
                         ORDER BY TABLE_NAME
-                    """
-                    )
+                    """)
                     result = conn.execute(query)
                 return [row[0] for row in result.fetchall()]
         except SQLAlchemyError as e:
@@ -328,9 +322,9 @@ class MySQLDriver(DatabaseDriver):
                             "Insufficient permissions to access the specified tables"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

@@ -1034,9 +1034,9 @@ class DatabaseManager:
         }
 
         if not security_validation.get("is_safe", False):
-            validation_result[
-                "error"
-            ] = f"Security validation failed: {'; '.join(security_validation['issues'])}"
+            validation_result["error"] = (
+                f"Security validation failed: {'; '.join(security_validation['issues'])}"
+            )
             validation_result["error_type"] = "security_error"
             audit_log_security_event(
                 "sql_injection_attempt",
@@ -1045,9 +1045,11 @@ class DatabaseManager:
                     "issues": security_validation["issues"],
                     "risk_level": security_validation["risk_level"],
                 },
-                SecurityLevel.CRITICAL
-                if security_validation["risk_level"] == "critical"
-                else SecurityLevel.HIGH,
+                (
+                    SecurityLevel.CRITICAL
+                    if security_validation["risk_level"] == "critical"
+                    else SecurityLevel.HIGH
+                ),
             )
             return validation_result
 
@@ -1070,27 +1072,27 @@ class DatabaseManager:
 
             if parsed["parsed"]:
                 if not parsed["single_statement"]:
-                    validation_result[
-                        "error"
-                    ] = "Multiple SQL statements not allowed for security"
+                    validation_result["error"] = (
+                        "Multiple SQL statements not allowed for security"
+                    )
                     validation_result["error_type"] = "security_error"
                     validation_result["suggestions"].append(
                         "Split multiple statements into separate requests"
                     )
                     return validation_result
                 if parsed["query_type"] == "WRITE":
-                    validation_result[
-                        "error"
-                    ] = f"Destructive operations not allowed: {', '.join(parsed['write_operations'])}"
+                    validation_result["error"] = (
+                        f"Destructive operations not allowed: {', '.join(parsed['write_operations'])}"
+                    )
                     validation_result["error_type"] = "forbidden_operation"
                     validation_result["suggestions"].append(
                         "Use SELECT queries for data retrieval only"
                     )
                     return validation_result
                 if parsed["query_type"] == "UNKNOWN":
-                    validation_result[
-                        "error"
-                    ] = "Only SELECT, CTE, and metadata queries are allowed"
+                    validation_result["error"] = (
+                        "Only SELECT, CTE, and metadata queries are allowed"
+                    )
                     validation_result["error_type"] = "query_type_error"
                     validation_result["suggestions"].append(
                         "Start your query with SELECT, WITH, EXPLAIN, or SHOW"
@@ -1106,9 +1108,9 @@ class DatabaseManager:
                 query_upper = query_without_comments.upper()
 
                 if ";" in query_stripped[:-1]:
-                    validation_result[
-                        "error"
-                    ] = "Multiple SQL statements not allowed for security"
+                    validation_result["error"] = (
+                        "Multiple SQL statements not allowed for security"
+                    )
                     validation_result["error_type"] = "security_error"
                     validation_result["suggestions"].append(
                         "Split multiple statements into separate requests"
@@ -1140,18 +1142,18 @@ class DatabaseManager:
                         op for op in dangerous_ops if query_upper.startswith(op)
                     ]
                     if detected_ops:
-                        validation_result[
-                            "error"
-                        ] = f"Destructive operations not allowed: {', '.join(detected_ops)}"
+                        validation_result["error"] = (
+                            f"Destructive operations not allowed: {', '.join(detected_ops)}"
+                        )
                         validation_result["error_type"] = "forbidden_operation"
                         validation_result["suggestions"].append(
                             "Use SELECT queries for data retrieval only"
                         )
                         return validation_result
                     else:
-                        validation_result[
-                            "error"
-                        ] = "Only SELECT, CTE, and metadata queries are allowed"
+                        validation_result["error"] = (
+                            "Only SELECT, CTE, and metadata queries are allowed"
+                        )
                         validation_result["error_type"] = "query_type_error"
                         validation_result["suggestions"].append(
                             "Start your query with SELECT, WITH, EXPLAIN, or SHOW"

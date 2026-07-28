@@ -285,9 +285,9 @@ async def load_my_ontology(
             "properties_count": datatype_props,
             "relationships_count": object_props,
             "total_files_found": len(ttl_files),
-            "other_files": [f.name for f in ttl_files[1:5]]
-            if len(ttl_files) > 1
-            else [],
+            "other_files": (
+                [f.name for f in ttl_files[1:5]] if len(ttl_files) > 1 else []
+            ),
             "stored_in_rdf": stored_in_rdf,
         }
 
@@ -321,9 +321,9 @@ async def load_my_ontology(
                     "3. execute_sql_query (use ontology context for accurate SQL)",
                 ],
             }
-            response[
-                "note"
-            ] = "This ontology is now active and will be used instead of auto-generated ontologies"
+            response["note"] = (
+                "This ontology is now active and will be used instead of auto-generated ontologies"
+            )
 
         if compatibility:
             response["compatibility"] = compatibility
