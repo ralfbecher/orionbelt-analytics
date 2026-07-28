@@ -196,16 +196,35 @@ class DataCleanupManager:
 
         await mutate_workspace_metadata(self.connection_id, self.output_dir, _mutate)
 
+    def _all_versions(self) -> list[tuple[str, VersionInfo]]:
+        """Every recorded version on this connection, paired with its schema.
+
+        Both ownership guards need connection-wide scope: a ChromaDB collection
+        is shared across schemas by design, and a named graph URI can be shared
+        whenever a caller passes an explicit ``graph_uri``. Scoping either check
+        to the schema being cleaned would let it delete a resource another
+        schema is still using.
+
+        Returns:
+            (schema name, version) for every schema in the workspace.
+        """
+        return [
+            (schema_name, version)
+            for schema_name in self.metadata_mgr.metadata.get("schemas", {})
+            for version in self.metadata_mgr.get_versions(schema_name)
+        ]
+
     def _graph_uris_still_in_use(self, schema_name: str) -> set[str]:
         """Named graphs referenced by versions that are not being deleted.
 
         Successive generations of one schema reuse the same named graph URI
         (``schema_graph_uri`` is derived from the schema name), so deleting the
         graph because an *old* version referenced it would take the current
-        ontology's triples with it.
+        ontology's triples with it. Other schemas are included too, since an
+        explicit ``graph_uri`` argument can point two of them at one graph.
 
         Args:
-            schema_name: Schema whose versions to inspect.
+            schema_name: Schema being cleaned up.
 
         Returns:
             Graph URIs that must be preserved.
@@ -217,11 +236,11 @@ class DataCleanupManager:
             )
         }
         return {
-            v.ontology_graph_uri
-            for v in self.metadata_mgr.get_versions(schema_name)
-            if v.ontology_graph_uri
-            and v.ontology_status != "deleted"
-            and v.version not in doomed
+            version.ontology_graph_uri
+            for other_schema, version in self._all_versions()
+            if version.ontology_graph_uri
+            and version.ontology_status != "deleted"
+            and not (other_schema == schema_name and version.version in doomed)
         }
 
     def _delete_ontology_artifacts(
@@ -252,10 +271,12 @@ class DataCleanupManager:
                 "surviving version"
             )
             return
-        try:
-            oxigraph_store.delete_graph(graph_uri)
-        except Exception as e:
-            logger.warning(f"Failed to delete graph {graph_uri}: {e}")
+        # Deliberately unguarded. Swallowing a failure here left the triples in
+        # Oxigraph while the caller went on to mark the version deleted --
+        # destroying the only record of which graph to retry, so a transient
+        # store error orphaned the data permanently. Letting it propagate makes
+        # the caller record the failure and leave the version intact to retry.
+        oxigraph_store.delete_graph(graph_uri)
 
     def _delete_graphrag_files(self, schema_name: str, version: VersionInfo) -> None:
         """
@@ -306,11 +327,16 @@ class DataCleanupManager:
         if not collection:
             return
 
+        # Scanned across every schema on the connection, not just this one.
+        # The collection is connection-scoped by design, so analytics can be
+        # backed by the same collection public is being cleaned out of --
+        # checking only public's history would delete a store still serving
+        # analytics.
         still_referenced = any(
             other.graphrag_collection == collection
-            and other.version != version.version
+            and not (other_schema == schema_name and other.version == version.version)
             and other.graphrag_status != "deleted"
-            for other in self.metadata_mgr.get_versions(schema_name)
+            for other_schema, other in self._all_versions()
         )
         if still_referenced:
             logger.info(
@@ -329,11 +355,16 @@ class DataCleanupManager:
         if not db_path.exists():
             return
 
-        try:
-            client = chromadb.PersistentClient(path=str(db_path))
-            client.delete_collection(collection)
-            logger.info(f"Deleted ChromaDB collection '{collection}'")
-        except Exception as e:
-            # A collection that is already gone is the expected case when
-            # cleanup reruns; anything else is worth a line but not a failure.
-            logger.warning(f"Could not delete ChromaDB collection '{collection}': {e}")
+        # Absence is success, not failure: a rerun after a partial cleanup finds
+        # the collection already gone. Distinguishing that from a real error
+        # matters because errors propagate -- swallowing them would let the
+        # caller mark the version deleted and lose the record needed to retry,
+        # while propagating "already absent" would make every rerun fail.
+        client = chromadb.PersistentClient(path=str(db_path))
+        existing = {c.name for c in client.list_collections()}
+        if collection not in existing:
+            logger.info(f"ChromaDB collection '{collection}' already absent")
+            return
+
+        client.delete_collection(collection)
+        logger.info(f"Deleted ChromaDB collection '{collection}'")

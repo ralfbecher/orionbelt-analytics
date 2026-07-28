@@ -12,6 +12,7 @@ from ..database_manager import ColumnInfo, TableInfo
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import (
+    get_active_version_number,
     mark_ontology_persisted,
     ontology_is_current,
     update_schema_version,
@@ -247,6 +248,20 @@ async def generate_ontology(
         )
         return err
 
+    # Bound before the slow work below, not after it. Generation plus SHACL
+    # validation are the long poles in this handler, and a discover_schema
+    # landing during them opens a newer version -- which would then be credited
+    # with this run's TTL file and treated as current for RDF auto-persist.
+    session = services.get_session_data(ctx)
+    target_version: int | None = None
+    if session.connection_id:
+        try:
+            target_version = await get_active_version_number(
+                session.connection_id, OUTPUT_DIR, schema_name or "default"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read active version: {e}")
+
     generator = services.server_state.get_ontology_generator(base_uri=base_uri)
     # rdflib work is CPU-bound (~876 ms per 2.65 MB of Turtle); off the loop
     # so it does not freeze every concurrent session.
@@ -311,7 +326,6 @@ async def generate_ontology(
             session.obqc_validator = None
 
             # Write workspace metadata for ontology section
-            target_version: int | None = None
             if session.connection_id:
                 try:
                     await update_workspace_section(
@@ -327,13 +341,11 @@ async def generate_ontology(
                             "generated_at": utc_now().isoformat(),
                         },
                     )
-                    # Record the ontology half of the version discovery opened,
-                    # and hold on to which version that was: the RDF load below
-                    # is slow, and a rediscovery during it would otherwise send
-                    # the triple count to a different generation than the file.
-                    # The count is not known until that load, so it is filled in
-                    # there rather than guessed here.
-                    target_version = await update_schema_version(
+                    # Recorded against the version captured before generation
+                    # started, so this TTL lands on the generation it was built
+                    # from. The triple count is not known until the RDF load
+                    # below, so it is filled in there against the same version.
+                    await update_schema_version(
                         connection_id=session.connection_id,
                         output_dir=OUTPUT_DIR,
                         schema_name=schema_name or "default",
@@ -341,6 +353,7 @@ async def generate_ontology(
                             "ontology_ttl_file": ontology_filename,
                             "ontology_graph_uri": graph_uri or "",
                         },
+                        version=target_version,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to write workspace metadata: {e}")

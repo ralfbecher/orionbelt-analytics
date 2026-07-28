@@ -15,6 +15,7 @@ seams between them:
 import json
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -553,6 +554,160 @@ async def test_a_shared_chromadb_collection_survives(tmp_path, monkeypatch):
         await manager.cleanup_graphrag(SCHEMA, dry_run=False)
 
     client.assert_not_called()
+
+
+async def test_a_collection_shared_with_another_schema_survives(tmp_path, monkeypatch):
+    """The ownership guard must span the connection, not one schema's history.
+
+    The ChromaDB collection is connection-scoped by design -- analytics's
+    vectors live in the same collection as public's. Scoping the guard to the
+    schema being cleaned deleted a store still backing every other schema.
+    """
+    monkeypatch.setenv("GRAPHRAG_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("GRAPHRAG_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+    # Only the doomed version carries the collection, so public's own history
+    # holds no other reference -- a schema-scoped guard would clear it to go.
+    versions = mgr.metadata["schemas"][SCHEMA]["versions"]
+    versions[0]["graphrag_collection"] = "schema_public"
+
+    # analytics accumulated into that same collection and is still live.
+    mgr.open_version("analytics", "h", 1, 1)
+    mgr.update_version("analytics", {"graphrag_collection": "schema_public"})
+
+    # The store must exist, or the delete short-circuits before the guard even
+    # matters and the test passes for the wrong reason.
+    (tmp_path / "chromadb" / CONN).mkdir(parents=True)
+
+    with (
+        mock.patch("src.lifecycle.cleanup.OUTPUT_DIR", tmp_path),
+        mock.patch("chromadb.PersistentClient") as client,
+    ):
+        await DataCleanupManager(CONN, tmp_path).cleanup_graphrag(SCHEMA, dry_run=False)
+
+    client.assert_not_called()
+
+
+def _collection(name: str):
+    """A ChromaDB collection stub. Mock(name=...) sets the repr, not .name."""
+    return SimpleNamespace(name=name)
+
+
+async def _cleanup_graphrag_with_chromadb(tmp_path, mgr, client):
+    """Run GraphRAG cleanup with a stubbed ChromaDB client and a real store dir."""
+    versions = mgr.metadata["schemas"][SCHEMA]["versions"]
+    versions[0]["graphrag_collection"] = "schema_public"
+    mgr._save_metadata()
+    (tmp_path / "chromadb" / CONN).mkdir(parents=True, exist_ok=True)
+
+    with (
+        mock.patch("src.lifecycle.cleanup.OUTPUT_DIR", tmp_path),
+        mock.patch("chromadb.PersistentClient", return_value=client),
+    ):
+        return await DataCleanupManager(CONN, tmp_path).cleanup_graphrag(
+            SCHEMA, dry_run=False
+        )
+
+
+async def test_an_unreferenced_collection_is_deleted(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPHRAG_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("GRAPHRAG_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+
+    client = mock.Mock()
+    client.list_collections.return_value = [_collection("schema_public")]
+
+    report = await _cleanup_graphrag_with_chromadb(tmp_path, mgr, client)
+
+    client.delete_collection.assert_called_once_with("schema_public")
+    assert not report["errors"]
+
+
+async def test_an_already_absent_collection_is_not_an_error(tmp_path, monkeypatch):
+    """A rerun after a partial cleanup must converge, not fail forever."""
+    monkeypatch.setenv("GRAPHRAG_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("GRAPHRAG_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+
+    client = mock.Mock()
+    client.list_collections.return_value = []  # already gone
+
+    report = await _cleanup_graphrag_with_chromadb(tmp_path, mgr, client)
+
+    client.delete_collection.assert_not_called()
+    assert not report["errors"]
+    assert report["deleted"], "absence is success -- the version still gets cleaned"
+
+
+async def test_a_failed_collection_delete_keeps_the_version(tmp_path, monkeypatch):
+    """Same contract as the named graph: report the failure, allow a retry."""
+    monkeypatch.setenv("GRAPHRAG_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("GRAPHRAG_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+
+    client = mock.Mock()
+    client.list_collections.return_value = [_collection("schema_public")]
+    client.delete_collection.side_effect = RuntimeError("chromadb unavailable")
+
+    report = await _cleanup_graphrag_with_chromadb(tmp_path, mgr, client)
+
+    assert report["errors"]
+    reloaded = {v.version: v for v in _mgr(tmp_path).get_versions(SCHEMA)}
+    assert reloaded[1].graphrag_status != "deleted"
+
+
+async def test_a_graph_shared_with_another_schema_survives(tmp_path, monkeypatch):
+    """An explicit graph_uri can point two schemas at one named graph."""
+    monkeypatch.setenv("ONTOLOGY_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("ONTOLOGY_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+    # Only the doomed version references it within public's own history.
+    versions = mgr.metadata["schemas"][SCHEMA]["versions"]
+    versions[0]["ontology_graph_uri"] = "urn:graph:shared"
+
+    mgr.open_version("analytics", "h", 1, 1)
+    mgr.update_version("analytics", {"ontology_graph_uri": "urn:graph:shared"})
+
+    store = mock.Mock()
+    await DataCleanupManager(CONN, tmp_path).cleanup_ontology(
+        SCHEMA, dry_run=False, oxigraph_store=store
+    )
+
+    store.delete_graph.assert_not_called()
+
+
+async def test_a_failed_graph_delete_keeps_the_version(tmp_path, monkeypatch):
+    """A transient store error must leave the version around to retry.
+
+    Swallowing the failure left the triples in Oxigraph while the version was
+    marked deleted -- destroying the only record of which graph to retry, so
+    the data was orphaned permanently.
+    """
+    monkeypatch.setenv("ONTOLOGY_KEEP_VERSIONS", "1")
+    monkeypatch.setenv("ONTOLOGY_MAX_AGE_DAYS", "1")
+    mgr = _mgr(tmp_path)
+    _history(mgr, count=4, age_days=100)
+    versions = mgr.metadata["schemas"][SCHEMA]["versions"]
+    versions[0]["ontology_graph_uri"] = "urn:graph:retired"
+    mgr._save_metadata()
+
+    store = mock.Mock()
+    store.delete_graph.side_effect = RuntimeError("oxigraph unavailable")
+
+    report = await DataCleanupManager(CONN, tmp_path).cleanup_ontology(
+        SCHEMA, dry_run=False, oxigraph_store=store
+    )
+
+    assert report["errors"], "the failure must be reported, not swallowed"
+    reloaded = {v.version: v for v in _mgr(tmp_path).get_versions(SCHEMA)}
+    assert (
+        reloaded[1].ontology_status != "deleted"
+    ), "a version whose graph survived must stay eligible for retry"
 
 
 async def test_cleanup_reports_the_versions_it_removed(tmp_path, monkeypatch):
