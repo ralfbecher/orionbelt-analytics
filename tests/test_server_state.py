@@ -75,7 +75,16 @@ class TestClearSessionState(unittest.TestCase):
         self.assertFalse(session.oxigraph_initialized)
 
 
-class TestServerState(unittest.TestCase):
+class TestServerState(unittest.IsolatedAsyncioTestCase):
+    """Async-capable base, because test_evict_idle_sessions is a coroutine.
+
+    Under plain TestCase an ``async def`` test is never awaited: unittest calls
+    it, gets a coroutine back, discards it and reports a pass. The eviction test
+    below silently did nothing for its whole life -- it only surfaced as a
+    RuntimeWarning about a coroutine never awaited. Sync test methods run
+    unchanged under this base.
+    """
+
     def test_session_lifecycle(self):
         ss = ServerState()
         s = ss.get_session("s1")
