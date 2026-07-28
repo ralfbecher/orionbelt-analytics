@@ -161,14 +161,12 @@ class DuckDBDriver(DatabaseDriver):
         """
         try:
             excluded_schemas = "', '".join(DUCKDB_SYSTEM_SCHEMAS)
-            query = text(
-                f"""
+            query = text(f"""
                 SELECT schema_name
                 FROM information_schema.schemata
                 WHERE schema_name NOT IN ('{excluded_schemas}')
                 ORDER BY schema_name
-            """
-            )
+            """)
             assert self.engine is not None
             with self.engine.connect() as conn:
                 result = conn.execute(query)
@@ -188,15 +186,13 @@ class DuckDBDriver(DatabaseDriver):
 
             assert self.engine is not None
             with self.engine.connect() as conn:
-                query = text(
-                    """
+                query = text("""
                     SELECT table_name
                     FROM information_schema.tables
                     WHERE table_schema = :schema_name
                     AND table_type = 'BASE TABLE'
                     ORDER BY table_name
-                """
-                )
+                """)
                 result = conn.execute(query, {"schema_name": schema})
                 return [row[0] for row in result.fetchall()]
         except SQLAlchemyError as e:
@@ -327,9 +323,9 @@ class DuckDBDriver(DatabaseDriver):
                             "Review DuckDB SQL syntax - check for missing commas, parentheses, or keywords"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

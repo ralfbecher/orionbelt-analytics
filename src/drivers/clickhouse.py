@@ -117,14 +117,12 @@ class ClickHouseDriver(DatabaseDriver):
 
     def get_schemas(self) -> list[str]:
         excluded_schemas = "', '".join(CLICKHOUSE_SYSTEM_SCHEMAS)
-        query = text(
-            f"""
+        query = text(f"""
             SELECT name
             FROM system.databases
             WHERE name NOT IN ('{excluded_schemas}')
             ORDER BY name
-        """
-        )
+        """)
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -139,28 +137,24 @@ class ClickHouseDriver(DatabaseDriver):
             assert self.engine is not None
             with self.engine.connect() as conn:
                 if schema_name:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT name
                         FROM system.tables
                         WHERE database = :schema_name
                           AND engine NOT IN ('View', 'MaterializedView')
                         ORDER BY name
-                    """
-                    )
+                    """)
                     result = conn.execute(query, {"schema_name": schema_name})
                 else:
                     # Use the connected database name
                     db_name = self._current_database or "default"
-                    query = text(
-                        """
+                    query = text("""
                         SELECT name
                         FROM system.tables
                         WHERE database = :db_name
                           AND engine NOT IN ('View', 'MaterializedView')
                         ORDER BY name
-                    """
-                    )
+                    """)
                     result = conn.execute(query, {"db_name": db_name})
                 return [row[0] for row in result.fetchall()]
         except SQLAlchemyError as e:
@@ -274,13 +268,11 @@ class ClickHouseDriver(DatabaseDriver):
                 table_comment = None
                 if schema_name:
                     try:
-                        ch_meta_query = text(
-                            """
+                        ch_meta_query = text("""
                             SELECT engine, sorting_key, total_rows
                             FROM system.tables
                             WHERE database = :db AND name = :tbl
-                        """
-                        )
+                        """)
                         ch_result = conn.execute(
                             ch_meta_query,
                             {"db": schema_name, "tbl": table_name},
@@ -367,9 +359,9 @@ class ClickHouseDriver(DatabaseDriver):
                             "(ClickHouse is case-sensitive)"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

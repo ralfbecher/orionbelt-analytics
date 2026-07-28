@@ -393,9 +393,9 @@ class GraphRAGManager:
 
         if self.community_detector:
             overview["communities"] = self.community_detector.get_all_summaries()
-            overview[
-                "domain_suggestions"
-            ] = self.community_detector.suggest_domain_names()
+            overview["domain_suggestions"] = (
+                self.community_detector.suggest_domain_names()
+            )
 
         return overview
 

@@ -151,14 +151,12 @@ class BigQueryDriver(DatabaseDriver):
         """
         try:
             # Query INFORMATION_SCHEMA to get datasets
-            query = text(
-                f"""
+            query = text(f"""
                 SELECT schema_name
                 FROM `{self._project_id}`.INFORMATION_SCHEMA.SCHEMATA
                 WHERE schema_name NOT IN UNNEST({BIGQUERY_SYSTEM_SCHEMAS})
                 ORDER BY schema_name
-            """
-            )
+            """)
             assert self.engine is not None
             with self.engine.connect() as conn:
                 result = conn.execute(query)
@@ -181,14 +179,12 @@ class BigQueryDriver(DatabaseDriver):
 
             assert self.engine is not None
             with self.engine.connect() as conn:
-                query = text(
-                    f"""
+                query = text(f"""
                     SELECT table_name
                     FROM `{self._project_id}.{dataset}`.INFORMATION_SCHEMA.TABLES
                     WHERE table_type = 'BASE TABLE'
                     ORDER BY table_name
-                """
-                )
+                """)
                 result = conn.execute(query)
                 return [row[0] for row in result.fetchall()]
         except SQLAlchemyError as e:
@@ -300,9 +296,9 @@ class BigQueryDriver(DatabaseDriver):
                             "Insufficient permissions to access the specified tables/datasets"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

@@ -133,16 +133,14 @@ class PostgreSQLDriver(DatabaseDriver):
 
     def get_schemas(self) -> list[str]:
         excluded_schemas = "', '".join(POSTGRES_SYSTEM_SCHEMAS)
-        query = text(
-            f"""
+        query = text(f"""
             SELECT schema_name
             FROM information_schema.schemata
             WHERE schema_name NOT IN ('{excluded_schemas}')
               AND schema_name NOT LIKE 'pg_temp_%'
               AND schema_name NOT LIKE 'pg_toast_temp_%'
             ORDER BY schema_name
-        """
-        )
+        """)
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -157,25 +155,21 @@ class PostgreSQLDriver(DatabaseDriver):
             assert self.engine is not None
             with self.engine.connect() as conn:
                 if schema_name:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT table_name
                         FROM information_schema.tables
                         WHERE table_schema = :schema_name
                         AND table_type = 'BASE TABLE'
                         ORDER BY table_name
-                    """
-                    )
+                    """)
                     result = conn.execute(query, {"schema_name": schema_name})
                 else:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT table_name
                         FROM information_schema.tables
                         WHERE table_type = 'BASE TABLE'
                         ORDER BY table_name
-                    """
-                    )
+                    """)
                     result = conn.execute(query)
                 return [row[0] for row in result.fetchall()]
         except SQLAlchemyError as e:
@@ -330,9 +324,9 @@ class PostgreSQLDriver(DatabaseDriver):
                             "Insufficient permissions to access the specified tables"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

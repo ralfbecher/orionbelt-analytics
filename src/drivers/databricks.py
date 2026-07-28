@@ -173,14 +173,12 @@ class DatabricksDriver(DatabaseDriver):
         """
         try:
             # Query to get schemas in the current catalog
-            query = text(
-                """
+            query = text("""
                 SELECT schema_name
                 FROM information_schema.schemata
                 WHERE catalog_name = :catalog
                 ORDER BY schema_name
-            """
-            )
+            """)
             assert self.engine is not None
             with self.engine.connect() as conn:
                 result = conn.execute(query, {"catalog": self._catalog})
@@ -214,16 +212,14 @@ class DatabricksDriver(DatabaseDriver):
 
             assert self.engine is not None
             with self.engine.connect() as conn:
-                query = text(
-                    """
+                query = text("""
                     SELECT table_name
                     FROM information_schema.tables
                     WHERE table_catalog = :catalog
                     AND table_schema = :schema
                     AND table_type = 'BASE TABLE'
                     ORDER BY table_name
-                """
-                )
+                """)
                 result = conn.execute(
                     query, {"catalog": self._catalog, "schema": schema}
                 )
@@ -388,9 +384,9 @@ class DatabricksDriver(DatabaseDriver):
                             "Insufficient permissions to access the specified tables/catalogs"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

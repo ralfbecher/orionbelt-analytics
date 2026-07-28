@@ -224,8 +224,9 @@ class TestWorkspaceDetection:
         conn_dir.mkdir(parents=True, exist_ok=True)
         (conn_dir / "schema_test.json").write_text('{"tables": []}')
 
-        with patch("src.workspace.OUTPUT_DIR", self.output_dir), patch(
-            "src.workspace.get_connection_dir", return_value=conn_dir
+        with (
+            patch("src.workspace.OUTPUT_DIR", self.output_dir),
+            patch("src.workspace.get_connection_dir", return_value=conn_dir),
         ):
             result = detect_workspace(self.connection_id)
 

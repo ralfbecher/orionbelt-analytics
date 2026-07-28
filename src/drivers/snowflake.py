@@ -115,14 +115,12 @@ class SnowflakeDriver(DatabaseDriver):
 
     def get_schemas(self) -> list[str]:
         excluded_schemas = "', '".join(SNOWFLAKE_SYSTEM_SCHEMAS)
-        query = text(
-            f"""
+        query = text(f"""
             SELECT schema_name
             FROM information_schema.schemata
             WHERE schema_name NOT IN ('{excluded_schemas}')
             ORDER BY schema_name
-        """
-        )
+        """)
         try:
             assert self.engine is not None
             with self.engine.connect() as conn:
@@ -137,25 +135,21 @@ class SnowflakeDriver(DatabaseDriver):
             assert self.engine is not None
             with self.engine.connect() as conn:
                 if schema_name:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT table_name
                         FROM information_schema.tables
                         WHERE table_schema = :schema_name
                         AND table_type = 'BASE TABLE'
                         ORDER BY table_name
-                    """
-                    )
+                    """)
                     result = conn.execute(query, {"schema_name": schema_name})
                 else:
-                    query = text(
-                        """
+                    query = text("""
                         SELECT table_name
                         FROM information_schema.tables
                         WHERE table_type = 'BASE TABLE'
                         ORDER BY table_name
-                    """
-                    )
+                    """)
                     result = conn.execute(query)
                 return [row[0] for row in result.fetchall()]
         except SQLAlchemyError as e:
@@ -273,8 +267,7 @@ class SnowflakeDriver(DatabaseDriver):
                 cols_by_table: dict[str, list[dict]] = {}
                 cols_success = False
                 try:
-                    cols_query = text(
-                        """
+                    cols_query = text("""
                         SELECT table_name, column_name, data_type,
                                character_maximum_length, numeric_precision,
                                numeric_scale, is_nullable, column_default,
@@ -282,8 +275,7 @@ class SnowflakeDriver(DatabaseDriver):
                         FROM information_schema.columns
                         WHERE table_schema = :schema_name
                         ORDER BY table_name, ordinal_position
-                    """
-                    )
+                    """)
                     log_sql(str(cols_query))
                     result = conn.execute(cols_query, {"schema_name": schema_name})
                     for row in result.fetchall():
@@ -423,16 +415,14 @@ class SnowflakeDriver(DatabaseDriver):
                 # Fallback: if columns not from cache, fetch with query
                 if table_columns is None and schema_name:
                     try:
-                        cols_query = text(
-                            """
+                        cols_query = text("""
                             SELECT column_name, data_type, is_nullable,
                                    column_default, comment
                             FROM information_schema.columns
                             WHERE table_schema = :schema_name
                               AND table_name = :table_name
                             ORDER BY ordinal_position
-                        """
-                        )
+                        """)
                         if log_sql:
                             log_sql(str(cols_query))
                         result = conn.execute(
@@ -607,9 +597,9 @@ class SnowflakeDriver(DatabaseDriver):
                             "double quotes for case-sensitive names"
                         )
         except Exception as conn_error:
-            validation_result[
-                "error"
-            ] = f"Database connection error during validation: {conn_error}"
+            validation_result["error"] = (
+                f"Database connection error during validation: {conn_error}"
+            )
             validation_result["error_type"] = "connection_error"
 
         return validation_result

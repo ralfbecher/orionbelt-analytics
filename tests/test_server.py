@@ -231,19 +231,20 @@ class TestMCPToolsAsync:
         mock_session_data.db_manager = mock_db_manager
 
         # The function raises exception (no internal error handling)
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), patch(
-            "src.main._get_connection_fingerprint", return_value="test1234abcd"
-        ), patch.dict(
-            "os.environ",
-            {
-                "POSTGRES_HOST": "localhost",
-                "POSTGRES_PORT": "5432",
-                "POSTGRES_DATABASE": "testdb",
-                "POSTGRES_USERNAME": "testuser",
-                "POSTGRES_PASSWORD": "testpass",
-            },
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            patch("src.main._get_connection_fingerprint", return_value="test1234abcd"),
+            patch.dict(
+                "os.environ",
+                {
+                    "POSTGRES_HOST": "localhost",
+                    "POSTGRES_PORT": "5432",
+                    "POSTGRES_DATABASE": "testdb",
+                    "POSTGRES_USERNAME": "testuser",
+                    "POSTGRES_PASSWORD": "testpass",
+                },
+            ),
         ):
             result = await main_module.connect_database(mock_ctx, db_type="postgresql")
 
@@ -266,17 +267,19 @@ class TestMCPToolsAsync:
         mock_db_manager.connect_postgresql.return_value = False
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), patch.dict(
-            "os.environ",
-            {
-                "POSTGRES_HOST": "localhost",
-                "POSTGRES_PORT": "5432",
-                "POSTGRES_DATABASE": "testdb",
-                "POSTGRES_USERNAME": "testuser",
-                "POSTGRES_PASSWORD": "wrongpass",
-            },
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            patch.dict(
+                "os.environ",
+                {
+                    "POSTGRES_HOST": "localhost",
+                    "POSTGRES_PORT": "5432",
+                    "POSTGRES_DATABASE": "testdb",
+                    "POSTGRES_USERNAME": "testuser",
+                    "POSTGRES_PASSWORD": "wrongpass",
+                },
+            ),
         ):
             result = await main_module.connect_database(mock_ctx, db_type="postgresql")
 
@@ -293,20 +296,21 @@ class TestMCPToolsAsync:
         mock_db_manager.connect_snowflake.return_value = True
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), patch(
-            "src.main._get_connection_fingerprint", return_value="test5678efgh"
-        ), patch.dict(
-            "os.environ",
-            {
-                "SNOWFLAKE_ACCOUNT": "test-account",
-                "SNOWFLAKE_USERNAME": "testuser",
-                "SNOWFLAKE_PASSWORD": "testpass",
-                "SNOWFLAKE_WAREHOUSE": "COMPUTE_WH",
-                "SNOWFLAKE_DATABASE": "TESTDB",
-                "SNOWFLAKE_SCHEMA": "PUBLIC",
-            },
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            patch("src.main._get_connection_fingerprint", return_value="test5678efgh"),
+            patch.dict(
+                "os.environ",
+                {
+                    "SNOWFLAKE_ACCOUNT": "test-account",
+                    "SNOWFLAKE_USERNAME": "testuser",
+                    "SNOWFLAKE_PASSWORD": "testpass",
+                    "SNOWFLAKE_WAREHOUSE": "COMPUTE_WH",
+                    "SNOWFLAKE_DATABASE": "TESTDB",
+                    "SNOWFLAKE_SCHEMA": "PUBLIC",
+                },
+            ),
         ):
             result = await main_module.connect_database(mock_ctx, db_type="snowflake")
 
@@ -327,9 +331,10 @@ class TestMCPToolsAsync:
     ):
         """Test connection with missing required environment variables."""
         # Use os.environ.get patching to simulate missing env vars
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "os.getenv"
-        ) as mock_getenv:
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("os.getenv") as mock_getenv,
+        ):
             # Only return value for POSTGRES_HOST, return None for others
             def getenv_side_effect(key, default=None):
                 env_map = {
@@ -355,19 +360,20 @@ class TestMCPToolsAsync:
         mock_db_manager.connect_postgresql.side_effect = Exception("Connection error")
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), patch.dict(
-            "os.environ",
-            {
-                "POSTGRES_HOST": "localhost",
-                "POSTGRES_PORT": "5432",
-                "POSTGRES_DATABASE": "testdb",
-                "POSTGRES_USERNAME": "testuser",
-                "POSTGRES_PASSWORD": "testpass",
-            },
-        ), pytest.raises(
-            Exception, match="Connection error"
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            patch.dict(
+                "os.environ",
+                {
+                    "POSTGRES_HOST": "localhost",
+                    "POSTGRES_PORT": "5432",
+                    "POSTGRES_DATABASE": "testdb",
+                    "POSTGRES_USERNAME": "testuser",
+                    "POSTGRES_PASSWORD": "testpass",
+                },
+            ),
+            pytest.raises(Exception, match="Connection error"),
         ):
             await main_module.connect_database(mock_ctx, db_type="postgresql")
 
@@ -378,8 +384,9 @@ class TestMCPToolsAsync:
         mock_session_data.db_manager = mock_db_manager
 
         # The function raises exception (no internal error handling)
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
         ):
             result = await main_module.list_schemas(mock_ctx)
 
@@ -395,9 +402,11 @@ class TestMCPToolsAsync:
         mock_db_manager.get_schemas.side_effect = RuntimeError("No database connection")
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), pytest.raises(RuntimeError, match="No database connection"):
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            pytest.raises(RuntimeError, match="No database connection"),
+        ):
             await main_module.list_schemas(mock_ctx)
 
     async def test_discover_schema_success(
@@ -413,14 +422,15 @@ class TestMCPToolsAsync:
         mock_session_data.db_manager = mock_db_manager
 
         # The function raises exception (no internal error handling)
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), patch("src.server_state.get_session_id", return_value="test-session"), patch(
-            "src.main.get_session_safe_filename", return_value="test_schema.json"
-        ), patch(
-            "builtins.open", MagicMock()
-        ), patch(
-            "json.dump"
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            patch("src.server_state.get_session_id", return_value="test-session"),
+            patch(
+                "src.main.get_session_safe_filename", return_value="test_schema.json"
+            ),
+            patch("builtins.open", MagicMock()),
+            patch("json.dump"),
         ):
             result = await main_module.discover_schema(
                 mock_ctx, "public", lightweight=False
@@ -455,9 +465,11 @@ class TestMCPToolsAsync:
         mock_db_manager.get_tables.side_effect = RuntimeError("No database connection")
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), pytest.raises(RuntimeError, match="No database connection"):
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            pytest.raises(RuntimeError, match="No database connection"),
+        ):
             await main_module.discover_schema(mock_ctx, "public")
 
     async def test_generate_ontology_success(
@@ -480,14 +492,14 @@ class TestMCPToolsAsync:
         )
 
         # The function raises exception (no internal error handling)
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), patch(
-            "src.main.get_session_safe_filename", return_value="test_ontology.ttl"
-        ), patch(
-            "src.server_state.OntologyGenerator", return_value=mock_generator
-        ), patch(
-            "builtins.open", MagicMock()
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            patch(
+                "src.main.get_session_safe_filename", return_value="test_ontology.ttl"
+            ),
+            patch("src.server_state.OntologyGenerator", return_value=mock_generator),
+            patch("builtins.open", MagicMock()),
         ):
             result = await main_module.generate_ontology(
                 mock_ctx, schema_name="public", base_uri="http://example.com/ontology/"
@@ -507,8 +519,9 @@ class TestMCPToolsAsync:
         mock_db_manager.get_tables.return_value = []
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
         ):
             result = await main_module.generate_ontology(mock_ctx, schema_name="public")
 
@@ -527,8 +540,9 @@ class TestMCPToolsAsync:
         mock_db_manager.sample_table_data.return_value = sample_data
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
         ):
             result = await main_module.sample_table_data(
                 mock_ctx, "users", "public", 10
@@ -563,9 +577,11 @@ class TestMCPToolsAsync:
         )
         mock_session_data.db_manager = mock_db_manager
 
-        with patch("src.main.get_session_data", return_value=mock_session_data), patch(
-            "src.main.get_session_db_manager", return_value=mock_db_manager
-        ), pytest.raises(ValueError, match="Invalid table name format"):
+        with (
+            patch("src.main.get_session_data", return_value=mock_session_data),
+            patch("src.main.get_session_db_manager", return_value=mock_db_manager),
+            pytest.raises(ValueError, match="Invalid table name format"),
+        ):
             await main_module.sample_table_data(mock_ctx, "invalid-table", "public", 10)
 
 

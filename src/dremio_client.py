@@ -112,9 +112,9 @@ class DremioClient:
             raise DremioAuthError("Client session is not initialized")
 
         headers = {
-            "Authorization": f"Bearer {self.token}"
-            if self.pat
-            else f"_dremio{self.token}",
+            "Authorization": (
+                f"Bearer {self.token}" if self.pat else f"_dremio{self.token}"
+            ),
             "Content-Type": "application/json",
         }
         if "headers" in kwargs:

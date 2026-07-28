@@ -1632,9 +1632,9 @@ class OntologyGenerator:
 
             class_info: dict[str, Any] = {
                 "uri": str(subject),
-                "local_name": str(subject).split("/")[-1]
-                if "/" in str(subject)
-                else str(subject),
+                "local_name": (
+                    str(subject).split("/")[-1] if "/" in str(subject) else str(subject)
+                ),
                 "current_label": None,
                 "table_name": None,
                 "schema_name": None,
@@ -1666,9 +1666,9 @@ class OntologyGenerator:
         for subject in self.graph.subjects(RDF.type, OWL.DatatypeProperty):
             prop_info: dict[str, Any] = {
                 "uri": str(subject),
-                "local_name": str(subject).split("/")[-1]
-                if "/" in str(subject)
-                else str(subject),
+                "local_name": (
+                    str(subject).split("/")[-1] if "/" in str(subject) else str(subject)
+                ),
                 "current_label": None,
                 "column_name": None,
                 "table_name": None,
@@ -1706,9 +1706,9 @@ class OntologyGenerator:
         for subject in self.graph.subjects(RDF.type, OWL.ObjectProperty):
             rel_info: dict[str, Any] = {
                 "uri": str(subject),
-                "local_name": str(subject).split("/")[-1]
-                if "/" in str(subject)
-                else str(subject),
+                "local_name": (
+                    str(subject).split("/")[-1] if "/" in str(subject) else str(subject)
+                ),
                 "current_label": None,
                 "foreign_key_column": None,
                 "referenced_table": None,
@@ -1902,11 +1902,11 @@ class OntologyGenerator:
         return {
             "is_cryptic": is_cryptic,
             "reasons": reasons,
-            "confidence": "high"
-            if len(reasons) >= 2
-            else "medium"
-            if len(reasons) == 1
-            else "low",
+            "confidence": (
+                "high"
+                if len(reasons) >= 2
+                else "medium" if len(reasons) == 1 else "low"
+            ),
         }
 
     def apply_semantic_names(self, name_suggestions: dict[str, Any]) -> str:
@@ -2030,9 +2030,9 @@ class OntologyGenerator:
                                     class_label = str(label)
                                     break
                                 qualifier = class_label or change["table_name"]
-                                change[
-                                    "suggested"
-                                ] = f"{change['suggested']} ({qualifier})"
+                                change["suggested"] = (
+                                    f"{change['suggested']} ({qualifier})"
+                                )
 
             # Second pass: apply all changes
             for change in proposed_changes:

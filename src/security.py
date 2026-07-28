@@ -135,9 +135,11 @@ class SecureCredentialManager:
         }
         # Check if key contains any sensitive substrings
         return {
-            k: "***REDACTED***"
-            if any(sens in k.lower() for sens in sensitive_keys) and v
-            else v
+            k: (
+                "***REDACTED***"
+                if any(sens in k.lower() for sens in sensitive_keys) and v
+                else v
+            )
             for k, v in credentials.items()
         }
 
