@@ -21,6 +21,55 @@ from .ontology_generation import _build_minimal_graph_summary
 logger = logging.getLogger(__name__)
 
 
+def semantic_context_entries(
+    name_suggestions: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Flatten name suggestions into (target, context) pairs for the index.
+
+    The suggestions carry exactly what schema search lacks: the business word
+    for an abbreviated identifier, and a sentence saying what it means. Applied
+    to the ontology alone they never reach GraphRAG, whose vectors are built
+    from raw schema metadata -- so a user asking in the enriched vocabulary
+    still matches nothing.
+
+    Args:
+        name_suggestions: The payload handed to
+            :meth:`OntologyGenerator.apply_semantic_names` -- ``classes``,
+            ``properties`` and ``relationships`` lists of dicts with
+            ``original_name``, ``suggested_name`` and ``description``.
+
+    Returns:
+        (target, context) pairs, where target is ``table`` or ``table.column``.
+        Entries with no original name, or with neither a suggested name nor a
+        description, are skipped: they would add no vocabulary.
+    """
+    entries: list[tuple[str, str]] = []
+
+    for kind in ("classes", "properties", "relationships"):
+        for suggestion in name_suggestions.get(kind) or []:
+            if not isinstance(suggestion, dict):
+                continue
+
+            original = str(suggestion.get("original_name") or "").strip()
+            if not original:
+                continue
+
+            suggested = str(suggestion.get("suggested_name") or "").strip()
+            description = str(suggestion.get("description") or "").strip()
+            if not suggested and not description:
+                continue
+
+            # Properties are column-scoped; qualifying them keeps two tables'
+            # like-named columns from collapsing onto one index entry.
+            table_name = str(suggestion.get("table_name") or "").strip()
+            target = f"{table_name}.{original}" if table_name else original
+
+            context = ". ".join(part for part in (suggested, description) if part)
+            entries.append((target, context))
+
+    return entries
+
+
 async def _maybe_sample_rename_suggestions(
     ctx: Context,
     cryptic_classes: list,
@@ -552,10 +601,38 @@ async def apply_semantic_names(
 
         await ctx.info(f"Applied {total_updated} semantic name changes to ontology")
 
+        # Mirror the new vocabulary into GraphRAG. Without this the enrichment
+        # is invisible to search: those vectors come from raw schema metadata,
+        # so a user asking in the business terms just applied still matches
+        # nothing. Failures here must not fail the tool -- the ontology write
+        # already succeeded, and search quality is the lesser concern.
+        indexed_count = 0
+        index_error: str | None = None
+        if session.graphrag_initialized and session.graphrag_manager is not None:
+            try:
+                for target, context_text in semantic_context_entries(name_suggestions):
+                    session.graphrag_manager.add_semantic_context(
+                        target=target, context=context_text, source="ontology"
+                    )
+                    indexed_count += 1
+            except Exception as e:
+                index_error = str(e)
+                logger.warning(f"Indexing semantic names into GraphRAG failed: {e}")
+
         result = "# Semantic Names Applied Successfully\n\n"
         result += f"- Classes updated: {classes_updated}\n"
         result += f"- Properties updated: {properties_updated}\n"
         result += f"- Relationships updated: {relationships_updated}\n"
+        if indexed_count:
+            result += (
+                f"- Indexed into GraphRAG: {indexed_count} "
+                "(searchable via graphrag_search)\n"
+            )
+        elif index_error:
+            result += (
+                f"- GraphRAG indexing skipped: {index_error} "
+                "(ontology was updated successfully)\n"
+            )
         if new_ontology_filename:
             result += f"\n## ontology_file: {new_ontology_filename}\n"
             result += f"\nThe ontology file '{new_ontology_filename}' has been saved and is now the active ontology in session context.\n"
