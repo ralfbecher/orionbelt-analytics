@@ -43,6 +43,31 @@ class OBQCSeverity(Enum):
     INFO = "info"  # Informational note about query structure
 
 
+# Schemas holding database metadata rather than user data, per dialect. Tables
+# here are never part of a generated ontology -- that describes the user's
+# schema -- so requiring them to appear in it blocks legitimate catalog queries
+# such as "SELECT table_name FROM information_schema.tables".
+#
+# This is not a security decision: src/security.py separately blocks the
+# privilege-bearing views (information_schema.*_privileges, pg_catalog.pg_authid
+# and friends) and permits the rest, so exempting these from the ontology rule
+# follows the security policy instead of widening it.
+CATALOG_SCHEMAS = frozenset(
+    {
+        "information_schema",  # ANSI: PostgreSQL, MySQL, Snowflake, Databricks, ...
+        "pg_catalog",  # PostgreSQL
+        "pg_toast",  # PostgreSQL
+        "performance_schema",  # MySQL
+        "mysql",  # MySQL internals
+        "sys",  # MySQL / SQL Server
+        "system",  # ClickHouse
+        "snowflake",  # Snowflake (snowflake.account_usage)
+        "sqlite_schema",  # SQLite
+        "sqlite_master",  # SQLite (legacy name)
+    }
+)
+
+
 @dataclass
 class OBQCIssue:
     """Single OBQC validation issue."""
@@ -62,6 +87,10 @@ class OBQCResult:
     is_valid: bool
     issues: list[OBQCIssue] = field(default_factory=list)
     parsed_tables: list[str] = field(default_factory=list)
+    # Bare names of tables referenced through a database catalog schema
+    # (information_schema and friends). They are legitimately absent from the
+    # ontology, which describes user data, so ontology-existence rules skip them.
+    catalog_tables: set[str] = field(default_factory=set)
     parsed_columns: list[str] = field(default_factory=list)
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
     has_aggregation: bool = False
@@ -433,11 +462,23 @@ class OBQCValidator:
         return result
 
     def _extract_tables(self, parsed: exp.Expr, result: OBQCResult) -> None:
-        """Extract all table references from parsed query."""
+        """Extract all table references, noting which come from a catalog schema."""
         for table in parsed.find_all(exp.Table):
             table_name = table.name
-            if table_name and table_name not in result.parsed_tables:
+            if not table_name:
+                continue
+            if table_name not in result.parsed_tables:
                 result.parsed_tables.append(table_name)
+
+            # Without the qualifier a catalog reference is indistinguishable
+            # from a user table: sqlglot reports information_schema.tables as
+            # simply "tables". Both positions are checked -- ``db`` carries the
+            # schema in ``information_schema.tables`` and
+            # ``mydb.information_schema.tables``, while ``catalog`` carries it
+            # in Snowflake's ``snowflake.account_usage.query_history``.
+            qualifiers = {q.lower() for q in (table.db, table.catalog) if q}
+            if qualifiers & CATALOG_SCHEMAS:
+                result.catalog_tables.add(table_name)
 
     def _extract_columns(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract all column references from parsed query."""
@@ -485,6 +526,10 @@ class OBQCValidator:
             return
 
         for table_name in result.parsed_tables:
+            # Catalog metadata is not described by the ontology and never will
+            # be; demanding it appear there blocks catalog queries outright.
+            if table_name in result.catalog_tables:
+                continue
             if table_name.lower() not in self._schema_cache.tables:
                 available_tables = list(self._schema_cache.tables.keys())[:10]
                 result.issues.append(
@@ -538,7 +583,14 @@ class OBQCValidator:
                     ):
                         found_in_tables.append(table_name)
 
-                if len(found_in_tables) == 0 and len(result.parsed_tables) > 0:
+                # Columns of a catalog table cannot be resolved -- the ontology
+                # does not describe them -- so an unqualified name is only
+                # judged missing when some non-catalog table could have held it.
+                describable_tables = [
+                    t for t in result.parsed_tables if t not in result.catalog_tables
+                ]
+
+                if len(found_in_tables) == 0 and len(describable_tables) > 0:
                     result.issues.append(
                         OBQCIssue(
                             issue_type=OBQCIssueType.COLUMN_NOT_FOUND,

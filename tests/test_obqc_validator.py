@@ -344,6 +344,85 @@ class TestOBQCValidator(unittest.TestCase):
         self.assertTrue(result.is_valid)
 
 
+class TestOBQCCatalogQueries(unittest.TestCase):
+    """Database catalog schemas are exempt from the ontology-existence rules.
+
+    The ontology describes user data, so catalog tables are never in it.
+    Requiring them to be blocked every metadata query -- listing tables,
+    counting columns -- with "Table 'tables' not found in ontology", because
+    the schema qualifier was discarded before the check ran.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_information_schema_query_is_allowed(self):
+        result = self.validator.validate(
+            "SELECT table_name FROM information_schema.tables"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_unqualified_column_of_catalog_table_is_not_flagged(self):
+        """The column rule reached the same failure by another route: the
+        catalog table resolves to nothing, so every column looked missing."""
+        result = self.validator.validate(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'users'"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_catalog_tables_are_recorded(self):
+        result = self.validator.validate("SELECT * FROM pg_catalog.pg_class")
+
+        self.assertIn("pg_class", result.catalog_tables)
+
+    def test_dialect_specific_catalogs_are_recognized(self):
+        for query in (
+            "SELECT * FROM pg_catalog.pg_class",
+            "SELECT * FROM system.tables",
+            "SELECT * FROM performance_schema.events_statements_summary_by_digest",
+            "SELECT * FROM snowflake.account_usage.query_history",
+        ):
+            with self.subTest(query=query):
+                result = self.validator.validate(query)
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_catalog_schema_match_is_case_insensitive(self):
+        """Snowflake upper-cases identifiers."""
+        result = self.validator.validate(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_unknown_table_without_catalog_qualifier_still_errors(self):
+        """The exemption is keyed on the qualifier, not on being unknown."""
+        result = self.validator.validate("SELECT * FROM nonexistent_table")
+
+        self.assertFalse(result.is_valid)
+        self.assertTrue(
+            any(i.issue_type == OBQCIssueType.TABLE_NOT_FOUND for i in result.issues)
+        )
+
+    def test_bare_table_named_like_a_catalog_table_still_errors(self):
+        """'tables' unqualified is not a catalog reference."""
+        result = self.validator.validate("SELECT * FROM tables")
+
+        self.assertFalse(result.is_valid)
+
+    def test_ontology_table_errors_are_unaffected_by_a_catalog_join(self):
+        """Mixing the two must not silence checks on the real table."""
+        result = self.validator.validate(
+            "SELECT u.bogus_col FROM users u, information_schema.tables t"
+        )
+
+        self.assertFalse(result.is_valid)
+
+
 class TestOBQCFanTrapDetection(unittest.TestCase):
     """Test suite specifically for fan-trap detection."""
 
