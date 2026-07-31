@@ -1260,6 +1260,49 @@ class TestOBQCAxiomDrivenFanTrap(unittest.TestCase):
         )
         self.assertFalse(result.fan_trap_risk)
 
+    def test_sibling_fact_in_a_semi_join_filter_is_not_flagged(self):
+        """A fact reached only through EXISTS cannot multiply anything.
+
+        The axiom check read its disjoint pair off every table named in the
+        query, so a returns table used purely as a filter flagged an
+        aggregation over orders that it cannot affect.
+        """
+        result = self.validator.validate(
+            "SELECT c.id, SUM(o.amount) FROM customers c "
+            "JOIN orders o ON o.customer_id = c.id "
+            "WHERE EXISTS (SELECT 1 FROM returns r WHERE r.customer_id = c.id) "
+            "GROUP BY c.id"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_sibling_fact_in_a_subquery_without_outer_join_is_not_flagged(self):
+        result = self.validator.validate(
+            "SELECT customer_id, SUM(amount) FROM orders "
+            "WHERE EXISTS (SELECT 1 FROM returns "
+            "WHERE returns.customer_id = orders.customer_id) "
+            "GROUP BY customer_id"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_both_facts_joined_in_one_select_is_still_flagged(self):
+        """The true positive the axiom path exists for."""
+        result = self.validator.validate(
+            "SELECT c.id, SUM(o.amount), SUM(r.amount) FROM customers c "
+            "JOIN orders o ON o.customer_id = c.id "
+            "JOIN returns r ON r.customer_id = c.id "
+            "GROUP BY c.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
 
 class TestOBQCDialectParity(unittest.TestCase):
     """Guard that OBQC maps every supported database to a real sqlglot dialect."""

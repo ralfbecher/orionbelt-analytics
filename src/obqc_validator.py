@@ -154,6 +154,10 @@ class OBQCResult:
         default_factory=list
     )
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
+    # Tables of each SELECT that applies an aggregate, in its own scope. Only
+    # these can be multiplied by that SELECT's joins, so fan-trap rules judge
+    # them rather than every table named anywhere in the query.
+    aggregating_scopes: list[tuple[str, ...]] = field(default_factory=list)
     has_aggregation: bool = False
     has_group_by: bool = False
     fan_trap_risk: bool = False
@@ -739,6 +743,16 @@ class OBQCValidator:
             # inflates a total if the aggregation happens over these joins --
             # an aggregate in some unrelated subquery does not.
             scope_aggregates = self._select_aggregates(select)
+            if scope_aggregates:
+                result.aggregating_scopes.append(
+                    tuple(
+                        dict.fromkeys(
+                            t.name
+                            for t in select.find_all(exp.Table)
+                            if t.name and t.find_ancestor(exp.Select) is select
+                        )
+                    )
+                )
 
             for join in select.args.get("joins") or []:
                 join_info: dict[str, Any] = {
@@ -1372,11 +1386,17 @@ class OBQCValidator:
         if self._schema_cache is None:
             return
 
-        # --- Axiom-grounded path: disjoint sibling facts in the same query ----
-        queried = {t.lower() for t in result.parsed_tables}
-        disjoint_hits: set[frozenset] = {
-            pair for pair in self._disjoint_pairs if pair <= queried
-        }
+        # --- Axiom-grounded path: disjoint sibling facts in one SELECT --------
+        #
+        # Scoped like the heuristic below. Reading the disjoint pair off every
+        # table named in the query flagged a fact that only appears inside a
+        # semi-join filter: "... FROM customers JOIN orders ... WHERE EXISTS
+        # (SELECT 1 FROM returns ...)" aggregates orders alone, and returns
+        # cannot multiply its rows from inside the subquery.
+        disjoint_hits: set[frozenset] = set()
+        for scope in result.aggregating_scopes:
+            queried = {t.lower() for t in scope}
+            disjoint_hits |= {pair for pair in self._disjoint_pairs if pair <= queried}
         if disjoint_hits:
             result.fan_trap_risk = True
             involved = sorted({t for pair in disjoint_hits for t in pair})
