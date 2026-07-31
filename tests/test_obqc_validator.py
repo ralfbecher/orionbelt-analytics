@@ -752,6 +752,207 @@ class TestOBQCFanTrapDetection(unittest.TestCase):
         self.assertFalse(result.fan_trap_risk)
 
 
+class TestOBQCFanTrapDirection(unittest.TestCase):
+    """Fan-out is a property of a join's direction, not of a table.
+
+    The heuristic asked whether a joined table sat on the "many" side of any
+    relationship anywhere in the schema, and counted once per matching
+    relationship rather than once per join. A dimension with its own foreign
+    keys therefore scored a fan-out for merely existing, so walking a chain of
+    many-to-one lookups -- where no row is ever duplicated -- drew a warning.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_many_to_one_chain_is_not_a_fan_trap(self):
+        """order_items -> orders -> users: every hop is a lookup."""
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM order_items "
+            "JOIN orders ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_many_to_one_chain_with_aliases_is_not_a_fan_trap(self):
+        """ON conditions are qualified by alias, so aliases must resolve."""
+        result = self.validator.validate(
+            "SELECT u.name, COUNT(*) AS n, SUM(o.total) AS lifetime_value "
+            "FROM public.order_items oi "
+            "JOIN public.orders o ON oi.order_id = o.id "
+            "JOIN public.users u ON o.user_id = u.id "
+            "GROUP BY u.name ORDER BY SUM(o.total) DESC"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_two_facts_on_one_dimension_is_still_a_fan_trap(self):
+        """The true positive must survive: orders fans out twice."""
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity), SUM(shipments.cost) "
+            "FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+    def test_single_fan_out_join_is_not_flagged(self):
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM users JOIN orders ON users.id = orders.user_id "
+            "GROUP BY users.name"
+        )
+
+        self.assertFalse(result.fan_trap_risk)
+
+    def test_direction_is_judged_per_join_not_per_relationship(self):
+        """Joining one dimension that has its own FK must score zero fan-outs.
+
+        orders references users, so the old rule counted 'orders' as a many
+        side even when the query joins *to* it from its own child.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(order_items.quantity) "
+            "FROM order_items JOIN orders ON order_items.order_id = orders.id"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_unrelated_join_is_not_counted(self):
+        """Tables with no ontology relationship cannot be judged to fan out."""
+        result = self.validator.validate(
+            "SELECT SUM(orders.total) FROM orders "
+            "JOIN users ON orders.user_id = users.id "
+            "JOIN shipments ON shipments.order_id = orders.id"
+        )
+
+        # shipments fans out from orders; users does not. One fan-out only.
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+
+class TestOBQCFanTrapDimensionWithOwnKeys(unittest.TestCase):
+    """A dimension carrying several foreign keys must not manufacture fan-outs.
+
+    This is the reported false positive, and it needs a dimension with two
+    outgoing FKs to reproduce: the old rule incremented once per matching
+    *relationship* rather than once per join, so joining that one dimension
+    scored two fan-outs by itself and crossed the warning threshold -- even
+    though the query only walks many-to-one lookups.
+    """
+
+    def setUp(self):
+        from src.database_manager import ColumnInfo, TableInfo
+        from src.ontology_generator import OntologyGenerator
+
+        def col(name, fk_to=None, pk=False):
+            return ColumnInfo(
+                name=name,
+                data_type="INTEGER",
+                is_nullable=False,
+                is_primary_key=pk,
+                is_foreign_key=fk_to is not None,
+                foreign_key_table=fk_to,
+                foreign_key_column="id" if fk_to else None,
+            )
+
+        def fk(column, to_table):
+            return {
+                "column": column,
+                "referenced_table": to_table,
+                "referenced_column": "id",
+            }
+
+        tables = [
+            TableInfo(
+                name="sales",
+                schema="public",
+                columns=[col("id", pk=True), col("client_id", "clients")],
+                primary_keys=["id"],
+                foreign_keys=[fk("client_id", "clients")],
+            ),
+            # Two outgoing FKs -- the shape that triggered the false positive.
+            TableInfo(
+                name="clients",
+                schema="public",
+                columns=[
+                    col("id", pk=True),
+                    col("country_id", "countries"),
+                    col("region_id", "regions"),
+                ],
+                primary_keys=["id"],
+                foreign_keys=[
+                    fk("country_id", "countries"),
+                    fk("region_id", "regions"),
+                ],
+            ),
+            TableInfo(
+                name="countries",
+                schema="public",
+                columns=[col("id", pk=True)],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+            TableInfo(
+                name="regions",
+                schema="public",
+                columns=[col("id", pk=True)],
+                primary_keys=["id"],
+                foreign_keys=[],
+            ),
+        ]
+
+        generator = OntologyGenerator()
+        generator.generate_from_schema(tables)
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(generator.graph, str(generator.base_uri))
+
+    def test_dimension_chain_is_not_flagged(self):
+        """many sales -> one client -> one country: nothing is duplicated."""
+        result = self.validator.validate(
+            "SELECT co.id, COUNT(*) AS orders, SUM(s.id) AS total "
+            "FROM sales s "
+            "JOIN clients cl ON s.client_id = cl.id "
+            "JOIN countries co ON cl.country_id = co.id "
+            "GROUP BY co.id"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_real_fan_out_in_the_same_schema_is_still_flagged(self):
+        """Joining the fact from two directions still multiplies rows."""
+        result = self.validator.validate(
+            "SELECT cl.id, SUM(s1.id), SUM(s2.id) "
+            "FROM clients cl "
+            "JOIN sales s1 ON s1.client_id = cl.id "
+            "JOIN sales s2 ON s2.client_id = cl.id "
+            "GROUP BY cl.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+
 class TestOBQCAxiomDrivenFanTrap(unittest.TestCase):
     """Phase 2: fan-trap detection grounded in owl:disjointWith axioms."""
 
