@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def semantic_context_entries(
-    name_suggestions: dict[str, Any],
+    applied_names: list[Any] | None,
 ) -> list[tuple[str, str]]:
-    """Flatten name suggestions into (target, context) pairs for the index.
+    """Flatten applied name suggestions into (target, context) pairs.
 
     The suggestions carry exactly what schema search lacks: the business word
     for an abbreviated identifier, and a sentence saying what it means. Applied
@@ -32,11 +32,20 @@ def semantic_context_entries(
     from raw schema metadata -- so a user asking in the enriched vocabulary
     still matches nothing.
 
+    Takes what the generator *applied*, not what the caller requested. Those
+    differ: apply_semantic_names skips any suggestion naming something the
+    ontology does not contain, while the index accepts any target. Feeding it
+    the request would let a typo -- ``table_name: "sale"`` for a column in
+    ``sales`` -- create a searchable entry for a table that does not exist, and
+    query generation would then be steered toward it.
+
     Args:
-        name_suggestions: The payload handed to
-            :meth:`OntologyGenerator.apply_semantic_names` -- ``classes``,
-            ``properties`` and ``relationships`` lists of dicts with
-            ``original_name``, ``suggested_name`` and ``description``.
+        applied_names: Output of
+            :meth:`OntologyGenerator.applied_semantic_names` -- dicts with
+            ``original_name``, ``suggested_name``, ``description`` and
+            ``table_name``. Loosely typed and defensively parsed: the values
+            originate from an LLM payload, so a caller may hand over entries
+            whose fields are not the strings the annotation promises.
 
     Returns:
         (target, context) pairs, where target is ``table`` or ``table.column``.
@@ -45,27 +54,26 @@ def semantic_context_entries(
     """
     entries: list[tuple[str, str]] = []
 
-    for kind in ("classes", "properties", "relationships"):
-        for suggestion in name_suggestions.get(kind) or []:
-            if not isinstance(suggestion, dict):
-                continue
+    for suggestion in applied_names or []:
+        if not isinstance(suggestion, dict):
+            continue
 
-            original = str(suggestion.get("original_name") or "").strip()
-            if not original:
-                continue
+        original = str(suggestion.get("original_name") or "").strip()
+        if not original:
+            continue
 
-            suggested = str(suggestion.get("suggested_name") or "").strip()
-            description = str(suggestion.get("description") or "").strip()
-            if not suggested and not description:
-                continue
+        suggested = str(suggestion.get("suggested_name") or "").strip()
+        description = str(suggestion.get("description") or "").strip()
+        if not suggested and not description:
+            continue
 
-            # Properties are column-scoped; qualifying them keeps two tables'
-            # like-named columns from collapsing onto one index entry.
-            table_name = str(suggestion.get("table_name") or "").strip()
-            target = f"{table_name}.{original}" if table_name else original
+        # Properties are column-scoped; qualifying them keeps two tables'
+        # like-named columns from collapsing onto one index entry.
+        table_name = str(suggestion.get("table_name") or "").strip()
+        target = f"{table_name}.{original}" if table_name else original
 
-            context = ". ".join(part for part in (suggested, description) if part)
-            entries.append((target, context))
+        context = ". ".join(part for part in (suggested, description) if part)
+        entries.append((target, context))
 
     return entries
 
@@ -609,8 +617,10 @@ async def apply_semantic_names(
         indexed_count = 0
         index_error: str | None = None
         if session.graphrag_initialized and session.graphrag_manager is not None:
+            # Only what the generator matched -- see semantic_context_entries.
+            applied_names = generator.applied_semantic_names()
             try:
-                for target, context_text in semantic_context_entries(name_suggestions):
+                for target, context_text in semantic_context_entries(applied_names):
                     session.graphrag_manager.add_semantic_context(
                         target=target, context=context_text, source="ontology"
                     )
@@ -623,15 +633,19 @@ async def apply_semantic_names(
         result += f"- Classes updated: {classes_updated}\n"
         result += f"- Properties updated: {properties_updated}\n"
         result += f"- Relationships updated: {relationships_updated}\n"
+        # Reported independently: an error after some successes is a *partial*
+        # index, and collapsing that into the count alone would present a
+        # half-finished job as a finished one.
         if indexed_count:
             result += (
                 f"- Indexed into GraphRAG: {indexed_count} "
                 "(searchable via graphrag_search)\n"
             )
-        elif index_error:
+        if index_error:
             result += (
-                f"- GraphRAG indexing skipped: {index_error} "
-                "(ontology was updated successfully)\n"
+                f"- GraphRAG indexing failed after {indexed_count} "
+                f"entr{'y' if indexed_count == 1 else 'ies'}: {index_error} "
+                "(ontology was updated successfully; re-run to index the rest)\n"
             )
         if new_ontology_filename:
             result += f"\n## ontology_file: {new_ontology_filename}\n"

@@ -156,6 +156,8 @@ class OntologyGenerator:
         self.quality_report: OntologyQualityReport | None = None
         self._table_lookup: dict[str, TableInfo] = {}
         self._pk_columns: dict[str, list[str]] = {}  # table -> primary key columns
+        # Suggestions the last apply_semantic_names() actually matched.
+        self._applied_semantic_names: list[dict[str, str]] = []
 
     def load_from_file(self, file_path: str) -> None:
         """Load an existing ontology from a Turtle file.
@@ -1922,10 +1924,19 @@ class OntologyGenerator:
                 - relationships: List of {original_name, suggested_name, description}
 
         Returns:
-            Updated ontology in Turtle format
+            Updated ontology in Turtle format. The subset that was actually
+            applied is available afterwards from
+            :meth:`applied_semantic_names`.
         """
         logger.info("Applying semantic name suggestions to ontology")
         changes_made = 0
+
+        # Suggestions naming something that is not in the ontology are skipped
+        # silently, so the requested list is not evidence of what happened. Record
+        # what was actually applied, for callers that must not act on a name the
+        # ontology rejected -- indexing a typo'd target into schema search would
+        # invent an element that does not exist.
+        self._applied_semantic_names = []
 
         # Apply class name suggestions
         if "classes" in name_suggestions:
@@ -1942,6 +1953,15 @@ class OntologyGenerator:
 
                 # Check if this class exists
                 if (class_uri, RDF.type, OWL.Class) in self.graph:
+                    if suggested or description:
+                        self._applied_semantic_names.append(
+                            {
+                                "original_name": original,
+                                "suggested_name": suggested or "",
+                                "description": description or "",
+                                "table_name": "",
+                            }
+                        )
                     if suggested:
                         # Update the label
                         self.graph.remove((class_uri, RDFS.label, None))
@@ -1992,6 +2012,7 @@ class OntologyGenerator:
                             "suggested": suggested,
                             "description": description,
                             "table_name": table_name,
+                            "original_name": original,
                         }
                     )
 
@@ -2036,6 +2057,17 @@ class OntologyGenerator:
 
             # Second pass: apply all changes
             for change in proposed_changes:
+                if change["suggested"] or change["description"]:
+                    self._applied_semantic_names.append(
+                        {
+                            "original_name": change["original_name"],
+                            # The disambiguated label, not the requested one --
+                            # this is what the ontology now says.
+                            "suggested_name": change["suggested"] or "",
+                            "description": change["description"] or "",
+                            "table_name": change["table_name"] or "",
+                        }
+                    )
                 if change["suggested"]:
                     self.graph.remove((change["prop_uri"], RDFS.label, None))
                     self.graph.add(
@@ -2075,6 +2107,15 @@ class OntologyGenerator:
 
                 # Check if this relationship exists
                 if (rel_uri, RDF.type, OWL.ObjectProperty) in self.graph:
+                    if suggested or description:
+                        self._applied_semantic_names.append(
+                            {
+                                "original_name": original,
+                                "suggested_name": suggested or "",
+                                "description": description or "",
+                                "table_name": "",
+                            }
+                        )
                     if suggested:
                         # Update the label
                         self.graph.remove((rel_uri, RDFS.label, None))
@@ -2093,3 +2134,18 @@ class OntologyGenerator:
         logger.info(f"Applied {changes_made} semantic name changes to ontology")
 
         return self.graph.serialize(format="turtle")
+
+    def applied_semantic_names(self) -> list[dict[str, str]]:
+        """Return the suggestions the last apply actually matched.
+
+        :meth:`apply_semantic_names` skips anything naming a class, property or
+        relationship the ontology does not contain, so the requested list
+        overstates what happened. Callers that propagate names elsewhere must
+        use this instead, or they will act on names the ontology rejected.
+
+        Returns:
+            One dict per applied suggestion with ``original_name``,
+            ``suggested_name``, ``description`` and ``table_name`` (empty
+            string where not applicable). Empty if apply has not run.
+        """
+        return list(self._applied_semantic_names)
