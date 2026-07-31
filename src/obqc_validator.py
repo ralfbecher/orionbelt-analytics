@@ -760,6 +760,9 @@ class OBQCValidator:
                     "table": None,
                     "on_condition": None,
                     "scope_aggregates": scope_aggregates,
+                    # Identifies the owning SELECT so fan-out is counted within
+                    # one query rather than pooled across unrelated ones.
+                    "scope_id": id(select),
                     # Real table names referenced by the ON condition. Fan-trap
                     # detection needs to know which table this join attaches
                     # to, and the ON condition is the only place that says so.
@@ -1433,8 +1436,11 @@ class OBQCValidator:
         # existing: "sales JOIN clients JOIN countries" -- many sales to one
         # client to one country, where no row is ever duplicated -- was warned
         # about because clients happens to reference countries.
-        one_to_many_count = 0
-        involved_tables: list[str] = []
+        # Counted within each aggregating SELECT, not pooled across them. Rows
+        # are multiplied by joins in the same query, so two subqueries that
+        # fan out once each are two safe aggregations -- summing them reported
+        # a fan-trap that exists in neither.
+        fan_outs_by_scope: dict[Any, list[str]] = {}
 
         # Only joins sitting in an aggregating SELECT; a subquery's joins
         # cannot multiply rows the outer query aggregates.
@@ -1454,8 +1460,12 @@ class OBQCValidator:
                 continue
 
             if any(self._join_fans_out(join_table, anchor) for anchor in anchors):
-                one_to_many_count += 1
-                involved_tables.append(join_table)
+                scope_id = join_info.get("scope_id")
+                fan_outs_by_scope.setdefault(scope_id, []).append(join_table)
+
+        worst_scope = max(fan_outs_by_scope.values(), key=len, default=[])
+        one_to_many_count = len(worst_scope)
+        involved_tables = worst_scope
 
         if one_to_many_count >= 2:
             result.fan_trap_risk = True

@@ -1030,6 +1030,38 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
         self.assertEqual(baseline.parsed_joins[0]["on_tables"], ["users", "orders"])
         self.assertEqual(shadowed.parsed_joins[0]["on_tables"], ["users", "orders"])
 
+    def test_fan_outs_are_counted_per_select_not_pooled(self):
+        """Two subqueries fanning out once each are two safe aggregations.
+
+        Rows are multiplied by joins in the same query. Summing fan-outs
+        across unrelated SELECTs reported a fan-trap that exists in neither.
+        """
+        result = self.validator.validate(
+            "SELECT "
+            "(SELECT SUM(order_items.quantity) FROM orders "
+            " JOIN order_items ON orders.id = order_items.order_id), "
+            "(SELECT SUM(shipments.cost) FROM orders "
+            " JOIN shipments ON orders.id = shipments.order_id) "
+            "FROM users"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_fan_trap_inside_a_subquery_is_still_detected(self):
+        """Scoping the count must not switch detection off in subqueries."""
+        result = self.validator.validate(
+            "SELECT name, ("
+            "SELECT SUM(order_items.quantity) + SUM(shipments.cost) FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id) "
+            "FROM users"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
     def test_unrelated_join_is_not_counted(self):
         """Tables with no ontology relationship cannot be judged to fan out."""
         result = self.validator.validate(
