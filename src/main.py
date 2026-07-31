@@ -888,9 +888,11 @@ async def query_sparql(
     Named graphs: each loaded schema lives in its own named graph, and the store
     is accumulative across schemas. Unwrapped patterns are matched against the
     union of every named graph, so a plain "?s ?p ?o" sees all loaded schemas.
-    Wrap patterns in GRAPH ?g { ... } to scope results to one schema or to bind
-    the source graph, e.g.:
+    To scope results to one schema, either bind the graph:
         SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g
+    or select the dataset explicitly, which suppresses the union and restricts
+    the query to exactly the graphs it names:
+        SELECT ?s FROM <http://example.com/schema/public> WHERE { ?s ?p ?o }
 
     Args:
         sparql_query: A complete SPARQL query string (SELECT, ASK, or CONSTRUCT).

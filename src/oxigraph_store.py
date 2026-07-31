@@ -7,6 +7,7 @@ Stores ontologies, schema metadata, and accumulated knowledge across sessions.
 
 import contextlib
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -86,6 +87,40 @@ def _escape_sparql_iri(value: str) -> str:
     """
     forbidden = set('<>"{}|\\^`')
     return "".join(c for c in value if c not in forbidden)
+
+
+# Strips the regions a bare FROM keyword can hide in before we scan for one:
+# triple- and single-quoted literals, IRIs (an IRI path may end in ".../FROM"),
+# and # comments. Order matters -- literals first, so a '#' inside a string is
+# not mistaken for a comment.
+_SPARQL_NON_KEYWORD_REGIONS = re.compile(
+    r"'''.*?'''"  # long single-quoted literal
+    r'|""".*?"""'  # long double-quoted literal
+    r"|'(?:[^'\\\n]|\\.)*'"  # short single-quoted literal
+    r'|"(?:[^"\\\n]|\\.)*"'  # short double-quoted literal
+    r"|<[^<>\"{}|^`\\]*>"  # IRI reference
+    r"|#[^\n]*",  # comment to end of line
+    re.DOTALL,
+)
+
+_SPARQL_FROM_KEYWORD = re.compile(r"\bFROM\b", re.IGNORECASE)
+
+
+def _declares_dataset(sparql_query: str) -> bool:
+    """Report whether a query selects its own RDF dataset via FROM / FROM NAMED.
+
+    Such a query has already said exactly which graphs it wants, so the caller
+    must not widen it (see :meth:`OxigraphStoreManager.query_sparql`).
+
+    Args:
+        sparql_query: SPARQL query string.
+
+    Returns:
+        True if a ``FROM`` keyword appears outside literals, IRIs and comments.
+    """
+    return bool(
+        _SPARQL_FROM_KEYWORD.search(_SPARQL_NON_KEYWORD_REGIONS.sub(" ", sparql_query))
+    )
 
 
 class OxigraphStoreManager:
@@ -266,6 +301,10 @@ class OxigraphStoreManager:
         loaded into. Use ``GRAPH ?g { ... }`` to scope to one schema or to bind
         the source graph.
 
+        A query that selects its own dataset with ``FROM`` / ``FROM NAMED`` is
+        left alone: it has already stated which graphs it wants, and widening it
+        would leak triples across schemas (``FROM <g1>`` would also return g2).
+
         Args:
             sparql_query: SPARQL query string
             timeout_seconds: Query timeout (None for no timeout)
@@ -335,7 +374,10 @@ class OxigraphStoreManager:
             # iteration type-checks (other query forms are handled by sibling methods).
             solutions = cast(
                 "QuerySolutions",
-                self.store.query(sparql_query, use_default_graph_as_union=True),
+                self.store.query(
+                    sparql_query,
+                    use_default_graph_as_union=not _declares_dataset(sparql_query),
+                ),
             )
             variables = solutions.variables
             for solution in solutions:
@@ -364,7 +406,8 @@ class OxigraphStoreManager:
         Execute SPARQL ASK query.
 
         Patterns outside a ``GRAPH`` clause are matched against the union of all
-        named graphs (see :meth:`query_sparql`).
+        named graphs unless the query selects its own dataset with ``FROM`` /
+        ``FROM NAMED`` (see :meth:`query_sparql`).
 
         Args:
             sparql_query: SPARQL ASK query
@@ -386,7 +429,12 @@ class OxigraphStoreManager:
         try:
             # ASK queries yield a QueryBoolean (pyoxigraph >= 0.4) or a plain bool
             # (older versions); both support bool().
-            return bool(self.store.query(sparql_query, use_default_graph_as_union=True))
+            return bool(
+                self.store.query(
+                    sparql_query,
+                    use_default_graph_as_union=not _declares_dataset(sparql_query),
+                )
+            )
         except Exception as e:
             logger.exception(f"SPARQL ASK query failed: {e}")
             raise
@@ -396,7 +444,8 @@ class OxigraphStoreManager:
         Execute SPARQL CONSTRUCT query.
 
         Patterns outside a ``GRAPH`` clause are matched against the union of all
-        named graphs (see :meth:`query_sparql`).
+        named graphs unless the query selects its own dataset with ``FROM`` /
+        ``FROM NAMED`` (see :meth:`query_sparql`).
 
         Args:
             sparql_query: SPARQL CONSTRUCT query
@@ -423,7 +472,10 @@ class OxigraphStoreManager:
             # resolves to the RDF (not results) overload.
             results = cast(
                 "QueryTriples",
-                self.store.query(sparql_query, use_default_graph_as_union=True),
+                self.store.query(
+                    sparql_query,
+                    use_default_graph_as_union=not _declares_dataset(sparql_query),
+                ),
             )
             # serialize() yields bytes (or None for an empty result), so decode to
             # satisfy the str return contract.

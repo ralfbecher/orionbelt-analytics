@@ -104,6 +104,80 @@ class TestAddTripleAndSelect:
         )
         assert f"{EX}a" in turtle
 
+    def test_from_clause_still_isolates_one_graph(self, store):
+        """FROM <g1> must not leak g2, i.e. the union must not override it.
+
+        The union default graph is what lets an unwrapped pattern find triples
+        at all, but applying it unconditionally overrode explicit dataset
+        selection and broke every FROM-scoped helper.
+        """
+        store.add_triple(f"{EX}a", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g1")
+        store.add_triple(f"{EX}b", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g2")
+
+        results = store.query_sparql(
+            f"SELECT ?s FROM <{EX}g1> WHERE {{ ?s <{EX}p> ?o }}"
+        )
+
+        assert [r["s"] for r in results] == [f"{EX}a"]
+
+    def test_from_named_still_isolates_one_graph(self, store):
+        """FROM NAMED + GRAPH ?g must not see graphs outside the dataset."""
+        store.add_triple(f"{EX}a", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g1")
+        store.add_triple(f"{EX}b", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g2")
+
+        results = store.query_sparql(
+            f"SELECT ?s FROM NAMED <{EX}g1> WHERE {{ GRAPH ?g {{ ?s <{EX}p> ?o }} }}"
+        )
+
+        assert [r["s"] for r in results] == [f"{EX}a"]
+
+    def test_ask_and_construct_respect_from(self, store):
+        """ASK and CONSTRUCT honour explicit dataset selection too."""
+        store.add_triple(f"{EX}b", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g2")
+
+        # g1 is empty, so a query scoped to it must find nothing.
+        assert store.query_sparql_ask(f"ASK FROM <{EX}g1> {{ ?s <{EX}p> ?o }}") is False
+
+        turtle = store.query_sparql_construct(
+            f"CONSTRUCT {{ ?s <{EX}p> ?o }} FROM <{EX}g1> WHERE {{ ?s <{EX}p> ?o }}"
+        )
+        assert f"{EX}b" not in turtle
+
+    def test_from_inside_literal_or_comment_does_not_suppress_union(self, store):
+        """Only a real FROM keyword counts -- not one in a literal or comment."""
+        store.add_triple(
+            f"{EX}a",
+            f"{EX}p",
+            "FROM <x>",
+            object_is_literal=True,
+            graph_uri=f"{EX}g1",
+        )
+
+        # 'FROM' appears in the literal and in a comment, but the query selects
+        # no dataset, so the union must still apply or this returns nothing.
+        results = store.query_sparql(
+            f'# scoped? no FROM here\nSELECT ?s WHERE {{ ?s <{EX}p> "FROM <x>" }}'
+        )
+
+        assert [r["s"] for r in results] == [f"{EX}a"]
+
+    def test_list_tables_sparql_is_scoped_to_its_schema(self, store):
+        """The FROM-based helper must not report tables from other schemas."""
+        table = "https://ralforion.com/ns/oba#Table"
+        name = "https://ralforion.com/ns/oba#tableName"
+        for graph, label in ((f"{EX}g1", "table_g1"), (f"{EX}g2", "table_g2")):
+            store.add_triple(
+                f"{EX}{label}",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                table,
+                graph_uri=graph,
+            )
+            store.add_triple(
+                f"{EX}{label}", name, label, object_is_literal=True, graph_uri=graph
+            )
+
+        assert store.list_tables_sparql(f"{EX}g1") == ["table_g1"]
+
     def test_select_unbound_variable_is_omitted(self, store):
         store.add_triple(f"{EX}s", f"{EX}p", f"{EX}o")
 
