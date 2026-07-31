@@ -668,22 +668,71 @@ class OBQCValidator:
 
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
-        for join in parsed.find_all(exp.Join):
-            join_info: dict[str, Any] = {
-                "type": join.kind or "INNER",
-                "table": None,
-                "on_condition": None,
-            }
+        # Alias maps are built per SELECT. Table aliases are scoped to the
+        # query that declares them, and a subquery may reuse an outer one: a
+        # single map over the whole tree let "FROM order_items u" inside an
+        # EXISTS overwrite the outer "FROM users u", so the outer join's ON
+        # condition resolved to order_items and its fan-out was judged against
+        # the wrong table -- silently dropping a fan-trap warning.
+        for select in parsed.find_all(exp.Select):
+            alias_map = self._build_alias_map(select)
 
-            # Get joined table
-            if join.this and isinstance(join.this, exp.Table):
-                join_info["table"] = join.this.name
+            for join in select.args.get("joins") or []:
+                join_info: dict[str, Any] = {
+                    "type": join.kind or "INNER",
+                    "table": None,
+                    "on_condition": None,
+                    # Real table names referenced by the ON condition. Fan-trap
+                    # detection needs to know which table this join attaches
+                    # to, and the ON condition is the only place that says so.
+                    "on_tables": [],
+                }
 
-            # Get ON condition
-            if join.args.get("on"):
-                join_info["on_condition"] = join.args["on"].sql()
+                # Get joined table
+                if join.this and isinstance(join.this, exp.Table):
+                    join_info["table"] = join.this.name
 
-            result.parsed_joins.append(join_info)
+                # Get ON condition
+                on_clause = join.args.get("on")
+                if on_clause is not None:
+                    join_info["on_condition"] = on_clause.sql()
+                    on_tables: list[str] = []
+                    for column in on_clause.find_all(exp.Column):
+                        if not column.table:
+                            continue
+                        # Columns are qualified by alias far more often than by
+                        # table name, so resolve through the alias map.
+                        resolved = alias_map.get(column.table.lower(), column.table)
+                        if resolved not in on_tables:
+                            on_tables.append(resolved)
+                    join_info["on_tables"] = on_tables
+
+                result.parsed_joins.append(join_info)
+
+    def _build_alias_map(self, select: exp.Expr) -> dict[str, str]:
+        """Map one SELECT's table aliases (and bare names) to real table names.
+
+        Tables belonging to a nested subquery are excluded: their aliases live
+        in that subquery's scope and would otherwise shadow same-named ones
+        here.
+
+        Args:
+            select: The SELECT whose scope to map.
+
+        Returns:
+            Lower-cased alias -> table name. Bare names map to themselves so
+            callers can look up unaliased references the same way.
+        """
+        alias_map: dict[str, str] = {}
+        for table in select.find_all(exp.Table):
+            if not table.name:
+                continue
+            if table.find_ancestor(exp.Select) is not select:
+                continue
+            alias_map[table.name.lower()] = table.name
+            if table.alias:
+                alias_map[table.alias.lower()] = table.name
+        return alias_map
 
     def _extract_aggregations(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Detect aggregate functions and GROUP BY."""
@@ -1108,6 +1157,45 @@ class OBQCValidator:
                     return True
         return False
 
+    def _join_fans_out(self, join_table: str, anchor_table: str) -> bool:
+        """Whether joining *join_table* onto *anchor_table* multiplies rows.
+
+        True when the ontology puts *join_table* on the "many" side of the
+        relationship between the two: one anchor row can match many joined
+        rows, so any measure taken from the anchor side is repeated.
+
+        Args:
+            join_table: Table introduced by the JOIN.
+            anchor_table: Table its ON condition attaches to.
+
+        Returns:
+            True if the join can duplicate anchor rows. False when the joined
+            table is the "one" side (a dimension lookup), or when the two are
+            not related in the ontology at all.
+        """
+        if self._schema_cache is None:
+            return False
+
+        joined = join_table.lower()
+        anchor = anchor_table.lower()
+
+        for rel in self._schema_cache.relationships.values():
+            from_t = rel.from_table.lower()
+            to_t = rel.to_table.lower()
+
+            # many_to_one is stored from the child: from_table is the many side.
+            if rel.relationship_type == "many_to_one":
+                many, one = from_t, to_t
+            elif rel.relationship_type == "one_to_many":
+                many, one = to_t, from_t
+            else:
+                continue
+
+            if {many, one} == {joined, anchor} and many == joined:
+                return True
+
+        return False
+
     def _detect_fan_trap(self, result: OBQCResult) -> None:
         """Rule: Detect potential fan-trap patterns.
 
@@ -1153,25 +1241,40 @@ class OBQCValidator:
             )
             return
 
-        # --- Heuristic fallback: count one-to-many joins (no disjointness axioms)
+        # --- Heuristic fallback: count fan-out joins (no disjointness axioms)
+        #
+        # A join multiplies rows only when the table being joined sits on the
+        # "many" side *of that join*. The direction is what matters, and it is
+        # only meaningful relative to the table the join attaches to.
+        #
+        # The previous version asked whether the joined table was on the many
+        # side of any relationship anywhere in the schema, and counted once per
+        # matching relationship rather than once per join. A dimension table
+        # with its own foreign keys therefore scored a fan-out for merely
+        # existing: "sales JOIN clients JOIN countries" -- many sales to one
+        # client to one country, where no row is ever duplicated -- was warned
+        # about because clients happens to reference countries.
         one_to_many_count = 0
         involved_tables: list[str] = []
 
         for join_info in result.parsed_joins:
             join_table = join_info.get("table")
-            if join_table:
-                join_table_lower = join_table.lower()
-                for rel_info in self._schema_cache.relationships.values():
-                    # A table is on the "many" side in these cases
-                    if (
-                        rel_info.relationship_type == "one_to_many"
-                        and rel_info.to_table.lower() == join_table_lower
-                    ) or (
-                        rel_info.relationship_type == "many_to_one"
-                        and rel_info.from_table.lower() == join_table_lower
-                    ):
-                        one_to_many_count += 1
-                        involved_tables.append(join_table)
+            if not join_table:
+                continue
+
+            anchors = [
+                t
+                for t in join_info.get("on_tables", [])
+                if t.lower() != join_table.lower()
+            ]
+            if not anchors:
+                # No ON condition to anchor against (CROSS JOIN, or a
+                # condition naming no other table); nothing to judge.
+                continue
+
+            if any(self._join_fans_out(join_table, anchor) for anchor in anchors):
+                one_to_many_count += 1
+                involved_tables.append(join_table)
 
         if one_to_many_count >= 2:
             result.fan_trap_risk = True
