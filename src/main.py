@@ -730,6 +730,14 @@ async def add_semantic_context(
     session enrichment, not durable knowledge; use add_rdf_knowledge for facts
     that must persist.
 
+    Calling this again for the same target REPLACES the previous context, so
+    it can be revised freely.
+
+    Check the returned "searchable" flag. Under the offline "tfidf" embedding
+    backend the context is stored but cannot be matched, and the response
+    carries a "warning" explaining why - do not report the concept as findable
+    in that case.
+
     REQUIRES: discover_schema must have been called first.
 
     Args:
@@ -740,7 +748,8 @@ async def add_semantic_context(
             unitcost. Used for profitability and margin analysis."
 
     Returns:
-        Dictionary with the indexed element id, target and character count
+        Dictionary with the indexed element id, target, character count,
+        whether it replaced existing context, and whether it is searchable
     """
     return await _h_graphrag.graphrag_add_semantic_context(
         ctx,

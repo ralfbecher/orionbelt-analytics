@@ -69,6 +69,53 @@ class TestClearPreservesFingerprint:
         assert "embedding_schema_version" in metadata
 
 
+class TestUpsertReplaces:
+    """add() keeps the first write for an id; upsert() must not."""
+
+    def test_add_silently_keeps_the_first_write(self, chroma_dir):
+        """Documents why upsert_element exists -- this is ChromaDB behaviour,
+        not something the wrapper chose."""
+        store = _open()
+        _add(store)
+        store.add_element(
+            element_type="table",
+            element_id="sales",
+            name="sales",
+            description="second write",
+            embedding=np.full(384, 0.5, dtype=np.float32),
+            metadata={"marker": "SECOND"},
+        )
+
+        stored = store.collection.get(ids=["sales"])
+
+        assert store.collection.count() == 1
+        assert stored["metadatas"][0].get("marker") is None
+
+    def test_upsert_replaces_the_existing_element(self, chroma_dir):
+        store = _open()
+        store.upsert_element(
+            element_type="semantic_context",
+            element_id="semantic_context:sales.amt",
+            name="sales.amt",
+            description="first",
+            embedding=np.ones(384, dtype=np.float32),
+            metadata={"context": "FIRST"},
+        )
+        store.upsert_element(
+            element_type="semantic_context",
+            element_id="semantic_context:sales.amt",
+            name="sales.amt",
+            description="second",
+            embedding=np.full(384, 0.5, dtype=np.float32),
+            metadata={"context": "SECOND"},
+        )
+
+        stored = store.collection.get(ids=["semantic_context:sales.amt"])
+
+        assert store.collection.count() == 1
+        assert stored["metadatas"][0]["context"] == "SECOND"
+
+
 class TestBackendMismatchRebuilds:
     """The invalidation itself still has to work."""
 
