@@ -78,11 +78,6 @@ MCP_TRANSPORT=http
 MCP_SERVER_HOST=localhost
 MCP_SERVER_PORT=9000
 
-# Shutdown timeout for graceful connection closure (seconds)
-# Lower values = faster shutdown but may interrupt active requests
-# Higher values = cleaner shutdown but slower Ctrl+C response
-MCP_SHUTDOWN_TIMEOUT=2
-
 # Session Idle Timeout
 # Sessions idle longer than this are automatically evicted (resources freed).
 # Set to 0 to disable idle eviction entirely.
@@ -221,7 +216,6 @@ DATABRICKS_SCHEMA=default
 | `MCP_TRANSPORT` | `http` | MCP transport mode: `http` or `sse` |
 | `MCP_SERVER_HOST` | `localhost` | Host address the server binds to |
 | `MCP_SERVER_PORT` | `9000` | Port the server listens on |
-| `MCP_SHUTDOWN_TIMEOUT` | `2` | Seconds to wait for graceful shutdown |
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `1800` | Idle timeout before session eviction (0 to disable) |
 | `SESSION_SCAN_INTERVAL_SECONDS` | `60` | How often to scan for idle sessions |
 | `MCP_MASTER_PASSWORD` | *(unset)* | Master password for encrypting credentials in memory |
