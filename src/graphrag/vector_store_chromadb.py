@@ -96,7 +96,12 @@ class ChromaDBVectorStore:
         # Collection name based on schema
         collection_name = f"schema_{schema_name}".replace("-", "_").replace(".", "_")
 
-        collection_metadata = {
+        # Held on the instance so every create path uses the same metadata.
+        # clear() previously rebuilt the collection from its own literal, which
+        # omitted the fingerprint -- the next open then read the collection as
+        # legacy and deleted everything written since the clear.
+        self._collection_name = collection_name
+        self._collection_metadata: dict[str, Any] = {
             "schema_name": schema_name,
             "connection_id": connection_id,
             "dimension": dimension,
@@ -108,7 +113,7 @@ class ChromaDBVectorStore:
         try:
             self.collection = self.client.get_or_create_collection(
                 name=collection_name,
-                metadata=collection_metadata,
+                metadata=self._collection_metadata,
             )
 
             # A collection persisted by a different backend holds vectors of the
@@ -133,7 +138,7 @@ class ChromaDBVectorStore:
                 self.client.delete_collection(name=collection_name)
                 self.collection = self.client.get_or_create_collection(
                     name=collection_name,
-                    metadata=collection_metadata,
+                    metadata=self._collection_metadata,
                 )
 
             logger.info(
@@ -631,21 +636,17 @@ class ChromaDBVectorStore:
     def clear(self) -> None:
         """Clear all stored elements from ChromaDB collection."""
         try:
-            # Delete and recreate collection
+            # Delete and recreate collection. The metadata must be the same one
+            # __init__ writes, fingerprint included -- recreating without it
+            # makes the next open see a legacy collection and discard whatever
+            # was added after the clear.
             self.client.delete_collection(self.collection.name)
 
-            collection_name = f"schema_{self.schema_name}".replace("-", "_").replace(
-                ".", "_"
-            )
             self.collection = self.client.get_or_create_collection(
-                name=collection_name,
-                metadata={
-                    "schema_name": self.schema_name,
-                    "connection_id": self.connection_id,
-                    "dimension": self.dimension,
-                },
+                name=self._collection_name,
+                metadata=self._collection_metadata,
             )
-            logger.info(f"Cleared ChromaDB vector store: {collection_name}")
+            logger.info(f"Cleared ChromaDB vector store: {self._collection_name}")
         except Exception as e:
             logger.error(f"Failed to clear ChromaDB collection: {e}")
             raise

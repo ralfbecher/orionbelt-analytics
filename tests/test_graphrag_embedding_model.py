@@ -56,6 +56,80 @@ class TestResolveEmbeddingModel:
         assert resolve_embedding_model() == DEFAULT_EMBEDDING_MODEL
 
 
+class TestMiniLMFallback:
+    """A model that cannot be used must degrade, not break initialization.
+
+    chromadb's DefaultEmbeddingFunction loads nothing when constructed -- the
+    download and the onnxruntime session are deferred to the first call. Only
+    guarding construction therefore left the real failure (offline first use,
+    unwritable cache) to surface later, from inside indexing, after the caller
+    had already stamped "minilm" onto the vector store.
+    """
+
+    def test_degrades_when_the_model_fails_on_first_call(self, monkeypatch):
+        from chromadb.utils import embedding_functions
+
+        def explode(self, *args, **kwargs):
+            raise RuntimeError("simulated offline: cannot fetch onnx model")
+
+        monkeypatch.setattr(
+            embedding_functions.DefaultEmbeddingFunction, "__call__", explode
+        )
+
+        embedder = SchemaEmbedder(embedding_model=MODEL_MINILM)
+
+        assert embedder.embedding_model == MODEL_TFIDF
+
+    def test_degraded_embedder_still_embeds(self, monkeypatch):
+        """The whole point of degrading: indexing must keep working."""
+        from chromadb.utils import embedding_functions
+
+        def explode(self, *args, **kwargs):
+            raise RuntimeError("simulated offline")
+
+        monkeypatch.setattr(
+            embedding_functions.DefaultEmbeddingFunction, "__call__", explode
+        )
+
+        embedder = SchemaEmbedder(embedding_model=MODEL_MINILM)
+        elements = embedder.batch_embed_schema(
+            [
+                {
+                    "name": "sales",
+                    "columns": [{"name": "salesamount", "data_type": "DECIMAL"}],
+                }
+            ]
+        )
+
+        assert elements["tables"], "degraded embedder produced no table elements"
+        assert elements["tables"][0].embedding is not None
+
+    def test_degradation_happens_before_the_store_is_fingerprinted(self, monkeypatch):
+        """The manager stamps the store with the embedder's resolved backend.
+
+        If degradation happened later -- lazily, at first embed -- the store
+        would already say "minilm" while the embedder had become TF-IDF, and
+        the next process would discard a store that actually matched it.
+        """
+        from chromadb.utils import embedding_functions
+
+        import graphrag.manager as manager_module
+
+        def explode(self, *args, **kwargs):
+            raise RuntimeError("simulated offline")
+
+        monkeypatch.setattr(
+            embedding_functions.DefaultEmbeddingFunction, "__call__", explode
+        )
+        monkeypatch.setenv("GRAPHRAG_EMBEDDING_MODEL", MODEL_MINILM)
+        monkeypatch.setattr(manager_module, "CHROMADB_AVAILABLE", False)
+
+        mgr = manager_module.GraphRAGManager(connection_id="t", schema_name="public")
+
+        assert mgr.embedder.embedding_model == MODEL_TFIDF
+        assert mgr.vector_store.embedding_model == MODEL_TFIDF
+
+
 class TestTfidfBlindSpot:
     """The failure that motivated making minilm the default."""
 

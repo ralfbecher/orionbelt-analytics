@@ -117,18 +117,27 @@ class SchemaEmbedder:
             try:
                 from chromadb.utils import embedding_functions
 
-                # Downloads all-MiniLM-L6-v2 (~79MB) into ~/.cache/chroma on
-                # first use, then runs locally. onnxruntime ships with chromadb,
-                # so this pulls in no extra dependency.
+                # onnxruntime ships with chromadb, so this pulls in no extra
+                # dependency.
                 self._embedding_function = (
                     embedding_functions.DefaultEmbeddingFunction()
                 )
+
+                # Constructing the function loads nothing: chromadb defers the
+                # ~79MB download and the onnxruntime session to the first call.
+                # So embed once here, where failure can still be handled. Doing
+                # it lazily would raise from the middle of indexing, after the
+                # caller had already stamped "minilm" onto the vector store --
+                # leaving a store whose fingerprint disagrees with the vectors
+                # that a degraded embedder would then produce.
+                self._embedding_function(["probe"])
+
                 logger.info("Loaded embedding model: all-MiniLM-L6-v2 (ONNX)")
             except Exception as e:
                 # Broad by intent: an unavailable model shows up as an import
-                # error, a download failure, or an onnxruntime load error
-                # depending on the host, and every one of them must degrade
-                # rather than abort startup.
+                # error, a download failure, an unwritable cache dir, or an
+                # onnxruntime load error depending on the host, and every one of
+                # them must degrade rather than abort startup.
                 logger.warning(
                     f"Could not load the MiniLM embedding model ({e}); falling "
                     "back to TF-IDF. Semantic schema search will be much weaker "
