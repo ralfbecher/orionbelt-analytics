@@ -80,6 +80,30 @@ class TestAddTripleAndSelect:
         )
         assert in_graph == [{"s": f"{EX}s"}]
 
+    def test_unwrapped_pattern_spans_named_graphs(self, store):
+        """Patterns outside GRAPH see named-graph triples, not an empty default.
+
+        Ontologies are always loaded into a named graph, so without the union
+        default graph an unwrapped pattern silently returns zero rows.
+        """
+        store.add_triple(f"{EX}a", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g1")
+        store.add_triple(f"{EX}b", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g2")
+
+        results = store.query_sparql(f"SELECT ?s WHERE {{ ?s <{EX}p> ?o }}")
+
+        assert sorted(r["s"] for r in results) == [f"{EX}a", f"{EX}b"]
+
+    def test_ask_and_construct_span_named_graphs(self, store):
+        """ASK and CONSTRUCT use the same union default graph as SELECT."""
+        store.add_triple(f"{EX}a", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g1")
+
+        assert store.query_sparql_ask(f"ASK {{ ?s <{EX}p> ?o }}") is True
+
+        turtle = store.query_sparql_construct(
+            f"CONSTRUCT {{ ?s <{EX}p> ?o }} WHERE {{ ?s <{EX}p> ?o }}"
+        )
+        assert f"{EX}a" in turtle
+
     def test_select_unbound_variable_is_omitted(self, store):
         store.add_triple(f"{EX}s", f"{EX}p", f"{EX}o")
 

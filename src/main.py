@@ -885,6 +885,13 @@ async def query_sparql(
     Supports SELECT, ASK, and CONSTRUCT query types (auto-detected from query string).
     Common prefixes (rdf, rdfs, owl, xsd) are available by default.
 
+    Named graphs: each loaded schema lives in its own named graph, and the store
+    is accumulative across schemas. Unwrapped patterns are matched against the
+    union of every named graph, so a plain "?s ?p ?o" sees all loaded schemas.
+    Wrap patterns in GRAPH ?g { ... } to scope results to one schema or to bind
+    the source graph, e.g.:
+        SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g
+
     Args:
         sparql_query: A complete SPARQL query string (SELECT, ASK, or CONSTRUCT).
             Example: "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"

@@ -261,6 +261,11 @@ class OxigraphStoreManager:
         """
         Execute SPARQL query.
 
+        Patterns outside a ``GRAPH`` clause are matched against the union of all
+        named graphs, so callers do not have to know which graph a schema was
+        loaded into. Use ``GRAPH ?g { ... }`` to scope to one schema or to bind
+        the source graph.
+
         Args:
             sparql_query: SPARQL query string
             timeout_seconds: Query timeout (None for no timeout)
@@ -328,7 +333,10 @@ class OxigraphStoreManager:
 
             # SELECT queries yield QuerySolutions; narrow the query() union so the
             # iteration type-checks (other query forms are handled by sibling methods).
-            solutions = cast("QuerySolutions", self.store.query(sparql_query))
+            solutions = cast(
+                "QuerySolutions",
+                self.store.query(sparql_query, use_default_graph_as_union=True),
+            )
             variables = solutions.variables
             for solution in solutions:
                 binding: dict[str, Any] = {}
@@ -355,6 +363,9 @@ class OxigraphStoreManager:
         """
         Execute SPARQL ASK query.
 
+        Patterns outside a ``GRAPH`` clause are matched against the union of all
+        named graphs (see :meth:`query_sparql`).
+
         Args:
             sparql_query: SPARQL ASK query
 
@@ -375,7 +386,7 @@ class OxigraphStoreManager:
         try:
             # ASK queries yield a QueryBoolean (pyoxigraph >= 0.4) or a plain bool
             # (older versions); both support bool().
-            return bool(self.store.query(sparql_query))
+            return bool(self.store.query(sparql_query, use_default_graph_as_union=True))
         except Exception as e:
             logger.exception(f"SPARQL ASK query failed: {e}")
             raise
@@ -383,6 +394,9 @@ class OxigraphStoreManager:
     def query_sparql_construct(self, sparql_query: str) -> str:
         """
         Execute SPARQL CONSTRUCT query.
+
+        Patterns outside a ``GRAPH`` clause are matched against the union of all
+        named graphs (see :meth:`query_sparql`).
 
         Args:
             sparql_query: SPARQL CONSTRUCT query
@@ -407,7 +421,10 @@ class OxigraphStoreManager:
         try:
             # CONSTRUCT yields QueryTriples; narrow the query() union so serialize()
             # resolves to the RDF (not results) overload.
-            results = cast("QueryTriples", self.store.query(sparql_query))
+            results = cast(
+                "QueryTriples",
+                self.store.query(sparql_query, use_default_graph_as_union=True),
+            )
             # serialize() yields bytes (or None for an empty result), so decode to
             # satisfy the str return contract.
             serialized = results.serialize(format=RdfFormat.TURTLE)
