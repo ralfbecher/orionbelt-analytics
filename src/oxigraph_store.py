@@ -7,6 +7,7 @@ Stores ontologies, schema metadata, and accumulated knowledge across sessions.
 
 import contextlib
 import logging
+import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -86,6 +87,56 @@ def _escape_sparql_iri(value: str) -> str:
     """
     forbidden = set('<>"{}|\\^`')
     return "".join(c for c in value if c not in forbidden)
+
+
+# Blanks every region a bare "FROM" can appear in without being the dataset
+# keyword, so the scan below sees only real syntax. Each alternative matters:
+# a literal or comment may contain the word; an IRI path may end in ".../FROM";
+# and -- less obviously -- `?from`, `oba:from` and `"x"@from` all put FROM
+# between two word boundaries, so \bFROM\b alone matched them and wrongly
+# suppressed the union default graph.
+#
+# Order matters. Literals come first so a '#' inside a string is not read as a
+# comment, and variables/prefixed names come after IRIs so `<...>` wins.
+_SPARQL_NON_KEYWORD_REGIONS = re.compile(
+    r"'''.*?'''"  # long single-quoted literal
+    r'|""".*?"""'  # long double-quoted literal
+    r"|'(?:[^'\\\n]|\\.)*'"  # short single-quoted literal
+    r'|"(?:[^"\\\n]|\\.)*"'  # short double-quoted literal
+    r"|<[^<>\"{}|^`\\]*>"  # IRI reference
+    r"|#[^\n]*"  # comment to end of line
+    r"|[?$][A-Za-z0-9_]+"  # variable: ?from, $from
+    r"|@[A-Za-z0-9-]+"  # language tag: "x"@from
+    r"|[A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]*",  # prefixed name: oba:from, _:from
+    re.DOTALL,
+)
+
+# A real dataset clause is the standalone keyword; by this point the tokens that
+# merely contain it have been blanked out.
+_SPARQL_FROM_KEYWORD = re.compile(r"\bFROM\b", re.IGNORECASE)
+
+
+def _declares_dataset(sparql_query: str) -> bool:
+    """Report whether a query selects its own RDF dataset via FROM / FROM NAMED.
+
+    Such a query has already said exactly which graphs it wants, so the caller
+    must not widen it (see :meth:`OxigraphStoreManager.query_sparql`).
+
+    This is a lexical scan, not a parse -- pyoxigraph exposes no query AST to
+    Python. It is deliberately biased towards *not* detecting a clause: a false
+    positive silently narrows a query to an empty default graph and returns
+    nothing, which is the failure this whole mechanism exists to prevent.
+
+    Args:
+        sparql_query: SPARQL query string.
+
+    Returns:
+        True if a standalone ``FROM`` keyword appears outside literals, IRIs,
+        comments, variables, language tags and prefixed names.
+    """
+    return bool(
+        _SPARQL_FROM_KEYWORD.search(_SPARQL_NON_KEYWORD_REGIONS.sub(" ", sparql_query))
+    )
 
 
 class OxigraphStoreManager:
@@ -261,6 +312,15 @@ class OxigraphStoreManager:
         """
         Execute SPARQL query.
 
+        Patterns outside a ``GRAPH`` clause are matched against the union of all
+        named graphs, so callers do not have to know which graph a schema was
+        loaded into. Use ``GRAPH ?g { ... }`` to scope to one schema or to bind
+        the source graph.
+
+        A query that selects its own dataset with ``FROM`` / ``FROM NAMED`` is
+        left alone: it has already stated which graphs it wants, and widening it
+        would leak triples across schemas (``FROM <g1>`` would also return g2).
+
         Args:
             sparql_query: SPARQL query string
             timeout_seconds: Query timeout (None for no timeout)
@@ -328,7 +388,13 @@ class OxigraphStoreManager:
 
             # SELECT queries yield QuerySolutions; narrow the query() union so the
             # iteration type-checks (other query forms are handled by sibling methods).
-            solutions = cast("QuerySolutions", self.store.query(sparql_query))
+            solutions = cast(
+                "QuerySolutions",
+                self.store.query(
+                    sparql_query,
+                    use_default_graph_as_union=not _declares_dataset(sparql_query),
+                ),
+            )
             variables = solutions.variables
             for solution in solutions:
                 binding: dict[str, Any] = {}
@@ -355,6 +421,10 @@ class OxigraphStoreManager:
         """
         Execute SPARQL ASK query.
 
+        Patterns outside a ``GRAPH`` clause are matched against the union of all
+        named graphs unless the query selects its own dataset with ``FROM`` /
+        ``FROM NAMED`` (see :meth:`query_sparql`).
+
         Args:
             sparql_query: SPARQL ASK query
 
@@ -375,7 +445,12 @@ class OxigraphStoreManager:
         try:
             # ASK queries yield a QueryBoolean (pyoxigraph >= 0.4) or a plain bool
             # (older versions); both support bool().
-            return bool(self.store.query(sparql_query))
+            return bool(
+                self.store.query(
+                    sparql_query,
+                    use_default_graph_as_union=not _declares_dataset(sparql_query),
+                )
+            )
         except Exception as e:
             logger.exception(f"SPARQL ASK query failed: {e}")
             raise
@@ -383,6 +458,10 @@ class OxigraphStoreManager:
     def query_sparql_construct(self, sparql_query: str) -> str:
         """
         Execute SPARQL CONSTRUCT query.
+
+        Patterns outside a ``GRAPH`` clause are matched against the union of all
+        named graphs unless the query selects its own dataset with ``FROM`` /
+        ``FROM NAMED`` (see :meth:`query_sparql`).
 
         Args:
             sparql_query: SPARQL CONSTRUCT query
@@ -407,7 +486,13 @@ class OxigraphStoreManager:
         try:
             # CONSTRUCT yields QueryTriples; narrow the query() union so serialize()
             # resolves to the RDF (not results) overload.
-            results = cast("QueryTriples", self.store.query(sparql_query))
+            results = cast(
+                "QueryTriples",
+                self.store.query(
+                    sparql_query,
+                    use_default_graph_as_union=not _declares_dataset(sparql_query),
+                ),
+            )
             # serialize() yields bytes (or None for an empty result), so decode to
             # satisfy the str return contract.
             serialized = results.serialize(format=RdfFormat.TURTLE)
