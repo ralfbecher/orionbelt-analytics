@@ -834,6 +834,48 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
             [i.message for i in result.issues],
         )
 
+    def test_subquery_alias_does_not_shadow_an_outer_join_anchor(self):
+        """Table aliases are scoped to the SELECT that declares them.
+
+        A single alias map over the whole tree let "FROM order_items u" inside
+        an EXISTS overwrite the outer "FROM users u", so the outer join was
+        judged against order_items instead of users -- and the fan-trap
+        warning silently disappeared.
+        """
+        base = (
+            "SELECT u.name, SUM(s.cost) FROM users u "
+            "JOIN orders o ON u.id = o.user_id "
+            "JOIN shipments s ON s.order_id = o.id GROUP BY u.name"
+        )
+        with_subquery = base.replace(
+            "GROUP BY u.name",
+            "WHERE EXISTS (SELECT 1 FROM order_items u WHERE u.order_id = o.id) "
+            "GROUP BY u.name",
+        )
+
+        baseline = self.validator.validate(base)
+        shadowed = self.validator.validate(with_subquery)
+
+        self.assertTrue(baseline.fan_trap_risk)
+        self.assertTrue(
+            shadowed.fan_trap_risk,
+            "subquery alias suppressed the outer query's fan-trap warning",
+        )
+
+    def test_outer_join_anchors_are_unaffected_by_a_subquery(self):
+        """The anchors themselves must be identical, warning aside."""
+        base = "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+        with_subquery = (
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id "
+            "WHERE EXISTS (SELECT 1 FROM order_items u WHERE u.order_id = o.id)"
+        )
+
+        baseline = self.validator.validate(base)
+        shadowed = self.validator.validate(with_subquery)
+
+        self.assertEqual(baseline.parsed_joins[0]["on_tables"], ["users", "orders"])
+        self.assertEqual(shadowed.parsed_joins[0]["on_tables"], ["users", "orders"])
+
     def test_unrelated_join_is_not_counted(self):
         """Tables with no ontology relationship cannot be judged to fan out."""
         result = self.validator.validate(

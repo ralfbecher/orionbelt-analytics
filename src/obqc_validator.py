@@ -668,53 +668,66 @@ class OBQCValidator:
 
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
-        alias_map = self._build_alias_map(parsed)
+        # Alias maps are built per SELECT. Table aliases are scoped to the
+        # query that declares them, and a subquery may reuse an outer one: a
+        # single map over the whole tree let "FROM order_items u" inside an
+        # EXISTS overwrite the outer "FROM users u", so the outer join's ON
+        # condition resolved to order_items and its fan-out was judged against
+        # the wrong table -- silently dropping a fan-trap warning.
+        for select in parsed.find_all(exp.Select):
+            alias_map = self._build_alias_map(select)
 
-        for join in parsed.find_all(exp.Join):
-            join_info: dict[str, Any] = {
-                "type": join.kind or "INNER",
-                "table": None,
-                "on_condition": None,
-                # Real table names referenced by the ON condition. Fan-trap
-                # detection needs to know which table this join attaches to,
-                # and the ON condition is the only place that says so.
-                "on_tables": [],
-            }
+            for join in select.args.get("joins") or []:
+                join_info: dict[str, Any] = {
+                    "type": join.kind or "INNER",
+                    "table": None,
+                    "on_condition": None,
+                    # Real table names referenced by the ON condition. Fan-trap
+                    # detection needs to know which table this join attaches
+                    # to, and the ON condition is the only place that says so.
+                    "on_tables": [],
+                }
 
-            # Get joined table
-            if join.this and isinstance(join.this, exp.Table):
-                join_info["table"] = join.this.name
+                # Get joined table
+                if join.this and isinstance(join.this, exp.Table):
+                    join_info["table"] = join.this.name
 
-            # Get ON condition
-            on_clause = join.args.get("on")
-            if on_clause is not None:
-                join_info["on_condition"] = on_clause.sql()
-                on_tables: list[str] = []
-                for column in on_clause.find_all(exp.Column):
-                    if not column.table:
-                        continue
-                    # Columns are qualified by alias far more often than by
-                    # table name, so resolve through the alias map.
-                    resolved = alias_map.get(column.table.lower(), column.table)
-                    if resolved not in on_tables:
-                        on_tables.append(resolved)
-                join_info["on_tables"] = on_tables
+                # Get ON condition
+                on_clause = join.args.get("on")
+                if on_clause is not None:
+                    join_info["on_condition"] = on_clause.sql()
+                    on_tables: list[str] = []
+                    for column in on_clause.find_all(exp.Column):
+                        if not column.table:
+                            continue
+                        # Columns are qualified by alias far more often than by
+                        # table name, so resolve through the alias map.
+                        resolved = alias_map.get(column.table.lower(), column.table)
+                        if resolved not in on_tables:
+                            on_tables.append(resolved)
+                    join_info["on_tables"] = on_tables
 
-            result.parsed_joins.append(join_info)
+                result.parsed_joins.append(join_info)
 
-    def _build_alias_map(self, parsed: exp.Expr) -> dict[str, str]:
-        """Map every table alias (and bare name) to its real table name.
+    def _build_alias_map(self, select: exp.Expr) -> dict[str, str]:
+        """Map one SELECT's table aliases (and bare names) to real table names.
+
+        Tables belonging to a nested subquery are excluded: their aliases live
+        in that subquery's scope and would otherwise shadow same-named ones
+        here.
 
         Args:
-            parsed: Parsed query.
+            select: The SELECT whose scope to map.
 
         Returns:
             Lower-cased alias -> table name. Bare names map to themselves so
             callers can look up unaliased references the same way.
         """
         alias_map: dict[str, str] = {}
-        for table in parsed.find_all(exp.Table):
+        for table in select.find_all(exp.Table):
             if not table.name:
+                continue
+            if table.find_ancestor(exp.Select) is not select:
                 continue
             alias_map[table.name.lower()] = table.name
             if table.alias:
