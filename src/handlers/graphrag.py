@@ -242,7 +242,6 @@ async def _auto_initialize_graphrag_background(
             # First schema — initialize from scratch
             logger.info(f"Initializing GraphRAG for schema '{schema_name}'...")
             session.graphrag_manager = GraphRAGManager(
-                embedding_model="tfidf",
                 connection_id=session.connection_id,
                 schema_name=schema_name,
             )
