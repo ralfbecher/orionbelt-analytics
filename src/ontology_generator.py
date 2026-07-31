@@ -156,6 +156,8 @@ class OntologyGenerator:
         self.quality_report: OntologyQualityReport | None = None
         self._table_lookup: dict[str, TableInfo] = {}
         self._pk_columns: dict[str, list[str]] = {}  # table -> primary key columns
+        # Suggestions the last apply_semantic_names() actually matched.
+        self._applied_semantic_names: list[dict[str, str]] = []
 
     def load_from_file(self, file_path: str) -> None:
         """Load an existing ontology from a Turtle file.
@@ -1922,10 +1924,19 @@ class OntologyGenerator:
                 - relationships: List of {original_name, suggested_name, description}
 
         Returns:
-            Updated ontology in Turtle format
+            Updated ontology in Turtle format. The subset that was actually
+            applied is available afterwards from
+            :meth:`applied_semantic_names`.
         """
         logger.info("Applying semantic name suggestions to ontology")
         changes_made = 0
+
+        # Suggestions naming something that is not in the ontology are skipped
+        # silently, so the requested list is not evidence of what happened. Record
+        # what was actually applied, for callers that must not act on a name the
+        # ontology rejected -- indexing a typo'd target into schema search would
+        # invent an element that does not exist.
+        self._applied_semantic_names = []
 
         # Apply class name suggestions
         if "classes" in name_suggestions:
@@ -1942,6 +1953,23 @@ class OntologyGenerator:
 
                 # Check if this class exists
                 if (class_uri, RDF.type, OWL.Class) in self.graph:
+                    if suggested or description:
+                        self._applied_semantic_names.append(
+                            {
+                                "original_name": original,
+                                "suggested_name": suggested or "",
+                                "description": description or "",
+                                # Raw SQL name from the ontology, not the
+                                # caller's string: suggestions are generated
+                                # from the ontology and so carry _clean_name()
+                                # output ("order_items"), while the schema --
+                                # and anything keyed by it -- uses the original
+                                # ("order-items").
+                                "table_name": self._raw_table_name(class_uri),
+                                "column_name": "",
+                                "related_table": "",
+                            }
+                        )
                     if suggested:
                         # Update the label
                         self.graph.remove((class_uri, RDFS.label, None))
@@ -1992,6 +2020,7 @@ class OntologyGenerator:
                             "suggested": suggested,
                             "description": description,
                             "table_name": table_name,
+                            "original_name": original,
                         }
                     )
 
@@ -2036,6 +2065,21 @@ class OntologyGenerator:
 
             # Second pass: apply all changes
             for change in proposed_changes:
+                if change["suggested"] or change["description"]:
+                    self._applied_semantic_names.append(
+                        {
+                            "original_name": change["original_name"],
+                            # The disambiguated label, not the requested one --
+                            # this is what the ontology now says.
+                            "suggested_name": change["suggested"] or "",
+                            "description": change["description"] or "",
+                            # Raw SQL names from the ontology rather than the
+                            # caller's, which carry _clean_name() output.
+                            "table_name": self._raw_table_name(change["prop_uri"]),
+                            "column_name": self._raw_column_name(change["prop_uri"]),
+                            "related_table": "",
+                        }
+                    )
                 if change["suggested"]:
                     self.graph.remove((change["prop_uri"], RDFS.label, None))
                     self.graph.add(
@@ -2075,6 +2119,21 @@ class OntologyGenerator:
 
                 # Check if this relationship exists
                 if (rel_uri, RDF.type, OWL.ObjectProperty) in self.graph:
+                    if suggested or description:
+                        # A relationship is identified by the pair of tables it
+                        # joins, taken from its domain and range.
+                        domain = self.graph.value(rel_uri, RDFS.domain)
+                        range_ = self.graph.value(rel_uri, RDFS.range)
+                        self._applied_semantic_names.append(
+                            {
+                                "original_name": original,
+                                "suggested_name": suggested or "",
+                                "description": description or "",
+                                "table_name": self._raw_table_name(domain),
+                                "column_name": "",
+                                "related_table": self._raw_table_name(range_),
+                            }
+                        )
                     if suggested:
                         # Update the label
                         self.graph.remove((rel_uri, RDFS.label, None))
@@ -2093,3 +2152,60 @@ class OntologyGenerator:
         logger.info(f"Applied {changes_made} semantic name changes to ontology")
 
         return self.graph.serialize(format="turtle")
+
+    def _raw_table_name(self, uri: Any) -> str:
+        """Return the original SQL table name a URI is annotated with.
+
+        Class and property URIs are built from :meth:`_clean_name`, which
+        rewrites characters that are illegal in a URI local name -- so the URI
+        cannot be turned back into the table name it came from. ``oba:tableName``
+        preserves the original, and is the only reliable way back to the schema.
+
+        Args:
+            uri: Class or property URI, or None.
+
+        Returns:
+            The annotated table name, or "" when the URI is None or carries no
+            annotation (an ontology loaded from elsewhere may have none).
+        """
+        if uri is None:
+            return ""
+        value = self.graph.value(uri, self.oba_ns.tableName)
+        return str(value) if value is not None else ""
+
+    def _raw_column_name(self, uri: Any) -> str:
+        """Return the original SQL column name a property URI is annotated with.
+
+        Args:
+            uri: Property URI, or None.
+
+        Returns:
+            The annotated column name, or "" when absent (object properties
+            representing relationships carry no column).
+        """
+        if uri is None:
+            return ""
+        value = self.graph.value(uri, self.oba_ns.columnName)
+        return str(value) if value is not None else ""
+
+    def applied_semantic_names(self) -> list[dict[str, str]]:
+        """Return the suggestions the last apply actually matched.
+
+        :meth:`apply_semantic_names` skips anything naming a class, property or
+        relationship the ontology does not contain, so the requested list
+        overstates what happened. Callers that propagate names elsewhere must
+        use this instead, or they will act on names the ontology rejected.
+
+        Returns:
+            One dict per applied suggestion with ``original_name``,
+            ``suggested_name``, ``description``, and the raw SQL identity taken
+            from the ontology's own annotations: ``table_name``,
+            ``column_name`` and ``related_table`` (the far side of a
+            relationship). Each is "" where it does not apply or the ontology
+            carries no annotation. Empty list if apply has not run.
+
+            The raw names matter because URIs are built with
+            :meth:`_clean_name`, so a suggestion's ``original_name`` is the
+            cleaned form and does not identify the table in the database.
+        """
+        return list(self._applied_semantic_names)

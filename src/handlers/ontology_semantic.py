@@ -21,6 +21,78 @@ from .ontology_generation import _build_minimal_graph_summary
 logger = logging.getLogger(__name__)
 
 
+def semantic_context_entries(
+    applied_names: list[Any] | None,
+) -> list[tuple[str, str]]:
+    """Flatten applied name suggestions into (target, context) pairs.
+
+    The suggestions carry exactly what schema search lacks: the business word
+    for an abbreviated identifier, and a sentence saying what it means. Applied
+    to the ontology alone they never reach GraphRAG, whose vectors are built
+    from raw schema metadata -- so a user asking in the enriched vocabulary
+    still matches nothing.
+
+    Takes what the generator *applied*, not what the caller requested. Those
+    differ: apply_semantic_names skips any suggestion naming something the
+    ontology does not contain, while the index accepts any target. Feeding it
+    the request would let a typo -- ``table_name: "sale"`` for a column in
+    ``sales`` -- create a searchable entry for a table that does not exist, and
+    query generation would then be steered toward it.
+
+    Targets are built from the raw SQL names the generator read back from the
+    ontology, never from the suggestion's own identifiers. Suggestions are
+    generated *from* the ontology, so they carry URI-safe names: a table called
+    ``order-items`` appears as ``order_items``, which matches nothing in an
+    index keyed by the real schema. An entry whose raw identity is unknown is
+    skipped rather than guessed, for the same reason unmatched suggestions are.
+
+    Args:
+        applied_names: Output of
+            :meth:`OntologyGenerator.applied_semantic_names` -- dicts with
+            ``suggested_name``, ``description`` and the raw ``table_name``,
+            ``column_name`` and ``related_table``. Loosely typed and
+            defensively parsed: the values originate from an LLM payload, so a
+            caller may hand over entries whose fields are not the strings the
+            annotation promises.
+
+    Returns:
+        (target, context) pairs, where target is ``table``, ``table.column`` or
+        ``from__to__to`` -- matching how GraphRAG identifies elements. Entries
+        carrying no vocabulary, or no resolvable target, are skipped.
+    """
+    entries: list[tuple[str, str]] = []
+
+    for suggestion in applied_names or []:
+        if not isinstance(suggestion, dict):
+            continue
+
+        suggested = str(suggestion.get("suggested_name") or "").strip()
+        description = str(suggestion.get("description") or "").strip()
+        if not suggested and not description:
+            continue
+
+        table_name = str(suggestion.get("table_name") or "").strip()
+        column_name = str(suggestion.get("column_name") or "").strip()
+        related_table = str(suggestion.get("related_table") or "").strip()
+
+        # Mirrors the element ids GraphRAG builds from the schema.
+        if table_name and column_name:
+            target = f"{table_name}.{column_name}"
+        elif table_name and related_table:
+            target = f"{table_name}__to__{related_table}"
+        elif table_name:
+            target = table_name
+        else:
+            # No annotation to anchor it to a real element -- inventing one is
+            # exactly the failure this function exists to avoid.
+            continue
+
+        context = ". ".join(part for part in (suggested, description) if part)
+        entries.append((target, context))
+
+    return entries
+
+
 async def _maybe_sample_rename_suggestions(
     ctx: Context,
     cryptic_classes: list,
@@ -552,10 +624,44 @@ async def apply_semantic_names(
 
         await ctx.info(f"Applied {total_updated} semantic name changes to ontology")
 
+        # Mirror the new vocabulary into GraphRAG. Without this the enrichment
+        # is invisible to search: those vectors come from raw schema metadata,
+        # so a user asking in the business terms just applied still matches
+        # nothing. Failures here must not fail the tool -- the ontology write
+        # already succeeded, and search quality is the lesser concern.
+        indexed_count = 0
+        index_error: str | None = None
+        if session.graphrag_initialized and session.graphrag_manager is not None:
+            # Only what the generator matched -- see semantic_context_entries.
+            applied_names = generator.applied_semantic_names()
+            try:
+                for target, context_text in semantic_context_entries(applied_names):
+                    session.graphrag_manager.add_semantic_context(
+                        target=target, context=context_text, source="ontology"
+                    )
+                    indexed_count += 1
+            except Exception as e:
+                index_error = str(e)
+                logger.warning(f"Indexing semantic names into GraphRAG failed: {e}")
+
         result = "# Semantic Names Applied Successfully\n\n"
         result += f"- Classes updated: {classes_updated}\n"
         result += f"- Properties updated: {properties_updated}\n"
         result += f"- Relationships updated: {relationships_updated}\n"
+        # Reported independently: an error after some successes is a *partial*
+        # index, and collapsing that into the count alone would present a
+        # half-finished job as a finished one.
+        if indexed_count:
+            result += (
+                f"- Indexed into GraphRAG: {indexed_count} "
+                "(searchable via graphrag_search)\n"
+            )
+        if index_error:
+            result += (
+                f"- GraphRAG indexing failed after {indexed_count} "
+                f"entr{'y' if indexed_count == 1 else 'ies'}: {index_error} "
+                "(ontology was updated successfully; re-run to index the rest)\n"
+            )
         if new_ontology_filename:
             result += f"\n## ontology_file: {new_ontology_filename}\n"
             result += f"\nThe ontology file '{new_ontology_filename}' has been saved and is now the active ontology in session context.\n"
