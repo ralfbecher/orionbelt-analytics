@@ -582,6 +582,61 @@ class TestOBQCSelectAliases(unittest.TestCase):
 
         self.assertTrue(result.is_valid, [i.message for i in result.issues])
 
+    def test_group_by_name_that_is_also_a_column_resolves_to_the_column(self):
+        """An ambiguous GROUP BY name is the input column, not the alias.
+
+        "SELECT total AS user_id ... GROUP BY user_id" groups by orders.user_id
+        and leaves total ungrouped. Treating the name as the alias marked total
+        as grouped and passed a query the database rejects. Verified against
+        DuckDB, which fails it with "column total must appear in the GROUP BY
+        clause", and documented for PostgreSQL.
+        """
+        for dialect in ("postgresql", "duckdb"):
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT total AS user_id, SUM(id) FROM orders GROUP BY user_id",
+                    dialect=dialect,
+                )
+
+                self.assertFalse(result.is_valid)
+
+    def test_unambiguous_group_by_alias_still_resolves(self):
+        """uid is not a column of any queried table, so it is the alias."""
+        result = self.validator.validate(
+            "SELECT user_id AS uid, SUM(total) FROM orders GROUP BY uid"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_alias_inside_an_order_by_expression_is_rejected_on_postgres(self):
+        """PostgreSQL takes an output name as a sort key only, not inside an
+        expression: ORDER BY t + 1 is evaluated over input columns."""
+        result = self.validator.validate(
+            "SELECT total AS t FROM orders ORDER BY t + 1", dialect="postgresql"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_alias_inside_an_order_by_expression_is_allowed_on_duckdb(self):
+        """DuckDB accepts it -- verified against duckdb 1.5.5."""
+        result = self.validator.validate(
+            "SELECT total AS t FROM orders ORDER BY t + 1", dialect="duckdb"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_standalone_sort_key_still_resolves_on_postgres(self):
+        """The restriction is about expressions, not about sort modifiers."""
+        for query in (
+            "SELECT total AS t FROM orders ORDER BY t",
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue DESC",
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue DESC NULLS LAST",
+        ):
+            with self.subTest(query=query):
+                result = self.validator.validate(query, dialect="postgresql")
+
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
     def test_subquery_alias_does_not_excuse_the_outer_query(self):
         """Alias visibility is per SELECT scope.
 

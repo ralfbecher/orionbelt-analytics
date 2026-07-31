@@ -110,6 +110,15 @@ ALIAS_VISIBLE_CLAUSES = {
     "duckdb": ("order", "group", "having", "qualify", "where"),
 }
 
+# Dialects where an output name is only recognised as a whole sort or group
+# key, never inside a larger expression. PostgreSQL's ORDER BY documentation
+# is explicit that an output name may be used as a sort key but that anything
+# more than a bare name is evaluated as an expression over input columns, so
+# "ORDER BY t + 1" fails there while DuckDB -- checked against 1.5.5 --
+# accepts it. Listed rather than defaulted for the usual reason: forbidding it
+# where it is legal would block a query the database would have run.
+ALIAS_STANDALONE_ONLY = frozenset({"postgresql"})
+
 
 @dataclass
 class OBQCIssue:
@@ -594,6 +603,8 @@ class OBQCValidator:
             if not aliases:
                 continue
 
+            standalone_only = dialect.lower() in ALIAS_STANDALONE_ONLY
+
             for clause in clauses:
                 node = select.args.get(clause)
                 if node is None:
@@ -607,10 +618,53 @@ class OBQCValidator:
                     # are resolved on its own iteration, not this one.
                     if column.find_ancestor(exp.Select) is not select:
                         continue
+                    if standalone_only and not self._is_standalone_key(column, node):
+                        continue
                     alias_refs.add(id(column))
                     result.select_aliases.add(column.name.lower())
 
         return alias_refs
+
+    def _is_real_column(self, name: str, result: OBQCResult) -> bool:
+        """Whether *name* is a column of some table the query references.
+
+        Args:
+            name: Bare or qualified column name, lower-cased.
+            result: Result carrying the query's tables.
+
+        Returns:
+            True if any queried table declares the column.
+        """
+        if self._schema_cache is None:
+            return False
+
+        bare = name.split(".")[-1]
+        for table_name in result.parsed_tables:
+            table = self._schema_cache.tables.get(table_name.lower())
+            if table and bare in table.columns:
+                return True
+        return False
+
+    def _is_standalone_key(self, column: exp.Column, clause_node: exp.Expr) -> bool:
+        """Whether *column* is a whole sort/group key rather than part of one.
+
+        ``ORDER BY t`` refers to the output name; ``ORDER BY t + 1`` is an
+        expression, which strict dialects evaluate over input columns only.
+
+        Args:
+            column: Candidate alias reference.
+            clause_node: The ORDER BY / GROUP BY node containing it.
+
+        Returns:
+            True if the column is one of the clause's top-level keys.
+        """
+        for key in clause_node.expressions:
+            # ORDER BY keys are wrapped in Ordered (carrying ASC/DESC etc.);
+            # GROUP BY keys are the expressions themselves.
+            target = key.this if isinstance(key, exp.Ordered) else key
+            if target is column:
+                return True
+        return False
 
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
@@ -973,8 +1027,16 @@ class OBQCValidator:
 
                         # Record the underlying column too, so grouping by an
                         # alias satisfies the check on its source column.
+                        #
+                        # Only when the name is not itself a real column: a name
+                        # that is both an input column and an output alias
+                        # resolves to the input column, so "SELECT total AS
+                        # user_id ... GROUP BY user_id" groups by orders.user_id
+                        # and leaves total ungrouped. Verified against DuckDB,
+                        # which rejects exactly that query, and documented for
+                        # PostgreSQL.
                         source_col = alias_to_column.get(gb_col_name)
-                        if source_col:
+                        if source_col and not self._is_real_column(gb_col_name, result):
                             group_by_cols.add(source_col)
                             group_by_cols.add(source_col.split(".")[-1])
 
