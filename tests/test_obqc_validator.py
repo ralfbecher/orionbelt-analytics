@@ -466,6 +466,95 @@ class TestOBQCCatalogQueries(unittest.TestCase):
         self.assertFalse(result.is_valid)
 
 
+class TestOBQCSelectAliases(unittest.TestCase):
+    """SELECT aliases referenced by later clauses are not table columns.
+
+    ORDER BY / GROUP BY / HAVING are evaluated after the select list and can
+    see its output names. The column rule knew only about table columns, so
+    "ORDER BY revenue" over "SUM(total) AS revenue" was reported missing --
+    an error, which blocks the query.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_order_by_aggregate_alias(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue DESC"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_order_by_plain_column_alias(self):
+        result = self.validator.validate(
+            "SELECT name AS customer FROM users ORDER BY customer"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_group_by_and_order_by_alias(self):
+        result = self.validator.validate(
+            "SELECT COUNT(*) AS n FROM orders GROUP BY user_id ORDER BY n DESC"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_having_alias(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders "
+            "GROUP BY user_id HAVING revenue > 10"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_alias_is_recorded(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue"
+        )
+
+        self.assertIn("revenue", result.select_aliases)
+
+    def test_alias_matching_is_case_insensitive(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS Revenue FROM orders ORDER BY REVENUE"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_alias_in_where_still_errors(self):
+        """WHERE is evaluated before the select list, so this is invalid SQL
+        and must keep failing."""
+        result = self.validator.validate("SELECT total AS t FROM orders WHERE t > 5")
+
+        self.assertFalse(result.is_valid)
+
+    def test_unknown_order_by_column_still_errors(self):
+        """The exemption covers declared aliases, not any ORDER BY name."""
+        result = self.validator.validate(
+            "SELECT total FROM orders ORDER BY nonexistent_col"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_qualified_reference_to_an_alias_still_errors(self):
+        """orders.t names a table column, and there is none called t."""
+        result = self.validator.validate(
+            "SELECT total AS t FROM orders ORDER BY orders.t"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_alias_does_not_leak_into_other_column_checks(self):
+        """Declaring an alias must not excuse a genuinely bad column."""
+        result = self.validator.validate(
+            "SELECT total AS t, bogus_col FROM orders ORDER BY t"
+        )
+
+        self.assertFalse(result.is_valid)
+
+
 class TestOBQCFanTrapDetection(unittest.TestCase):
     """Test suite specifically for fan-trap detection."""
 

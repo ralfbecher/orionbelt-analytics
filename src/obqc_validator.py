@@ -97,6 +97,9 @@ class OBQCResult:
     # ontology, which describes user data, so ontology-existence rules skip them.
     catalog_tables: set[str] = field(default_factory=set)
     parsed_columns: list[str] = field(default_factory=list)
+    # Lower-cased SELECT aliases referenced from ORDER BY / GROUP BY / HAVING.
+    # They resolve to select-list output, not to any table's column.
+    select_aliases: set[str] = field(default_factory=set)
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
     has_aggregation: bool = False
     has_group_by: bool = False
@@ -506,6 +509,39 @@ class OBQCValidator:
             if col_ref and col_ref not in result.parsed_columns:
                 result.parsed_columns.append(col_ref)
 
+        self._extract_select_aliases(parsed, result)
+
+    def _extract_select_aliases(self, parsed: exp.Expr, result: OBQCResult) -> None:
+        """Record SELECT aliases that are legally referenced by later clauses.
+
+        ``SELECT SUM(total) AS revenue FROM orders ORDER BY revenue`` is valid
+        SQL, but ``revenue`` is not a column of any table, so the column rule
+        reported it missing and -- being an error -- blocked the query.
+
+        Only aliases actually used in ORDER BY, GROUP BY or HAVING are
+        recorded. Those are the clauses evaluated after the select list, so
+        they can see its output names; WHERE cannot, and an alias used there is
+        genuinely invalid SQL that should keep failing.
+        """
+        for select in parsed.find_all(exp.Select):
+            aliases = {
+                projection.alias.lower()
+                for projection in select.expressions
+                if isinstance(projection, exp.Alias) and projection.alias
+            }
+            if not aliases:
+                continue
+
+            for clause in ("order", "group", "having", "qualify"):
+                node = select.args.get(clause)
+                if node is None:
+                    continue
+                for column in node.find_all(exp.Column):
+                    # A qualified reference names a real table, so it is not an
+                    # alias use and stays subject to the normal column rule.
+                    if not column.table and column.name.lower() in aliases:
+                        result.select_aliases.add(column.name.lower())
+
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
         for join in parsed.find_all(exp.Join):
@@ -589,6 +625,12 @@ class OBQCValidator:
             else:
                 # Unqualified column - check for ambiguity
                 col_key = col_ref.lower()
+
+                # An alias resolves to the select list, not to a table, so it
+                # is neither missing nor ambiguous.
+                if col_key in result.select_aliases:
+                    continue
+
                 found_in_tables: list[str] = []
 
                 # Only check tables that are actually in the query
