@@ -414,6 +414,49 @@ class TestOBQCCatalogQueries(unittest.TestCase):
 
         self.assertFalse(result.is_valid)
 
+    def test_mysql_schema_is_not_a_catalog(self):
+        """mysql.* is the server's own data, not metadata.
+
+        mysql.user holds account names and password hashes; exempting the
+        schema as a "catalog" would have waved those through. src/security.py
+        blocks them outright, and this keeps the ontology rule applying too.
+        """
+        result = self.validator.validate(
+            "SELECT User, authentication_string FROM mysql.user", dialect="mysql"
+        )
+
+        self.assertFalse(result.is_valid)
+        self.assertNotIn("user", result.catalog_tables)
+
+    def test_shadowed_name_is_not_exempted(self):
+        """A user table sharing a catalog table's name keeps being checked.
+
+        Membership is tracked by bare name, so without this an unknown table
+        called "tables" would be hidden by information_schema.tables appearing
+        in the same query.
+        """
+        result = self.validator.validate(
+            "SELECT * FROM tables JOIN information_schema.tables t2 ON 1 = 1"
+        )
+
+        self.assertFalse(result.is_valid)
+        self.assertNotIn("tables", result.catalog_tables)
+
+    def test_unqualified_column_allowed_when_a_catalog_table_is_present(self):
+        """A name that matches no user table may belong to the catalog one."""
+        result = self.validator.validate(
+            "SELECT table_name FROM information_schema.tables "
+            "JOIN users ON users.name = table_name"
+        )
+
+        column_errors = [
+            i
+            for i in result.issues
+            if i.issue_type == OBQCIssueType.COLUMN_NOT_FOUND
+            and i.severity == OBQCSeverity.ERROR
+        ]
+        self.assertEqual(column_errors, [])
+
     def test_ontology_table_errors_are_unaffected_by_a_catalog_join(self):
         """Mixing the two must not silence checks on the real table."""
         result = self.validator.validate(

@@ -36,6 +36,43 @@ class TestSQLInjectionValidator(unittest.TestCase):
             self.assertTrue(result["is_safe"], f"Safe query marked as unsafe: {query}")
             self.assertEqual(result["risk_level"], "low")
 
+    def test_credential_and_grant_tables_are_blocked(self) -> None:
+        """Privilege-bearing tables must be refused by name.
+
+        These were never listed here, so they were rejected only as a side
+        effect of OBQC requiring every table to appear in the ontology -- which
+        is a coverage rule, not a security boundary, and stopped applying once
+        catalog schemas were exempted from it.
+        """
+        blocked = [
+            "SELECT User, authentication_string FROM mysql.user",
+            "SELECT * FROM mysql.db",
+            "SELECT * FROM mysql.tables_priv",
+            "SELECT * FROM snowflake.account_usage.grants_to_users",
+            "SELECT * FROM snowflake.account_usage.login_history",
+            # Pre-existing entries, kept covered.
+            "SELECT * FROM information_schema.user_privileges",
+            "SELECT * FROM pg_catalog.pg_authid",
+        ]
+
+        for query in blocked:
+            with self.subTest(query=query):
+                result = self.validator.validate_query(query)
+                self.assertFalse(result["is_safe"], f"not blocked: {query}")
+
+    def test_ordinary_catalog_queries_remain_allowed(self) -> None:
+        """The block is targeted; general metadata reads stay available."""
+        allowed = [
+            "SELECT table_name FROM information_schema.tables",
+            "SELECT column_name FROM information_schema.columns",
+            "SELECT * FROM pg_catalog.pg_class",
+        ]
+
+        for query in allowed:
+            with self.subTest(query=query):
+                result = self.validator.validate_query(query)
+                self.assertTrue(result["is_safe"], f"wrongly blocked: {query}")
+
     def test_sql_injection_attempts(self) -> None:
         """Test that SQL injection attempts are blocked."""
         malicious_queries = [

@@ -170,6 +170,15 @@ class SQLInjectionValidator:
         # System tables that shouldn't be accessed directly in normal queries
         r"information_schema\.(?:user_privileges|schema_privileges|table_privileges)",
         r"pg_catalog\.pg_authid|pg_catalog\.pg_user_mapping",
+        # MySQL's "mysql" schema is the server's own data, not a metadata
+        # catalog: mysql.user holds account names and password hashes, and
+        # mysql.db / mysql.tables_priv / mysql.procs_priv hold grants. These
+        # were never blocked here, so they relied on the ontology check
+        # incidentally rejecting them -- which is not a security boundary.
+        r"mysql\.(?:user|db|global_priv|tables_priv|columns_priv|procs_priv|proxies_priv)",
+        # Snowflake's grant and login history views carry the same class of
+        # privilege metadata as the ANSI *_privileges views above.
+        r"snowflake\.account_usage\.(?:grants_to_users|grants_to_roles|login_history|users)",
         # Dangerous UNION queries attempting to extract sensitive data
         r"UNION\s+(?:ALL\s+)?SELECT\s+.*(?:password|pwd|secret|token|key|admin)",
     ]

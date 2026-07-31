@@ -57,15 +57,20 @@ CATALOG_SCHEMAS = frozenset(
         "information_schema",  # ANSI: PostgreSQL, MySQL, Snowflake, Databricks, ...
         "pg_catalog",  # PostgreSQL
         "pg_toast",  # PostgreSQL
-        "performance_schema",  # MySQL
-        "mysql",  # MySQL internals
-        "sys",  # MySQL / SQL Server
+        "performance_schema",  # MySQL runtime statistics
+        "sys",  # Dremio metadata views
         "system",  # ClickHouse
         "snowflake",  # Snowflake (snowflake.account_usage)
         "sqlite_schema",  # SQLite
         "sqlite_master",  # SQLite (legacy name)
     }
 )
+
+# Deliberately NOT listed above: MySQL's "mysql" schema. It is not a metadata
+# catalog but the server's own data -- mysql.user holds account names and
+# password hashes, mysql.db and mysql.tables_priv hold grants. Exempting it
+# would have let those through on the grounds that they are "catalog tables",
+# which they are not. src/security.py blocks them outright.
 
 
 @dataclass
@@ -463,6 +468,12 @@ class OBQCValidator:
 
     def _extract_tables(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract all table references, noting which come from a catalog schema."""
+        # Bare names that also appear as a non-catalog reference. Catalog
+        # membership is tracked by bare name -- sqlglot gives no other handle --
+        # so a user table sharing a catalog table's name would otherwise be
+        # exempted along with it, hiding an unknown table called e.g. "tables".
+        shadowed: set[str] = set()
+
         for table in parsed.find_all(exp.Table):
             table_name = table.name
             if not table_name:
@@ -479,6 +490,12 @@ class OBQCValidator:
             qualifiers = {q.lower() for q in (table.db, table.catalog) if q}
             if qualifiers & CATALOG_SCHEMAS:
                 result.catalog_tables.add(table_name)
+            else:
+                shadowed.add(table_name)
+
+        # A name used both ways is ambiguous, and the ontology rule is the only
+        # thing that would catch the non-catalog use, so it keeps applying.
+        result.catalog_tables -= shadowed
 
     def _extract_columns(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract all column references from parsed query."""
@@ -584,13 +601,23 @@ class OBQCValidator:
                         found_in_tables.append(table_name)
 
                 # Columns of a catalog table cannot be resolved -- the ontology
-                # does not describe them -- so an unqualified name is only
-                # judged missing when some non-catalog table could have held it.
+                # does not describe them. If the query touches one at all, an
+                # unqualified name that matches no user table might still be
+                # its column, so there is nothing to report. Only when every
+                # table in the query is describable can a missing name be
+                # called missing.
                 describable_tables = [
                     t for t in result.parsed_tables if t not in result.catalog_tables
                 ]
+                all_tables_describable = len(describable_tables) == len(
+                    result.parsed_tables
+                )
 
-                if len(found_in_tables) == 0 and len(describable_tables) > 0:
+                if (
+                    len(found_in_tables) == 0
+                    and len(describable_tables) > 0
+                    and all_tables_describable
+                ):
                     result.issues.append(
                         OBQCIssue(
                             issue_type=OBQCIssueType.COLUMN_NOT_FOUND,
