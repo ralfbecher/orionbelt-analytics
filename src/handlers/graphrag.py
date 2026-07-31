@@ -524,7 +524,13 @@ async def graphrag_add_semantic_context(
             target=target, context=context
         )
 
-        await ctx.info(f"Indexed semantic context for {target}")
+        if result.get("searchable"):
+            await ctx.info(f"Indexed semantic context for {target}")
+        else:
+            await ctx.info(
+                f"Stored semantic context for {target}, but it is not "
+                "searchable under the current embedding backend"
+            )
 
         return {
             "success": True,

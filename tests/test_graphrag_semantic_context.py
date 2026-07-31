@@ -147,6 +147,43 @@ class TestIndexing:
         assert "sales salesamount" in stored.description
         assert "Profit margin driver." in stored.description
 
+    def test_second_call_replaces_the_previous_context(self, manager):
+        """Revision must actually take effect.
+
+        Both stores keep the *first* write for an id -- ChromaDB ignores the
+        second add, the JSON store appends a duplicate whose lookups still
+        return the stale entry -- so a revised context reported success while
+        the superseded one kept answering.
+        """
+        manager.add_semantic_context("sales.salesamount", "FIRST version")
+        result = manager.add_semantic_context("sales.salesamount", "SECOND version")
+
+        assert result["replaced_existing"] is True
+
+        matching = [
+            e
+            for e in manager.vector_store.elements
+            if e.element_id == "semantic_context:sales.salesamount"
+        ]
+        assert len(matching) == 1, "stale duplicate left in the index"
+        assert matching[0].metadata["context"] == "SECOND version"
+
+    def test_first_call_reports_no_replacement(self, manager):
+        result = manager.add_semantic_context("sales.unitcost", "Cost of goods sold.")
+
+        assert result["replaced_existing"] is False
+
+    def test_tfidf_reports_the_context_as_unsearchable(self, manager):
+        """TF-IDF fixes its vocabulary at indexing time, so added words never
+        match. Storing it silently would imply the concept is now findable."""
+        result = manager.add_semantic_context(
+            "sales.salesamount", "Revenue and profit margin metric."
+        )
+
+        assert result["searchable"] is False
+        assert "tfidf" in result["warning"]
+        assert "minilm" in result["warning"]
+
     def test_whitespace_is_trimmed(self, manager):
         result = manager.add_semantic_context(
             "  sales.unitcost  ", "  Cost of goods sold.  "
@@ -198,6 +235,36 @@ class TestSearchReachability:
 
         assert after[0]["element"]["id"] == "semantic_context:sales.salesamount"
         assert after[0]["similarity_score"] > best_schema_score * 1.5
+
+    def test_minilm_reports_the_context_as_searchable(self, semantic_manager):
+        result = semantic_manager.add_semantic_context(
+            "sales.salesamount", "Profit margin driver."
+        )
+
+        assert result["searchable"] is True
+        assert "warning" not in result
+
+    def test_revised_context_is_what_search_returns(self, semantic_manager):
+        """The stale entry must not keep answering after a revision."""
+        semantic_manager.add_semantic_context(
+            "sales.salesamount", "Counts warehouse pallets shipped."
+        )
+        semantic_manager.add_semantic_context(
+            "sales.salesamount",
+            "Revenue per line item. Profit margin is salesamount minus unitcost.",
+        )
+
+        # top_k must exceed the element count, or a stale duplicate can simply
+        # fall outside the window and the test passes without the fix.
+        results = semantic_manager.search_schema("profit margin", top_k=50)
+        contexts = [
+            r["element"]["metadata"]["context"]
+            for r in results
+            if r["element"]["type"] == "semantic_context"
+        ]
+
+        assert len(contexts) == 1
+        assert "Profit margin" in contexts[0]
 
     def test_context_can_be_filtered_out(self, semantic_manager):
         semantic_manager.add_semantic_context(

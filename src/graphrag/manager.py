@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .community_detector import CommunityDetector
-from .embedder import SchemaEmbedder
+from .embedder import MODEL_TFIDF, SchemaEmbedder
 from .retriever import GraphRetriever
 
 if TYPE_CHECKING:
@@ -244,6 +244,15 @@ class GraphRAGManager:
         discard derived vectors). Treat it as session enrichment, not durable
         knowledge.
 
+        Calling this again for the same target replaces the previous context
+        rather than adding a second entry, so it can be revised.
+
+        Under the ``tfidf`` backend the context is stored but is effectively
+        unsearchable: that vectorizer's vocabulary is fixed when the schema is
+        indexed, so words the context introduces -- exactly the ones worth
+        adding -- are out of vocabulary and score 0.0. The returned
+        ``searchable`` flag reports this so callers are not misled.
+
         Args:
             target: Schema element the context describes, as ``table`` or
                 ``table.column``. Recorded in metadata so results can be traced
@@ -253,7 +262,9 @@ class GraphRAGManager:
             source: Where the context came from, for provenance in results.
 
         Returns:
-            Summary of what was indexed: element id, target and character count.
+            Summary of what was indexed: element id, target, character count,
+            whether it replaced existing context, whether it is searchable, and
+            a warning when it is not.
 
         Raises:
             RuntimeError: If GraphRAG has not been initialized.
@@ -277,7 +288,13 @@ class GraphRAGManager:
         embedding = self.embedder._embed_text(description)
 
         element_id = f"semantic_context:{target}"
-        self.vector_store.add_element(
+        replaced = self.vector_store.get_by_id(element_id) is not None
+
+        # upsert, not add: both stores keep the *first* write for an id -- the
+        # ChromaDB collection ignores the second add and the JSON store appends
+        # a duplicate whose lookups still return the stale entry -- so a revised
+        # context would report success while the old one kept answering.
+        self.vector_store.upsert_element(
             element_type="semantic_context",
             element_id=element_id,
             name=target,
@@ -291,12 +308,33 @@ class GraphRAGManager:
         )
         self.vector_store.build_index()
 
-        logger.info(f"Indexed semantic context for '{target}' ({len(context)} chars)")
-        return {
+        # TF-IDF fits its vocabulary on the schema corpus and never refits, so
+        # the vocabulary this context introduces cannot be matched. Storing it
+        # is harmless and keeps the record, but saying nothing would leave the
+        # caller believing the concept is now findable.
+        searchable = self.embedder.embedding_model != MODEL_TFIDF
+        result: dict[str, Any] = {
             "element_id": element_id,
             "target": target,
             "characters": len(context),
+            "replaced_existing": replaced,
+            "searchable": searchable,
         }
+        if not searchable:
+            warning = (
+                "Stored but not searchable: the 'tfidf' backend fixes its "
+                "vocabulary when the schema is indexed, so words this context "
+                "introduces score 0.0. Set GRAPHRAG_EMBEDDING_MODEL=minilm and "
+                "re-run discover_schema() to make enrichment effective."
+            )
+            result["warning"] = warning
+            logger.warning(f"Semantic context for '{target}': {warning}")
+        else:
+            logger.info(
+                f"Indexed semantic context for '{target}' ({len(context)} chars)"
+            )
+
+        return result
 
     def find_relevant_tables(
         self,
