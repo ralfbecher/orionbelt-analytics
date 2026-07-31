@@ -666,7 +666,9 @@ async def graphrag_search(
     ctx: Context,
     query: _QueryText | None = None,
     top_k: int = 5,
-    element_type: Literal["table", "column", "relationship"] | None = None,
+    element_type: (
+        Literal["table", "column", "relationship", "semantic_context"] | None
+    ) = None,
     overview: bool = False,
 ) -> dict[str, Any]:
     """Search schema using natural language via GraphRAG, or get a schema overview.
@@ -674,10 +676,15 @@ async def graphrag_search(
     GraphRAG is auto-initialized by discover_schema. Pass overview=True to get
     schema statistics and community clustering instead of search results.
 
+    Matching is semantic, but it can only match what the schema says about
+    itself. If a concept lives in business vocabulary the column names do not
+    use ("profit", "churn"), index it first with add_semantic_context.
+
     Args:
         query: Natural language search query (required unless overview=True)
         top_k: Number of results to return
-        element_type: Filter by type ("table", "column", "relationship", or None)
+        element_type: Filter by type ("table", "column", "relationship",
+            "semantic_context", or None)
         overview: If True, return schema statistics and communities instead of search
 
     Returns:
@@ -695,6 +702,59 @@ async def graphrag_search(
         query,
         top_k,
         element_type,
+        services=_services(),
+    )
+
+
+@mcp.tool()
+async def add_semantic_context(
+    ctx: Context,
+    target: _Identifier,
+    context: _QueryText,
+) -> dict[str, Any]:
+    """Teach GraphRAG what a table or column means in business terms.
+
+    Schema search can only match vocabulary the schema itself contains, which
+    is usually abbreviations - salesamount, unitcost, returnquantity. Questions
+    about "profit", "margin" or "churn" therefore find nothing, because no
+    column name carries those words. Use this to supply the missing vocabulary
+    so later graphrag_search calls can reach the right elements.
+
+    Write what an analyst would need to know: what the element measures, the
+    words users would search for it with, and any formula worth surfacing.
+
+    The context is added to the semantic index as a separate element. It does
+    NOT modify the schema, the ontology, or the RDF store, so rerunning
+    discover_schema cannot overwrite it - but it is discarded if the index is
+    rebuilt (for example after changing GRAPHRAG_EMBEDDING_MODEL). Treat it as
+    session enrichment, not durable knowledge; use add_rdf_knowledge for facts
+    that must persist.
+
+    Calling this again for the same target REPLACES the previous context, so
+    it can be revised freely.
+
+    Check the returned "searchable" flag. Under the offline "tfidf" embedding
+    backend the context is stored but cannot be matched, and the response
+    carries a "warning" explaining why - do not report the concept as findable
+    in that case.
+
+    REQUIRES: discover_schema must have been called first.
+
+    Args:
+        target: Element the context describes, as "table" or "table.column".
+        context: Business meaning in natural language, including the terms
+            users would search with. Example for sales.salesamount:
+            "Revenue per line item. Profit margin is salesamount minus
+            unitcost. Used for profitability and margin analysis."
+
+    Returns:
+        Dictionary with the indexed element id, target, character count,
+        whether it replaced existing context, and whether it is searchable
+    """
+    return await _h_graphrag.graphrag_add_semantic_context(
+        ctx,
+        target,
+        context,
         services=_services(),
     )
 

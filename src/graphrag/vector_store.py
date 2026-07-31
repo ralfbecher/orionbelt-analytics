@@ -90,6 +90,40 @@ class VectorStore:
         self.elements.append(element)
         self._index_built = False  # Invalidate index
 
+    def upsert_element(
+        self,
+        element_type: str,
+        element_id: str,
+        name: str,
+        description: str,
+        embedding: np.ndarray,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Add an element, replacing any existing one with the same id.
+
+        ``add_element`` appends unconditionally, so re-adding under a stable id
+        leaves two entries sharing it -- and lookups return the stale first
+        one while both compete in search. Callers that own an id and expect to
+        revise it must use this instead.
+
+        Args:
+            element_type: Type of element ("table", "column", "relationship")
+            element_id: Unique identifier; existing entries are removed first
+            name: Element name
+            description: Text description
+            embedding: Vector embedding
+            metadata: Optional metadata dictionary
+        """
+        self.elements = [e for e in self.elements if e.element_id != element_id]
+        self.add_element(
+            element_type=element_type,
+            element_id=element_id,
+            name=name,
+            description=description,
+            embedding=embedding,
+            metadata=metadata,
+        )
+
     def add_elements_batch(self, elements: list[Any]) -> None:
         """
         Add multiple schema elements in batch.

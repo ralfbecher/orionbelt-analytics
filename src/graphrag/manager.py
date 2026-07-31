@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .community_detector import CommunityDetector
-from .embedder import SchemaEmbedder
+from .embedder import MODEL_TFIDF, SchemaEmbedder
 from .retriever import GraphRetriever
 
 if TYPE_CHECKING:
@@ -219,6 +219,122 @@ class GraphRAGManager:
             }
             for elem, score in results
         ]
+
+    def add_semantic_context(
+        self,
+        target: str,
+        context: str,
+        source: str = "client",
+    ) -> dict[str, Any]:
+        """Index client-supplied business context for a table or column.
+
+        Schema search can only match what the schema says about itself, which
+        is usually abbreviations: ``salesamount``, ``unitcost``,
+        ``returnquantity``. Nothing in those names carries the vocabulary users
+        actually ask in -- "profit", "margin", "churn" -- so the concepts are
+        unreachable no matter how good the embedding model is.
+
+        This lets the calling model write that missing vocabulary into the
+        index as an additional searchable element. It does not modify the
+        schema element itself, so re-running discovery cannot silently
+        overwrite it and the original description stays intact.
+
+        The context is indexed only; it is not written to the ontology or RDF
+        store, and it does not survive a backend switch or index rebuild (both
+        discard derived vectors). Treat it as session enrichment, not durable
+        knowledge.
+
+        Calling this again for the same target replaces the previous context
+        rather than adding a second entry, so it can be revised.
+
+        Under the ``tfidf`` backend the context is stored but is effectively
+        unsearchable: that vectorizer's vocabulary is fixed when the schema is
+        indexed, so words the context introduces -- exactly the ones worth
+        adding -- are out of vocabulary and score 0.0. The returned
+        ``searchable`` flag reports this so callers are not misled.
+
+        Args:
+            target: Schema element the context describes, as ``table`` or
+                ``table.column``. Recorded in metadata so results can be traced
+                back; it does not have to exist yet.
+            context: Business meaning in natural language. Include the words
+                users would search with, and any formula worth surfacing.
+            source: Where the context came from, for provenance in results.
+
+        Returns:
+            Summary of what was indexed: element id, target, character count,
+            whether it replaced existing context, whether it is searchable, and
+            a warning when it is not.
+
+        Raises:
+            RuntimeError: If GraphRAG has not been initialized.
+            ValueError: If *target* or *context* is blank.
+        """
+        if not self._initialized:
+            raise RuntimeError(
+                "GraphRAG not initialized. Call initialize_from_schema() first."
+            )
+
+        target = target.strip()
+        context = context.strip()
+        if not target:
+            raise ValueError("target must name a table or table.column")
+        if not context:
+            raise ValueError("context must not be empty")
+
+        # The target is embedded alongside the prose so a search for the column
+        # name still reaches its context, not only a search for the concept.
+        description = f"{target.replace('.', ' ').replace('_', ' ')} {context}"
+        embedding = self.embedder._embed_text(description)
+
+        element_id = f"semantic_context:{target}"
+        replaced = self.vector_store.get_by_id(element_id) is not None
+
+        # upsert, not add: both stores keep the *first* write for an id -- the
+        # ChromaDB collection ignores the second add and the JSON store appends
+        # a duplicate whose lookups still return the stale entry -- so a revised
+        # context would report success while the old one kept answering.
+        self.vector_store.upsert_element(
+            element_type="semantic_context",
+            element_id=element_id,
+            name=target,
+            description=description,
+            embedding=embedding,
+            metadata={
+                "target": target,
+                "context": context,
+                "source": source,
+            },
+        )
+        self.vector_store.build_index()
+
+        # TF-IDF fits its vocabulary on the schema corpus and never refits, so
+        # the vocabulary this context introduces cannot be matched. Storing it
+        # is harmless and keeps the record, but saying nothing would leave the
+        # caller believing the concept is now findable.
+        searchable = self.embedder.embedding_model != MODEL_TFIDF
+        result: dict[str, Any] = {
+            "element_id": element_id,
+            "target": target,
+            "characters": len(context),
+            "replaced_existing": replaced,
+            "searchable": searchable,
+        }
+        if not searchable:
+            warning = (
+                "Stored but not searchable: the 'tfidf' backend fixes its "
+                "vocabulary when the schema is indexed, so words this context "
+                "introduces score 0.0. Set GRAPHRAG_EMBEDDING_MODEL=minilm and "
+                "re-run discover_schema() to make enrichment effective."
+            )
+            result["warning"] = warning
+            logger.warning(f"Semantic context for '{target}': {warning}")
+        else:
+            logger.info(
+                f"Indexed semantic context for '{target}' ({len(context)} chars)"
+            )
+
+        return result
 
     def find_relevant_tables(
         self,

@@ -204,6 +204,58 @@ class ChromaDBVectorStore:
             logger.error(f"Failed to add element {element_id}: {e}")
             raise
 
+    def upsert_element(
+        self,
+        element_type: str,
+        element_id: str,
+        name: str,
+        description: str,
+        embedding: np.ndarray,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Add an element, replacing any existing one with the same id.
+
+        ``add`` silently keeps the first write when an id already exists, so
+        re-adding under a stable id looks like it succeeded while leaving the
+        old vector and metadata in place. Callers that own an id and expect to
+        revise it must use this instead.
+
+        Args:
+            element_type: Type of element ("table", "column", "relationship")
+            element_id: Unique identifier; an existing entry is overwritten
+            name: Element name
+            description: Text description
+            embedding: Vector embedding
+            metadata: Optional metadata dictionary
+        """
+        chroma_metadata: dict[str, Any] = {
+            "element_type": element_type,
+            "name": name,
+            "description": description,
+        }
+        if metadata:
+            for key, value in metadata.items():
+                if isinstance(value, (str, int, float, bool)):
+                    chroma_metadata[key] = value
+                else:
+                    chroma_metadata[key] = json.dumps(value)
+
+        if embedding.shape[0] != self.dimension:
+            if embedding.shape[0] < self.dimension:
+                embedding = np.pad(embedding, (0, self.dimension - embedding.shape[0]))
+            else:
+                embedding = embedding[: self.dimension]
+
+        try:
+            self.collection.upsert(
+                ids=[element_id],
+                embeddings=[embedding.tolist()],
+                metadatas=[chroma_metadata],
+            )
+        except Exception as e:
+            logger.error(f"Failed to upsert element {element_id}: {e}")
+            raise
+
     def add_elements_batch(self, elements: list[Any]) -> None:
         """
         Add multiple schema elements in batch.

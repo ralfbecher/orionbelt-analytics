@@ -503,6 +503,55 @@ async def graphrag_search(
         return err
 
 
+async def graphrag_add_semantic_context(
+    ctx: Context,
+    target: str,
+    context: str,
+    services: "HandlerContext",
+) -> dict[str, Any]:
+    """Index client-supplied business context for a schema element."""
+    session = services.get_session_data(ctx)
+
+    if not session.graphrag_initialized or session.graphrag_manager is None:
+        err: dict[str, Any] = services.create_error_response(
+            "GraphRAG not initialized. Please call discover_schema() first.",
+            "graphrag_not_initialized",
+        )
+        return err
+
+    try:
+        result = session.graphrag_manager.add_semantic_context(
+            target=target, context=context
+        )
+
+        if result.get("searchable"):
+            await ctx.info(f"Indexed semantic context for {target}")
+        else:
+            await ctx.info(
+                f"Stored semantic context for {target}, but it is not "
+                "searchable under the current embedding backend"
+            )
+
+        return {
+            "success": True,
+            **result,
+            "note": (
+                "Indexed for semantic search only. Not written to the ontology "
+                "or RDF store, and discarded if the index is rebuilt."
+            ),
+        }
+
+    except ValueError as e:
+        err = services.create_error_response(str(e), "invalid_argument")
+        return err
+    except Exception as e:
+        logger.exception(f"Adding semantic context failed: {e}")
+        err = services.create_error_response(
+            f"Adding semantic context failed: {e!s}", "graphrag_error"
+        )
+        return err
+
+
 async def graphrag_query_context(
     ctx: Context,
     query: str,
