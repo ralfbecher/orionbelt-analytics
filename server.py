@@ -321,14 +321,6 @@ def main():
         )
         logger.info("📡 Server ready for MCP protocol messages")
 
-        # Configure FastMCP with shorter shutdown timeout for cleaner exits
-        # This reduces the timeout window for SSE connections during shutdown
-        import os
-
-        os.environ.setdefault(
-            "MCP_SHUTDOWN_TIMEOUT", "2"
-        )  # 2 seconds instead of default 5
-
         mcp.run(
             transport=config.mcp_transport,
             host=config.mcp_server_host,
