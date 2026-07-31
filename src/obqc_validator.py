@@ -150,7 +150,9 @@ class OBQCResult:
     # (column reference, tables it may resolve against) per occurrence. Name
     # resolution is scoped to the SELECT a column appears in plus its enclosing
     # ones, so a subquery's tables cannot answer for the outer query.
-    column_scopes: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    column_scopes: list[tuple[str, tuple[tuple[str, ...], ...]]] = field(
+        default_factory=list
+    )
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
     has_aggregation: bool = False
     has_group_by: bool = False
@@ -556,7 +558,7 @@ class OBQCValidator:
     ) -> None:
         """Extract column references, excluding legal SELECT-alias references."""
         alias_refs = self._select_alias_references(parsed, result, dialect)
-        scope_cache: dict[int, tuple[str, ...]] = {}
+        scope_cache: dict[int, tuple[tuple[str, ...], ...]] = {}
 
         for column in parsed.find_all(exp.Column):
             # Alias references resolve to the select list, not to a table, so
@@ -586,35 +588,43 @@ class OBQCValidator:
                 result.column_scopes.append(entry)
 
     def _scope_tables(
-        self, select: exp.Select, cache: dict[int, tuple[str, ...]]
-    ) -> tuple[str, ...]:
-        """Tables a name in *select* may resolve against, innermost first.
+        self, select: exp.Select, cache: dict[int, tuple[tuple[str, ...], ...]]
+    ) -> tuple[tuple[str, ...], ...]:
+        """Tables a name in *select* may resolve against, innermost level first.
 
-        Includes the enclosing SELECTs' tables: a correlated subquery legally
-        references them, so omitting them would report those names as missing.
+        Returned as levels rather than one flat set because SQL resolves a name
+        in the innermost scope that provides it and stops. Flattening made
+        ``SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE id =
+        user_id)`` look ambiguous between orders.id and users.id, when the
+        inner ``id`` is simply orders.id.
+
+        Enclosing levels are still included: a correlated subquery legally
+        references them, so dropping them would report those names as missing.
 
         Args:
             select: The SELECT a column appears in.
             cache: Memo keyed by ``id(select)``.
 
         Returns:
-            Table names in scope, without duplicates.
+            One tuple of table names per scope level, innermost first.
         """
         cached = cache.get(id(select))
         if cached is not None:
             return cached
 
-        own = [
-            t.name
-            for t in select.find_all(exp.Table)
-            if t.name and t.find_ancestor(exp.Select) is select
-        ]
+        own = tuple(
+            dict.fromkeys(
+                t.name
+                for t in select.find_all(exp.Table)
+                if t.name and t.find_ancestor(exp.Select) is select
+            )
+        )
         parent = select.parent_select
         outer = self._scope_tables(parent, cache) if parent is not None else ()
 
-        tables = tuple(dict.fromkeys([*own, *outer]))
-        cache[id(select)] = tables
-        return tables
+        levels = (own, *outer) if own else outer
+        cache[id(select)] = levels
+        return levels
 
     def _select_alias_references(
         self, parsed: exp.Expr, result: OBQCResult, dialect: str
@@ -725,12 +735,17 @@ class OBQCValidator:
         # the wrong table -- silently dropping a fan-trap warning.
         for select in parsed.find_all(exp.Select):
             alias_map = self._build_alias_map(select)
+            # Whether the SELECT owning these joins aggregates. Fan-out only
+            # inflates a total if the aggregation happens over these joins --
+            # an aggregate in some unrelated subquery does not.
+            scope_aggregates = self._select_aggregates(select)
 
             for join in select.args.get("joins") or []:
                 join_info: dict[str, Any] = {
                     "type": join.kind or "INNER",
                     "table": None,
                     "on_condition": None,
+                    "scope_aggregates": scope_aggregates,
                     # Real table names referenced by the ON condition. Fan-trap
                     # detection needs to know which table this join attaches
                     # to, and the ON condition is the only place that says so.
@@ -848,16 +863,24 @@ class OBQCValidator:
                 # Unqualified column - check for ambiguity
                 col_key = col_ref.lower()
 
+                # Innermost level that provides the name wins; SQL stops there,
+                # so tables further out are not candidates and cannot make it
+                # ambiguous.
                 found_in_tables: list[str] = []
 
-                # Only tables in this reference's own scope
-                for table_name in scope:
-                    table_key = table_name.lower()
-                    if (
-                        table_key in self._schema_cache.tables
-                        and col_key in self._schema_cache.tables[table_key].columns
-                    ):
-                        found_in_tables.append(table_name)
+                for level in scope:
+                    matches = [
+                        table_name
+                        for table_name in level
+                        if (
+                            table_name.lower() in self._schema_cache.tables
+                            and col_key
+                            in self._schema_cache.tables[table_name.lower()].columns
+                        )
+                    ]
+                    if matches:
+                        found_in_tables = matches
+                        break
 
                 # Columns of a catalog table cannot be resolved -- the ontology
                 # does not describe them. If the query touches one at all, an
@@ -865,10 +888,13 @@ class OBQCValidator:
                 # its column, so there is nothing to report. Only when every
                 # table in the query is describable can a missing name be
                 # called missing.
+                # Unresolved names are judged against every level, since any of
+                # them could legitimately have provided the name.
+                visible = [t for level in scope for t in level]
                 describable_tables = [
-                    t for t in scope if t not in result.catalog_tables
+                    t for t in visible if t not in result.catalog_tables
                 ]
-                all_tables_describable = len(describable_tables) == len(scope)
+                all_tables_describable = len(describable_tables) == len(visible)
 
                 if (
                     len(found_in_tables) == 0
@@ -1122,6 +1148,22 @@ class OBQCValidator:
         # Same category or unknown are compatible
         return cat1 == cat2 or cat1 == "unknown" or cat2 == "unknown"
 
+    def _own_aggregates(self, select: exp.Select) -> list[Any]:
+        """Aggregate calls belonging to this SELECT's own scope.
+
+        Args:
+            select: The SELECT to inspect.
+
+        Returns:
+            Aggregate expressions whose nearest enclosing SELECT is *select*.
+        """
+        agg_types = (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max)
+        return [
+            agg
+            for agg in select.find_all(*agg_types)
+            if agg.find_ancestor(exp.Select) is select
+        ]
+
     def _select_aggregates(self, select: exp.Select) -> bool:
         """Whether this SELECT itself applies an aggregate function.
 
@@ -1133,11 +1175,7 @@ class OBQCValidator:
         Returns:
             True if an aggregate call sits in this SELECT's own scope.
         """
-        agg_types = (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max)
-        return any(
-            agg.find_ancestor(exp.Select) is select
-            for agg in select.find_all(*agg_types)
-        )
+        return bool(self._own_aggregates(select))
 
     def _validate_aggregation_context(
         self, parsed: exp.Expr, result: OBQCResult
@@ -1249,10 +1287,13 @@ class OBQCValidator:
                                 )
 
     def _is_inside_aggregate(self, expr: exp.Expression, select: exp.Select) -> bool:
-        """Check if expression is inside an aggregate function."""
-        agg_types = (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max)
+        """Check if expression is inside an aggregate function of this SELECT.
 
-        for agg in select.find_all(*agg_types):
+        Aggregates in a nested subquery are that subquery's; counting them here
+        made an outer column look aggregated because some inner aggregate
+        happened to mention the same name.
+        """
+        for agg in self._own_aggregates(select):
             for col in agg.find_all(exp.Column):
                 if (
                     isinstance(expr, exp.Column)
@@ -1315,7 +1356,14 @@ class OBQCValidator:
         ontology agree by construction. Falls back to the relationship heuristic
         when no disjointness axioms are present (e.g. minimal imports).
         """
-        if not result.has_aggregation:
+        # Only joins whose own SELECT aggregates can inflate a total. The
+        # query-wide flag is true if an aggregate appears anywhere, so an
+        # unrelated subquery's COUNT(*) used to raise a fan-trap warning about
+        # outer joins that aggregate nothing.
+        aggregating_joins = [
+            j for j in result.parsed_joins if j.get("scope_aggregates")
+        ]
+        if not aggregating_joins:
             return
 
         if len(result.parsed_tables) < 2:
@@ -1368,7 +1416,9 @@ class OBQCValidator:
         one_to_many_count = 0
         involved_tables: list[str] = []
 
-        for join_info in result.parsed_joins:
+        # Only joins sitting in an aggregating SELECT; a subquery's joins
+        # cannot multiply rows the outer query aggregates.
+        for join_info in aggregating_joins:
             join_table = join_info.get("table")
             if not join_table:
                 continue

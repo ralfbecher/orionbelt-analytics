@@ -792,6 +792,60 @@ class TestOBQCSubqueryScoping(unittest.TestCase):
 
         self.assertFalse(result.is_valid)
 
+    def test_nested_aggregate_does_not_excuse_an_outer_column(self):
+        """An aggregate in a subquery cannot aggregate an outer column.
+
+        The per-column check scanned aggregates anywhere under the SELECT, so
+        a nested MAX(id) made the outer bare id look aggregated and a query
+        genuinely missing its GROUP BY passed.
+        """
+        result = self.validator.validate(
+            "SELECT id, SUM(total), (SELECT MAX(id) FROM users) FROM orders"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_subquery_aggregate_does_not_trigger_a_fan_trap(self):
+        """Fan-out only inflates totals the joins are aggregated over."""
+        result = self.validator.validate(
+            "SELECT users.name FROM users "
+            "JOIN orders ON users.id = orders.user_id "
+            "JOIN shipments ON shipments.order_id = orders.id "
+            "WHERE EXISTS (SELECT COUNT(*) FROM order_items)"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_real_fan_trap_in_an_aggregating_select_still_warns(self):
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity), SUM(shipments.cost) "
+            "FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+    def test_inner_name_resolves_in_the_innermost_scope(self):
+        """SQL stops at the innermost scope that provides a name.
+
+        Flattening the scope levels made the inner id look ambiguous between
+        orders.id and users.id, when it is simply orders.id.
+        """
+        result = self.validator.validate(
+            "SELECT name FROM users WHERE EXISTS ("
+            "SELECT 1 FROM orders WHERE id = user_id)"
+        )
+
+        ambiguous = [
+            i for i in result.issues if i.issue_type == OBQCIssueType.AMBIGUOUS_COLUMN
+        ]
+        self.assertEqual(ambiguous, [], [i.message for i in result.issues])
+
     def test_ambiguity_within_one_scope_still_warns(self):
         result = self.validator.validate(
             "SELECT id FROM users JOIN orders ON users.id = orders.user_id"
