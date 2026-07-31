@@ -42,6 +42,8 @@ SELECT * FROM cusotmers;
 
 When a table is not found, OBQC suggests up to 10 available table names from the ontology.
 
+Tables reached through a database catalog schema -- `information_schema`, `pg_catalog`, `system`, `performance_schema`, `snowflake`, `sys` -- are exempt: they describe the database rather than user data, so they are never part of a generated ontology. MySQL's `mysql` schema is **not** exempt, because it holds accounts and grants rather than metadata; `src/security.py` blocks those tables outright. A bare name that merely looks like a catalog table (`FROM tables`) is still checked.
+
 ### Column existence (ERROR)
 
 Checks that every column reference resolves to an actual column in its table.
@@ -51,7 +53,12 @@ Checks that every column reference resolves to an actual column in its table.
 SELECT emial FROM customers;
 ```
 
-For qualified references (`table.column`), the column is checked against the specific table. For unqualified references, OBQC searches all tables in the query.
+For qualified references (`table.column`), the column is checked against the specific table. For unqualified references, OBQC searches the tables in that reference's own scope -- the `SELECT` it appears in, plus any enclosing ones, so a correlated subquery can still use the outer query's tables. A subquery's tables never resolve names in the outer query.
+
+Two kinds of name are not columns and are not reported missing:
+
+- **`SELECT` aliases** referenced from a later clause. `ORDER BY revenue` over `SUM(total) AS revenue` resolves to the select list. Visibility follows the dialect: PostgreSQL allows an output name in `GROUP BY` and `ORDER BY` but not `HAVING` or `WHERE`, and only as a whole sort key (`ORDER BY t + 1` is an expression over input columns); DuckDB resolves aliases in every clause. A name that is *both* an alias and a real column resolves to the column.
+- **Columns of a catalog table**, which the ontology does not describe. If a query touches one, an unqualified name that matches no user table is left alone rather than reported.
 
 ### Ambiguous columns (WARNING)
 
@@ -68,11 +75,18 @@ OBQC suggests qualifying the column with the table name.
 
 #### Missing join condition (ERROR)
 
-Multiple tables in the query without explicit `JOIN ... ON` conditions (Cartesian product).
+Multiple tables in the same `SELECT` without explicit `JOIN ... ON` conditions (Cartesian product).
 
 ```sql
 -- ERROR: Multiple tables without explicit JOIN (Cartesian product)
 SELECT * FROM customers, orders;
+```
+
+Judged per `SELECT`. A subquery contributes its own tables to its own scope, so this is fine:
+
+```sql
+-- OK: one table per SELECT
+SELECT id FROM customers WHERE id IN (SELECT customer_id FROM orders);
 ```
 
 #### Non-matching join condition (WARNING)
@@ -98,7 +112,9 @@ Comparisons within the same category are allowed (e.g. integer vs. decimal). Com
 
 ### Aggregation correctness (ERROR)
 
-When aggregate functions (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`) are used, OBQC checks that all non-aggregated columns in `SELECT` appear in `GROUP BY`.
+When aggregate functions (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`) are used, OBQC checks that all non-aggregated columns in `SELECT` appear in `GROUP BY`. Grouping by an alias satisfies the check on the column it stands for.
+
+Evaluated per `SELECT`: an aggregate inside a subquery belongs to that subquery, so `SELECT name FROM users WHERE id = (SELECT MAX(user_id) FROM orders)` needs no `GROUP BY` in the outer query.
 
 ```sql
 -- ERROR: Column 'name' in SELECT with aggregation but no GROUP BY
@@ -111,6 +127,8 @@ SELECT status, region, SUM(amount) FROM orders GROUP BY region;
 ### Fan-trap detection (WARNING)
 
 Detects when a query aggregates across two or more one-to-many joins. This is the classic fan-trap pattern where rows multiply silently, producing inflated aggregation results.
+
+Fan-out is judged per join, against the table that join's `ON` condition attaches to -- not by asking whether a table sits on the many side of some relationship elsewhere in the schema. Walking a chain of many-to-one lookups (`sales` -> `clients` -> `countries`) duplicates nothing and is not flagged, however many foreign keys those dimensions carry.
 
 ```sql
 -- WARNING: Potential fan-trap: 2 one-to-many joins with aggregation

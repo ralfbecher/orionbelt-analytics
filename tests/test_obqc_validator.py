@@ -703,6 +703,106 @@ class TestOBQCSelectAliases(unittest.TestCase):
         self.assertFalse(result.is_valid)
 
 
+class TestOBQCSubqueryScoping(unittest.TestCase):
+    """Rules apply per SELECT, not across the whole parsed query.
+
+    Tables, columns and aggregation were collected into flat query-wide state,
+    so a subquery's contents were judged as if they belonged to the outer
+    query. Every IN / EXISTS / scalar subquery was rejected outright.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_in_subquery_is_not_a_cartesian_product(self):
+        """Two tables in total, no joins in total -- but one table per SELECT."""
+        result = self.validator.validate(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_exists_subquery_is_not_a_cartesian_product(self):
+        result = self.validator.validate(
+            "SELECT name FROM users u "
+            "WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_scalar_subquery_in_select_list_is_allowed(self):
+        result = self.validator.validate(
+            "SELECT name, (SELECT COUNT(*) FROM orders) AS n FROM users"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_aggregate_in_subquery_does_not_require_outer_group_by(self):
+        """The outer SELECT aggregates nothing, so it needs no GROUP BY."""
+        result = self.validator.validate(
+            "SELECT name FROM users WHERE id = (SELECT MAX(user_id) FROM orders)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_subquery_table_cannot_resolve_an_outer_column(self):
+        """quantity belongs to order_items, which the outer SELECT cannot see."""
+        result = self.validator.validate(
+            "SELECT quantity FROM users WHERE id IN (SELECT order_id FROM order_items)"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_no_ambiguity_across_scopes(self):
+        """users.id and orders.id live in different scopes here."""
+        result = self.validator.validate(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)"
+        )
+
+        ambiguous = [
+            i for i in result.issues if i.issue_type == OBQCIssueType.AMBIGUOUS_COLUMN
+        ]
+        self.assertEqual(ambiguous, [])
+
+    def test_correlated_subquery_may_use_outer_tables(self):
+        """An enclosing SELECT's tables stay in scope, or this reads as
+        missing."""
+        result = self.validator.validate(
+            "SELECT u.name FROM users u WHERE EXISTS ("
+            "SELECT 1 FROM orders o WHERE o.user_id = u.id AND o.total > 5)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_real_cartesian_product_still_errors(self):
+        result = self.validator.validate("SELECT * FROM users, orders")
+
+        self.assertFalse(result.is_valid)
+        self.assertTrue(
+            any(
+                i.issue_type == OBQCIssueType.MISSING_JOIN_CONDITION
+                for i in result.issues
+            )
+        )
+
+    def test_real_missing_group_by_still_errors(self):
+        result = self.validator.validate("SELECT name, SUM(id) FROM users")
+
+        self.assertFalse(result.is_valid)
+
+    def test_ambiguity_within_one_scope_still_warns(self):
+        result = self.validator.validate(
+            "SELECT id FROM users JOIN orders ON users.id = orders.user_id"
+        )
+
+        ambiguous = [
+            i for i in result.issues if i.issue_type == OBQCIssueType.AMBIGUOUS_COLUMN
+        ]
+        self.assertEqual(len(ambiguous), 1)
+
+
 class TestOBQCFanTrapDetection(unittest.TestCase):
     """Test suite specifically for fan-trap detection."""
 
