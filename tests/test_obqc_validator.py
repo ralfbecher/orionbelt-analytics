@@ -1,11 +1,18 @@
 """Tests for OBQC (Ontology-Based Query Check) validator."""
 
+import json
 import unittest
 
 from rdflib import Graph, Literal, Namespace
 from rdflib.namespace import OWL, RDF, RDFS, XSD
 
-from src.obqc_validator import OBQCIssue, OBQCIssueType, OBQCSeverity, OBQCValidator
+from src.obqc_validator import (
+    OBQCIssue,
+    OBQCIssueType,
+    OBQCResult,
+    OBQCSeverity,
+    OBQCValidator,
+)
 
 
 def create_sample_ontology_graph() -> tuple[Graph, str]:
@@ -703,6 +710,160 @@ class TestOBQCSelectAliases(unittest.TestCase):
         self.assertFalse(result.is_valid)
 
 
+class TestOBQCSubqueryScoping(unittest.TestCase):
+    """Rules apply per SELECT, not across the whole parsed query.
+
+    Tables, columns and aggregation were collected into flat query-wide state,
+    so a subquery's contents were judged as if they belonged to the outer
+    query. Every IN / EXISTS / scalar subquery was rejected outright.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_in_subquery_is_not_a_cartesian_product(self):
+        """Two tables in total, no joins in total -- but one table per SELECT."""
+        result = self.validator.validate(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_exists_subquery_is_not_a_cartesian_product(self):
+        result = self.validator.validate(
+            "SELECT name FROM users u "
+            "WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_scalar_subquery_in_select_list_is_allowed(self):
+        result = self.validator.validate(
+            "SELECT name, (SELECT COUNT(*) FROM orders) AS n FROM users"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_aggregate_in_subquery_does_not_require_outer_group_by(self):
+        """The outer SELECT aggregates nothing, so it needs no GROUP BY."""
+        result = self.validator.validate(
+            "SELECT name FROM users WHERE id = (SELECT MAX(user_id) FROM orders)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_subquery_table_cannot_resolve_an_outer_column(self):
+        """quantity belongs to order_items, which the outer SELECT cannot see."""
+        result = self.validator.validate(
+            "SELECT quantity FROM users WHERE id IN (SELECT order_id FROM order_items)"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_no_ambiguity_across_scopes(self):
+        """users.id and orders.id live in different scopes here."""
+        result = self.validator.validate(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)"
+        )
+
+        ambiguous = [
+            i for i in result.issues if i.issue_type == OBQCIssueType.AMBIGUOUS_COLUMN
+        ]
+        self.assertEqual(ambiguous, [])
+
+    def test_correlated_subquery_may_use_outer_tables(self):
+        """An enclosing SELECT's tables stay in scope, or this reads as
+        missing."""
+        result = self.validator.validate(
+            "SELECT u.name FROM users u WHERE EXISTS ("
+            "SELECT 1 FROM orders o WHERE o.user_id = u.id AND o.total > 5)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_real_cartesian_product_still_errors(self):
+        result = self.validator.validate("SELECT * FROM users, orders")
+
+        self.assertFalse(result.is_valid)
+        self.assertTrue(
+            any(
+                i.issue_type == OBQCIssueType.MISSING_JOIN_CONDITION
+                for i in result.issues
+            )
+        )
+
+    def test_real_missing_group_by_still_errors(self):
+        result = self.validator.validate("SELECT name, SUM(id) FROM users")
+
+        self.assertFalse(result.is_valid)
+
+    def test_nested_aggregate_does_not_excuse_an_outer_column(self):
+        """An aggregate in a subquery cannot aggregate an outer column.
+
+        The per-column check scanned aggregates anywhere under the SELECT, so
+        a nested MAX(id) made the outer bare id look aggregated and a query
+        genuinely missing its GROUP BY passed.
+        """
+        result = self.validator.validate(
+            "SELECT id, SUM(total), (SELECT MAX(id) FROM users) FROM orders"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_subquery_aggregate_does_not_trigger_a_fan_trap(self):
+        """Fan-out only inflates totals the joins are aggregated over."""
+        result = self.validator.validate(
+            "SELECT users.name FROM users "
+            "JOIN orders ON users.id = orders.user_id "
+            "JOIN shipments ON shipments.order_id = orders.id "
+            "WHERE EXISTS (SELECT COUNT(*) FROM order_items)"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_real_fan_trap_in_an_aggregating_select_still_warns(self):
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity), SUM(shipments.cost) "
+            "FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+    def test_inner_name_resolves_in_the_innermost_scope(self):
+        """SQL stops at the innermost scope that provides a name.
+
+        Flattening the scope levels made the inner id look ambiguous between
+        orders.id and users.id, when it is simply orders.id.
+        """
+        result = self.validator.validate(
+            "SELECT name FROM users WHERE EXISTS ("
+            "SELECT 1 FROM orders WHERE id = user_id)"
+        )
+
+        ambiguous = [
+            i for i in result.issues if i.issue_type == OBQCIssueType.AMBIGUOUS_COLUMN
+        ]
+        self.assertEqual(ambiguous, [], [i.message for i in result.issues])
+
+    def test_ambiguity_within_one_scope_still_warns(self):
+        result = self.validator.validate(
+            "SELECT id FROM users JOIN orders ON users.id = orders.user_id"
+        )
+
+        ambiguous = [
+            i for i in result.issues if i.issue_type == OBQCIssueType.AMBIGUOUS_COLUMN
+        ]
+        self.assertEqual(len(ambiguous), 1)
+
+
 class TestOBQCFanTrapDetection(unittest.TestCase):
     """Test suite specifically for fan-trap detection."""
 
@@ -875,6 +1036,38 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
 
         self.assertEqual(baseline.parsed_joins[0]["on_tables"], ["users", "orders"])
         self.assertEqual(shadowed.parsed_joins[0]["on_tables"], ["users", "orders"])
+
+    def test_fan_outs_are_counted_per_select_not_pooled(self):
+        """Two subqueries fanning out once each are two safe aggregations.
+
+        Rows are multiplied by joins in the same query. Summing fan-outs
+        across unrelated SELECTs reported a fan-trap that exists in neither.
+        """
+        result = self.validator.validate(
+            "SELECT "
+            "(SELECT SUM(order_items.quantity) FROM orders "
+            " JOIN order_items ON orders.id = order_items.order_id), "
+            "(SELECT SUM(shipments.cost) FROM orders "
+            " JOIN shipments ON orders.id = shipments.order_id) "
+            "FROM users"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_fan_trap_inside_a_subquery_is_still_detected(self):
+        """Scoping the count must not switch detection off in subqueries."""
+        result = self.validator.validate(
+            "SELECT name, ("
+            "SELECT SUM(order_items.quantity) + SUM(shipments.cost) FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id) "
+            "FROM users"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
 
     def test_unrelated_join_is_not_counted(self):
         """Tables with no ontology relationship cannot be judged to fan out."""
@@ -1105,6 +1298,95 @@ class TestOBQCAxiomDrivenFanTrap(unittest.TestCase):
             "GROUP BY customers.name"
         )
         self.assertFalse(result.fan_trap_risk)
+
+    def test_sibling_fact_in_a_semi_join_filter_is_not_flagged(self):
+        """A fact reached only through EXISTS cannot multiply anything.
+
+        The axiom check read its disjoint pair off every table named in the
+        query, so a returns table used purely as a filter flagged an
+        aggregation over orders that it cannot affect.
+        """
+        result = self.validator.validate(
+            "SELECT c.id, SUM(o.amount) FROM customers c "
+            "JOIN orders o ON o.customer_id = c.id "
+            "WHERE EXISTS (SELECT 1 FROM returns r WHERE r.customer_id = c.id) "
+            "GROUP BY c.id"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_sibling_fact_in_a_subquery_without_outer_join_is_not_flagged(self):
+        result = self.validator.validate(
+            "SELECT customer_id, SUM(amount) FROM orders "
+            "WHERE EXISTS (SELECT 1 FROM returns "
+            "WHERE returns.customer_id = orders.customer_id) "
+            "GROUP BY customer_id"
+        )
+
+        self.assertFalse(
+            result.fan_trap_risk,
+            [i.message for i in result.issues],
+        )
+
+    def test_both_facts_joined_in_one_select_is_still_flagged(self):
+        """The true positive the axiom path exists for."""
+        result = self.validator.validate(
+            "SELECT c.id, SUM(o.amount), SUM(r.amount) FROM customers c "
+            "JOIN orders o ON o.customer_id = c.id "
+            "JOIN returns r ON r.customer_id = c.id "
+            "GROUP BY c.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+
+class TestOBQCResponseShape(unittest.TestCase):
+    """to_dict() is the wire format, so internal bookkeeping must not appear.
+
+    Fan-trap grouping needs to know which SELECT owns a join, but that is a
+    detail of one parse. Leaving it on the join dicts published it through
+    every execute_sql_query response.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+        self.query = "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+
+    def test_joins_expose_only_public_keys(self):
+        joins = self.validator.validate(self.query).to_dict()["parsed_joins"]
+
+        self.assertTrue(joins)
+        for join in joins:
+            self.assertEqual(
+                set(join) - set(OBQCResult.PUBLIC_JOIN_KEYS),
+                set(),
+                f"internal keys leaked into the response: {sorted(join)}",
+            )
+
+    def test_response_is_reproducible(self):
+        """An identifier tied to object identity varies between runs."""
+        first = self.validator.validate(self.query).to_dict()
+        second = self.validator.validate(self.query).to_dict()
+
+        self.assertEqual(first["parsed_joins"], second["parsed_joins"])
+
+    def test_response_is_json_serializable(self):
+        payload = self.validator.validate(self.query).to_dict()
+
+        json.dumps(payload)
+
+    def test_useful_join_details_are_still_published(self):
+        """Stripping internals must not strip what callers rely on."""
+        join = self.validator.validate(self.query).to_dict()["parsed_joins"][0]
+
+        self.assertEqual(join["table"], "orders")
+        self.assertEqual(join["on_tables"], ["users", "orders"])
+        self.assertIn("on_condition", join)
 
 
 class TestOBQCDialectParity(unittest.TestCase):

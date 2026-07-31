@@ -8,7 +8,7 @@ and fan-trap patterns without using LLM.
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 import sqlglot
 from rdflib import Graph, Namespace, URIRef
@@ -147,11 +147,32 @@ class OBQCResult:
     # Lower-cased SELECT aliases referenced from ORDER BY / GROUP BY / HAVING.
     # They resolve to select-list output, not to any table's column.
     select_aliases: set[str] = field(default_factory=set)
+    # (column reference, tables it may resolve against) per occurrence. Name
+    # resolution is scoped to the SELECT a column appears in plus its enclosing
+    # ones, so a subquery's tables cannot answer for the outer query.
+    column_scopes: list[tuple[str, tuple[tuple[str, ...], ...]]] = field(
+        default_factory=list
+    )
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
+    # Tables of each SELECT that applies an aggregate, in its own scope. Only
+    # these can be multiplied by that SELECT's joins, so fan-trap rules judge
+    # them rather than every table named anywhere in the query.
+    aggregating_scopes: list[tuple[str, ...]] = field(default_factory=list)
     has_aggregation: bool = False
     has_group_by: bool = False
     fan_trap_risk: bool = False
     ontology_compatible: bool = True  # Whether ontology has oba: annotations
+
+    # Keys of parsed_joins that belong in a response. Everything else the
+    # extractor records is bookkeeping for the validation rules and must not
+    # reach a caller -- notably scope_id, which identifies a SELECT within one
+    # parse and means nothing outside it.
+    PUBLIC_JOIN_KEYS: ClassVar[tuple[str, ...]] = (
+        "type",
+        "table",
+        "on_condition",
+        "on_tables",
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert result to dictionary for JSON serialization."""
@@ -171,7 +192,10 @@ class OBQCResult:
             ],
             "parsed_tables": self.parsed_tables,
             "parsed_columns": self.parsed_columns,
-            "parsed_joins": self.parsed_joins,
+            "parsed_joins": [
+                {k: j[k] for k in self.PUBLIC_JOIN_KEYS if k in j}
+                for j in self.parsed_joins
+            ],
             "has_aggregation": self.has_aggregation,
             "has_group_by": self.has_group_by,
             "fan_trap_risk": self.fan_trap_risk,
@@ -504,7 +528,7 @@ class OBQCValidator:
         # Run validation rules
         self._validate_tables(result)
         self._validate_columns(result)
-        self._validate_joins(result)
+        self._validate_joins(parsed, result)
         self._validate_type_compatibility(parsed, result)
         self._validate_aggregation_context(parsed, result)
         self._detect_fan_trap(result)
@@ -552,6 +576,7 @@ class OBQCValidator:
     ) -> None:
         """Extract column references, excluding legal SELECT-alias references."""
         alias_refs = self._select_alias_references(parsed, result, dialect)
+        scope_cache: dict[int, tuple[tuple[str, ...], ...]] = {}
 
         for column in parsed.find_all(exp.Column):
             # Alias references resolve to the select list, not to a table, so
@@ -564,8 +589,60 @@ class OBQCValidator:
             col_ref = column.name
             if column.table:
                 col_ref = f"{column.table}.{column.name}"
-            if col_ref and col_ref not in result.parsed_columns:
+            if not col_ref:
+                continue
+            if col_ref not in result.parsed_columns:
                 result.parsed_columns.append(col_ref)
+
+            # Which tables the name could resolve against, which is a property
+            # of where it appears. Resolving against every table in the query
+            # let a subquery's table answer for the outer SELECT: "SELECT
+            # quantity FROM users WHERE id IN (SELECT order_id FROM
+            # order_items)" found quantity in order_items and reported nothing.
+            owner = column.find_ancestor(exp.Select)
+            scope = self._scope_tables(owner, scope_cache) if owner else ()
+            entry = (col_ref, scope)
+            if entry not in result.column_scopes:
+                result.column_scopes.append(entry)
+
+    def _scope_tables(
+        self, select: exp.Select, cache: dict[int, tuple[tuple[str, ...], ...]]
+    ) -> tuple[tuple[str, ...], ...]:
+        """Tables a name in *select* may resolve against, innermost level first.
+
+        Returned as levels rather than one flat set because SQL resolves a name
+        in the innermost scope that provides it and stops. Flattening made
+        ``SELECT name FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE id =
+        user_id)`` look ambiguous between orders.id and users.id, when the
+        inner ``id`` is simply orders.id.
+
+        Enclosing levels are still included: a correlated subquery legally
+        references them, so dropping them would report those names as missing.
+
+        Args:
+            select: The SELECT a column appears in.
+            cache: Memo keyed by ``id(select)``.
+
+        Returns:
+            One tuple of table names per scope level, innermost first.
+        """
+        cached = cache.get(id(select))
+        if cached is not None:
+            return cached
+
+        own = tuple(
+            dict.fromkeys(
+                t.name
+                for t in select.find_all(exp.Table)
+                if t.name and t.find_ancestor(exp.Select) is select
+            )
+        )
+        parent = select.parent_select
+        outer = self._scope_tables(parent, cache) if parent is not None else ()
+
+        levels = (own, *outer) if own else outer
+        cache[id(select)] = levels
+        return levels
 
     def _select_alias_references(
         self, parsed: exp.Expr, result: OBQCResult, dialect: str
@@ -674,14 +751,34 @@ class OBQCValidator:
         # EXISTS overwrite the outer "FROM users u", so the outer join's ON
         # condition resolved to order_items and its fan-out was judged against
         # the wrong table -- silently dropping a fan-trap warning.
-        for select in parsed.find_all(exp.Select):
+        for scope_index, select in enumerate(parsed.find_all(exp.Select)):
             alias_map = self._build_alias_map(select)
+            # Whether the SELECT owning these joins aggregates. Fan-out only
+            # inflates a total if the aggregation happens over these joins --
+            # an aggregate in some unrelated subquery does not.
+            scope_aggregates = self._select_aggregates(select)
+            if scope_aggregates:
+                result.aggregating_scopes.append(
+                    tuple(
+                        dict.fromkeys(
+                            t.name
+                            for t in select.find_all(exp.Table)
+                            if t.name and t.find_ancestor(exp.Select) is select
+                        )
+                    )
+                )
 
             for join in select.args.get("joins") or []:
                 join_info: dict[str, Any] = {
                     "type": join.kind or "INNER",
                     "table": None,
                     "on_condition": None,
+                    "scope_aggregates": scope_aggregates,
+                    # Identifies the owning SELECT so fan-out is counted within
+                    # one query rather than pooled across unrelated ones. A
+                    # traversal index, not id(select): object addresses vary
+                    # per run, and this value must never reach a response.
+                    "scope_id": scope_index,
                     # Real table names referenced by the ON condition. Fan-trap
                     # detection needs to know which table this join attaches
                     # to, and the ON condition is the only place that says so.
@@ -774,7 +871,7 @@ class OBQCValidator:
         if self._schema_cache is None:
             return
 
-        for col_ref in result.parsed_columns:
+        for col_ref, scope in result.column_scopes:
             if "." in col_ref:
                 parts = col_ref.split(".", 1)
                 table_name, col_name = parts[0], parts[1]
@@ -799,16 +896,24 @@ class OBQCValidator:
                 # Unqualified column - check for ambiguity
                 col_key = col_ref.lower()
 
+                # Innermost level that provides the name wins; SQL stops there,
+                # so tables further out are not candidates and cannot make it
+                # ambiguous.
                 found_in_tables: list[str] = []
 
-                # Only check tables that are actually in the query
-                for table_name in result.parsed_tables:
-                    table_key = table_name.lower()
-                    if (
-                        table_key in self._schema_cache.tables
-                        and col_key in self._schema_cache.tables[table_key].columns
-                    ):
-                        found_in_tables.append(table_name)
+                for level in scope:
+                    matches = [
+                        table_name
+                        for table_name in level
+                        if (
+                            table_name.lower() in self._schema_cache.tables
+                            and col_key
+                            in self._schema_cache.tables[table_name.lower()].columns
+                        )
+                    ]
+                    if matches:
+                        found_in_tables = matches
+                        break
 
                 # Columns of a catalog table cannot be resolved -- the ontology
                 # does not describe them. If the query touches one at all, an
@@ -816,12 +921,13 @@ class OBQCValidator:
                 # its column, so there is nothing to report. Only when every
                 # table in the query is describable can a missing name be
                 # called missing.
+                # Unresolved names are judged against every level, since any of
+                # them could legitimately have provided the name.
+                visible = [t for level in scope for t in level]
                 describable_tables = [
-                    t for t in result.parsed_tables if t not in result.catalog_tables
+                    t for t in visible if t not in result.catalog_tables
                 ]
-                all_tables_describable = len(describable_tables) == len(
-                    result.parsed_tables
-                )
+                all_tables_describable = len(describable_tables) == len(visible)
 
                 if (
                     len(found_in_tables) == 0
@@ -848,12 +954,39 @@ class OBQCValidator:
                         )
                     )
 
-    def _validate_joins(self, result: OBQCResult) -> None:
-        """Rule: Validate joins use declared FK relationships."""
-        if len(result.parsed_tables) < 2:
-            return  # No joins needed for single table
+    def _flag_cartesian_products(self, parsed: exp.Expr, result: OBQCResult) -> bool:
+        """Report SELECTs that combine tables without any join condition.
 
-        if len(result.parsed_tables) > 1 and len(result.parsed_joins) == 0:
+        Judged per SELECT. Counting tables and joins across the whole query
+        made every subquery look like a cross product: "SELECT id FROM users
+        WHERE id IN (SELECT user_id FROM orders)" has two tables and no joins
+        in total, so it was rejected outright even though each SELECT is
+        perfectly ordinary.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to append issues to.
+
+        Returns:
+            True if a cross product was reported.
+        """
+        found = False
+
+        for select in parsed.find_all(exp.Select):
+            tables = [
+                t
+                for t in select.find_all(exp.Table)
+                if t.name and t.find_ancestor(exp.Select) is select
+            ]
+            if len(tables) < 2:
+                continue
+
+            # Comma-separated FROM items arrive as joins carrying no ON, so a
+            # cross product is a scope whose joins all lack one.
+            joins = select.args.get("joins") or []
+            if joins and any(join.args.get("on") for join in joins):
+                continue
+
             result.issues.append(
                 OBQCIssue(
                     issue_type=OBQCIssueType.MISSING_JOIN_CONDITION,
@@ -863,7 +996,19 @@ class OBQCValidator:
                     suggestion="Add explicit JOIN ... ON conditions",
                 )
             )
+            found = True
+
+        return found
+
+    def _validate_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
+        """Rule: Validate joins use declared FK relationships."""
+        if self._flag_cartesian_products(parsed, result):
+            # A cross product is reported once per query; the per-join checks
+            # below would restate it as a missing ON condition.
             return
+
+        if len(result.parsed_tables) < 2:
+            return  # No joins needed for single table
 
         for join_info in result.parsed_joins:
             join_table = join_info.get("table")
@@ -1036,6 +1181,35 @@ class OBQCValidator:
         # Same category or unknown are compatible
         return cat1 == cat2 or cat1 == "unknown" or cat2 == "unknown"
 
+    def _own_aggregates(self, select: exp.Select) -> list[Any]:
+        """Aggregate calls belonging to this SELECT's own scope.
+
+        Args:
+            select: The SELECT to inspect.
+
+        Returns:
+            Aggregate expressions whose nearest enclosing SELECT is *select*.
+        """
+        agg_types = (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max)
+        return [
+            agg
+            for agg in select.find_all(*agg_types)
+            if agg.find_ancestor(exp.Select) is select
+        ]
+
+    def _select_aggregates(self, select: exp.Select) -> bool:
+        """Whether this SELECT itself applies an aggregate function.
+
+        Aggregates inside a nested subquery belong to that subquery, not here.
+
+        Args:
+            select: The SELECT to inspect.
+
+        Returns:
+            True if an aggregate call sits in this SELECT's own scope.
+        """
+        return bool(self._own_aggregates(select))
+
     def _validate_aggregation_context(
         self, parsed: exp.Expr, result: OBQCResult
     ) -> None:
@@ -1044,6 +1218,14 @@ class OBQCValidator:
             return
 
         for select in parsed.find_all(exp.Select):
+            # Aggregation is a property of one SELECT. The query-wide flag above
+            # is true if an aggregate appears anywhere, so a subquery's SUM used
+            # to make the outer SELECT look like it aggregates -- and every
+            # plain column in it was reported as missing from a GROUP BY that
+            # the query never needed.
+            if not self._select_aggregates(select):
+                continue
+
             expressions = select.args.get("expressions", [])
 
             # Aliases declared by this select, mapped to the column they stand
@@ -1138,10 +1320,13 @@ class OBQCValidator:
                                 )
 
     def _is_inside_aggregate(self, expr: exp.Expression, select: exp.Select) -> bool:
-        """Check if expression is inside an aggregate function."""
-        agg_types = (exp.Sum, exp.Count, exp.Avg, exp.Min, exp.Max)
+        """Check if expression is inside an aggregate function of this SELECT.
 
-        for agg in select.find_all(*agg_types):
+        Aggregates in a nested subquery are that subquery's; counting them here
+        made an outer column look aggregated because some inner aggregate
+        happened to mention the same name.
+        """
+        for agg in self._own_aggregates(select):
             for col in agg.find_all(exp.Column):
                 if (
                     isinstance(expr, exp.Column)
@@ -1204,7 +1389,14 @@ class OBQCValidator:
         ontology agree by construction. Falls back to the relationship heuristic
         when no disjointness axioms are present (e.g. minimal imports).
         """
-        if not result.has_aggregation:
+        # Only joins whose own SELECT aggregates can inflate a total. The
+        # query-wide flag is true if an aggregate appears anywhere, so an
+        # unrelated subquery's COUNT(*) used to raise a fan-trap warning about
+        # outer joins that aggregate nothing.
+        aggregating_joins = [
+            j for j in result.parsed_joins if j.get("scope_aggregates")
+        ]
+        if not aggregating_joins:
             return
 
         if len(result.parsed_tables) < 2:
@@ -1213,11 +1405,17 @@ class OBQCValidator:
         if self._schema_cache is None:
             return
 
-        # --- Axiom-grounded path: disjoint sibling facts in the same query ----
-        queried = {t.lower() for t in result.parsed_tables}
-        disjoint_hits: set[frozenset] = {
-            pair for pair in self._disjoint_pairs if pair <= queried
-        }
+        # --- Axiom-grounded path: disjoint sibling facts in one SELECT --------
+        #
+        # Scoped like the heuristic below. Reading the disjoint pair off every
+        # table named in the query flagged a fact that only appears inside a
+        # semi-join filter: "... FROM customers JOIN orders ... WHERE EXISTS
+        # (SELECT 1 FROM returns ...)" aggregates orders alone, and returns
+        # cannot multiply its rows from inside the subquery.
+        disjoint_hits: set[frozenset] = set()
+        for scope in result.aggregating_scopes:
+            queried = {t.lower() for t in scope}
+            disjoint_hits |= {pair for pair in self._disjoint_pairs if pair <= queried}
         if disjoint_hits:
             result.fan_trap_risk = True
             involved = sorted({t for pair in disjoint_hits for t in pair})
@@ -1254,10 +1452,15 @@ class OBQCValidator:
         # existing: "sales JOIN clients JOIN countries" -- many sales to one
         # client to one country, where no row is ever duplicated -- was warned
         # about because clients happens to reference countries.
-        one_to_many_count = 0
-        involved_tables: list[str] = []
+        # Counted within each aggregating SELECT, not pooled across them. Rows
+        # are multiplied by joins in the same query, so two subqueries that
+        # fan out once each are two safe aggregations -- summing them reported
+        # a fan-trap that exists in neither.
+        fan_outs_by_scope: dict[Any, list[str]] = {}
 
-        for join_info in result.parsed_joins:
+        # Only joins sitting in an aggregating SELECT; a subquery's joins
+        # cannot multiply rows the outer query aggregates.
+        for join_info in aggregating_joins:
             join_table = join_info.get("table")
             if not join_table:
                 continue
@@ -1273,8 +1476,12 @@ class OBQCValidator:
                 continue
 
             if any(self._join_fans_out(join_table, anchor) for anchor in anchors):
-                one_to_many_count += 1
-                involved_tables.append(join_table)
+                scope_id = join_info.get("scope_id")
+                fan_outs_by_scope.setdefault(scope_id, []).append(join_table)
+
+        worst_scope = max(fan_outs_by_scope.values(), key=len, default=[])
+        one_to_many_count = len(worst_scope)
+        involved_tables = worst_scope
 
         if one_to_many_count >= 2:
             result.fan_trap_risk = True
