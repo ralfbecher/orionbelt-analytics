@@ -161,6 +161,32 @@ class TestAddTripleAndSelect:
 
         assert [r["s"] for r in results] == [f"{EX}a"]
 
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            pytest.param("?from <{p}> ?o", id="variable-named-from"),
+            pytest.param("?s <{p}> ?o . ?s oba:from ?x", id="prefixed-name-from"),
+        ],
+    )
+    def test_from_lookalike_tokens_do_not_suppress_union(self, store, pattern):
+        """?from and oba:from are not dataset clauses and must keep the union.
+
+        ``\\bFROM\\b`` matched both -- '?' and ':' are word boundaries -- so a
+        query merely using them was narrowed to the empty default graph and
+        returned nothing, reintroducing the original zero-row failure.
+        """
+        store.add_triple(f"{EX}a", f"{EX}p", f"{EX}o", graph_uri=f"{EX}g1")
+        store.add_triple(
+            f"{EX}a", "https://ralforion.com/ns/oba#from", f"{EX}x", graph_uri=f"{EX}g1"
+        )
+
+        results = store.query_sparql(
+            "PREFIX oba: <https://ralforion.com/ns/oba#>\n"
+            "SELECT * WHERE { " + pattern.format(p=f"{EX}p") + " }"
+        )
+
+        assert len(results) == 1
+
     def test_list_tables_sparql_is_scoped_to_its_schema(self, store):
         """The FROM-based helper must not report tables from other schemas."""
         table = "https://ralforion.com/ns/oba#Table"

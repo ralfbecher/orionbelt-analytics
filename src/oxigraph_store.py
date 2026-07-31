@@ -89,20 +89,30 @@ def _escape_sparql_iri(value: str) -> str:
     return "".join(c for c in value if c not in forbidden)
 
 
-# Strips the regions a bare FROM keyword can hide in before we scan for one:
-# triple- and single-quoted literals, IRIs (an IRI path may end in ".../FROM"),
-# and # comments. Order matters -- literals first, so a '#' inside a string is
-# not mistaken for a comment.
+# Blanks every region a bare "FROM" can appear in without being the dataset
+# keyword, so the scan below sees only real syntax. Each alternative matters:
+# a literal or comment may contain the word; an IRI path may end in ".../FROM";
+# and -- less obviously -- `?from`, `oba:from` and `"x"@from` all put FROM
+# between two word boundaries, so \bFROM\b alone matched them and wrongly
+# suppressed the union default graph.
+#
+# Order matters. Literals come first so a '#' inside a string is not read as a
+# comment, and variables/prefixed names come after IRIs so `<...>` wins.
 _SPARQL_NON_KEYWORD_REGIONS = re.compile(
     r"'''.*?'''"  # long single-quoted literal
     r'|""".*?"""'  # long double-quoted literal
     r"|'(?:[^'\\\n]|\\.)*'"  # short single-quoted literal
     r'|"(?:[^"\\\n]|\\.)*"'  # short double-quoted literal
     r"|<[^<>\"{}|^`\\]*>"  # IRI reference
-    r"|#[^\n]*",  # comment to end of line
+    r"|#[^\n]*"  # comment to end of line
+    r"|[?$][A-Za-z0-9_]+"  # variable: ?from, $from
+    r"|@[A-Za-z0-9-]+"  # language tag: "x"@from
+    r"|[A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]*",  # prefixed name: oba:from, _:from
     re.DOTALL,
 )
 
+# A real dataset clause is the standalone keyword; by this point the tokens that
+# merely contain it have been blanked out.
 _SPARQL_FROM_KEYWORD = re.compile(r"\bFROM\b", re.IGNORECASE)
 
 
@@ -112,11 +122,17 @@ def _declares_dataset(sparql_query: str) -> bool:
     Such a query has already said exactly which graphs it wants, so the caller
     must not widen it (see :meth:`OxigraphStoreManager.query_sparql`).
 
+    This is a lexical scan, not a parse -- pyoxigraph exposes no query AST to
+    Python. It is deliberately biased towards *not* detecting a clause: a false
+    positive silently narrows a query to an empty default graph and returns
+    nothing, which is the failure this whole mechanism exists to prevent.
+
     Args:
         sparql_query: SPARQL query string.
 
     Returns:
-        True if a ``FROM`` keyword appears outside literals, IRIs and comments.
+        True if a standalone ``FROM`` keyword appears outside literals, IRIs,
+        comments, variables, language tags and prefixed names.
     """
     return bool(
         _SPARQL_FROM_KEYWORD.search(_SPARQL_NON_KEYWORD_REGIONS.sub(" ", sparql_query))
