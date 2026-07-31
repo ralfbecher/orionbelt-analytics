@@ -1,11 +1,18 @@
 """Tests for OBQC (Ontology-Based Query Check) validator."""
 
+import json
 import unittest
 
 from rdflib import Graph, Literal, Namespace
 from rdflib.namespace import OWL, RDF, RDFS, XSD
 
-from src.obqc_validator import OBQCIssue, OBQCIssueType, OBQCSeverity, OBQCValidator
+from src.obqc_validator import (
+    OBQCIssue,
+    OBQCIssueType,
+    OBQCResult,
+    OBQCSeverity,
+    OBQCValidator,
+)
 
 
 def create_sample_ontology_graph() -> tuple[Graph, str]:
@@ -1334,6 +1341,52 @@ class TestOBQCAxiomDrivenFanTrap(unittest.TestCase):
         )
 
         self.assertTrue(result.fan_trap_risk)
+
+
+class TestOBQCResponseShape(unittest.TestCase):
+    """to_dict() is the wire format, so internal bookkeeping must not appear.
+
+    Fan-trap grouping needs to know which SELECT owns a join, but that is a
+    detail of one parse. Leaving it on the join dicts published it through
+    every execute_sql_query response.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+        self.query = "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+
+    def test_joins_expose_only_public_keys(self):
+        joins = self.validator.validate(self.query).to_dict()["parsed_joins"]
+
+        self.assertTrue(joins)
+        for join in joins:
+            self.assertEqual(
+                set(join) - set(OBQCResult.PUBLIC_JOIN_KEYS),
+                set(),
+                f"internal keys leaked into the response: {sorted(join)}",
+            )
+
+    def test_response_is_reproducible(self):
+        """An identifier tied to object identity varies between runs."""
+        first = self.validator.validate(self.query).to_dict()
+        second = self.validator.validate(self.query).to_dict()
+
+        self.assertEqual(first["parsed_joins"], second["parsed_joins"])
+
+    def test_response_is_json_serializable(self):
+        payload = self.validator.validate(self.query).to_dict()
+
+        json.dumps(payload)
+
+    def test_useful_join_details_are_still_published(self):
+        """Stripping internals must not strip what callers rely on."""
+        join = self.validator.validate(self.query).to_dict()["parsed_joins"][0]
+
+        self.assertEqual(join["table"], "orders")
+        self.assertEqual(join["on_tables"], ["users", "orders"])
+        self.assertIn("on_condition", join)
 
 
 class TestOBQCDialectParity(unittest.TestCase):

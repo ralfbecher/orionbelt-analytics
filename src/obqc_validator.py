@@ -8,7 +8,7 @@ and fan-trap patterns without using LLM.
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 import sqlglot
 from rdflib import Graph, Namespace, URIRef
@@ -163,6 +163,17 @@ class OBQCResult:
     fan_trap_risk: bool = False
     ontology_compatible: bool = True  # Whether ontology has oba: annotations
 
+    # Keys of parsed_joins that belong in a response. Everything else the
+    # extractor records is bookkeeping for the validation rules and must not
+    # reach a caller -- notably scope_id, which identifies a SELECT within one
+    # parse and means nothing outside it.
+    PUBLIC_JOIN_KEYS: ClassVar[tuple[str, ...]] = (
+        "type",
+        "table",
+        "on_condition",
+        "on_tables",
+    )
+
     def to_dict(self) -> dict[str, Any]:
         """Convert result to dictionary for JSON serialization."""
         return {
@@ -181,7 +192,10 @@ class OBQCResult:
             ],
             "parsed_tables": self.parsed_tables,
             "parsed_columns": self.parsed_columns,
-            "parsed_joins": self.parsed_joins,
+            "parsed_joins": [
+                {k: j[k] for k in self.PUBLIC_JOIN_KEYS if k in j}
+                for j in self.parsed_joins
+            ],
             "has_aggregation": self.has_aggregation,
             "has_group_by": self.has_group_by,
             "fan_trap_risk": self.fan_trap_risk,
@@ -737,7 +751,7 @@ class OBQCValidator:
         # EXISTS overwrite the outer "FROM users u", so the outer join's ON
         # condition resolved to order_items and its fan-out was judged against
         # the wrong table -- silently dropping a fan-trap warning.
-        for select in parsed.find_all(exp.Select):
+        for scope_index, select in enumerate(parsed.find_all(exp.Select)):
             alias_map = self._build_alias_map(select)
             # Whether the SELECT owning these joins aggregates. Fan-out only
             # inflates a total if the aggregation happens over these joins --
@@ -761,8 +775,10 @@ class OBQCValidator:
                     "on_condition": None,
                     "scope_aggregates": scope_aggregates,
                     # Identifies the owning SELECT so fan-out is counted within
-                    # one query rather than pooled across unrelated ones.
-                    "scope_id": id(select),
+                    # one query rather than pooled across unrelated ones. A
+                    # traversal index, not id(select): object addresses vary
+                    # per run, and this value must never reach a response.
+                    "scope_id": scope_index,
                     # Real table names referenced by the ON condition. Fan-trap
                     # detection needs to know which table this join attaches
                     # to, and the ON condition is the only place that says so.
