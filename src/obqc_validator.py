@@ -73,6 +73,53 @@ CATALOG_SCHEMAS = frozenset(
 # which they are not. src/security.py blocks them outright.
 
 
+# Where a SELECT alias may be referenced, keyed by the database type callers
+# pass to validate() (not the sqlglot parsing dialect -- dremio parses as
+# trino, but is configured here under its own name).
+#
+# ORDER BY and GROUP BY see the select list's output names everywhere. HAVING
+# is where the dialects diverge, checked against vendor documentation:
+#
+#   postgresql  no   an output name may be used in GROUP BY and ORDER BY but
+#                    not in WHERE or HAVING (PostgreSQL SELECT reference)
+#   mysql       yes  permitted in HAVING
+#   clickhouse  yes  "reference aggregation results from SELECT clause in
+#                    HAVING clause by their alias" (HAVING clause docs)
+#   snowflake   yes  "expressions in the SELECT list can be referred to by the
+#                    column alias defined in the list" (HAVING docs)
+#   databricks  yes  resolvable in HAVING, though a real column of the same
+#                    name wins over the alias (name-resolution docs)
+#   bigquery    yes  aliases are visible to GROUP BY, HAVING and ORDER BY
+#   duckdb      yes  verified directly against duckdb 1.5.5 -- it accepts an
+#                    alias in every clause, WHERE included
+#   dremio      ?    Trino's SELECT docs describe GROUP BY and ORDER BY in
+#                    terms of input columns and ordinals without stating
+#                    whether an output alias resolves. Left permissive; see
+#                    below for why the unknown case errs that way.
+#
+# The default is permissive because OBQC errors block execution. Wrongly
+# allowing an alias costs nothing -- the database rejects the query itself,
+# with a better message. Wrongly forbidding one stops a query that would have
+# run. So a clause is only closed off where documentation says it is closed,
+# which today means PostgreSQL's HAVING.
+DEFAULT_ALIAS_VISIBLE_CLAUSES = ("order", "group", "having", "qualify")
+
+ALIAS_VISIBLE_CLAUSES = {
+    "postgresql": ("order", "group", "qualify"),
+    # DuckDB resolves aliases laterally, including in WHERE.
+    "duckdb": ("order", "group", "having", "qualify", "where"),
+}
+
+# Dialects where an output name is only recognised as a whole sort or group
+# key, never inside a larger expression. PostgreSQL's ORDER BY documentation
+# is explicit that an output name may be used as a sort key but that anything
+# more than a bare name is evaluated as an expression over input columns, so
+# "ORDER BY t + 1" fails there while DuckDB -- checked against 1.5.5 --
+# accepts it. Listed rather than defaulted for the usual reason: forbidding it
+# where it is legal would block a query the database would have run.
+ALIAS_STANDALONE_ONLY = frozenset({"postgresql"})
+
+
 @dataclass
 class OBQCIssue:
     """Single OBQC validation issue."""
@@ -97,6 +144,9 @@ class OBQCResult:
     # ontology, which describes user data, so ontology-existence rules skip them.
     catalog_tables: set[str] = field(default_factory=set)
     parsed_columns: list[str] = field(default_factory=list)
+    # Lower-cased SELECT aliases referenced from ORDER BY / GROUP BY / HAVING.
+    # They resolve to select-list output, not to any table's column.
+    select_aliases: set[str] = field(default_factory=set)
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
     has_aggregation: bool = False
     has_group_by: bool = False
@@ -447,7 +497,7 @@ class OBQCValidator:
 
         # Extract query components
         self._extract_tables(parsed, result)
-        self._extract_columns(parsed, result)
+        self._extract_columns(parsed, result, dialect)
         self._extract_joins(parsed, result)
         self._extract_aggregations(parsed, result)
 
@@ -497,14 +547,124 @@ class OBQCValidator:
         # thing that would catch the non-catalog use, so it keeps applying.
         result.catalog_tables -= shadowed
 
-    def _extract_columns(self, parsed: exp.Expr, result: OBQCResult) -> None:
-        """Extract all column references from parsed query."""
+    def _extract_columns(
+        self, parsed: exp.Expr, result: OBQCResult, dialect: str = "postgresql"
+    ) -> None:
+        """Extract column references, excluding legal SELECT-alias references."""
+        alias_refs = self._select_alias_references(parsed, result, dialect)
+
         for column in parsed.find_all(exp.Column):
+            # Alias references resolve to the select list, not to a table, so
+            # they are not column references at all. Dropping them here rather
+            # than excusing their names later keeps the exemption tied to the
+            # exact node: a name is only excused where it really is an alias
+            # use, in the query scope that declared it.
+            if id(column) in alias_refs:
+                continue
             col_ref = column.name
             if column.table:
                 col_ref = f"{column.table}.{column.name}"
             if col_ref and col_ref not in result.parsed_columns:
                 result.parsed_columns.append(col_ref)
+
+    def _select_alias_references(
+        self, parsed: exp.Expr, result: OBQCResult, dialect: str
+    ) -> set[int]:
+        """Identify column nodes that legally reference a SELECT alias.
+
+        ``SELECT SUM(total) AS revenue FROM orders ORDER BY revenue`` is valid
+        SQL, but ``revenue`` is not a column of any table, so the column rule
+        reported it missing and -- being an error -- blocked the query.
+
+        Resolution is per SELECT and per clause. An alias is visible only to
+        clauses evaluated after the select list, and only within the query that
+        declared it: a subquery's alias must not excuse a bogus name in the
+        outer SELECT.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to record resolved alias names on (reporting only).
+            dialect: Database dialect, which decides where aliases are visible.
+
+        Returns:
+            ``id()`` of every column node that is an alias reference.
+        """
+        clauses = ALIAS_VISIBLE_CLAUSES.get(
+            dialect.lower(), DEFAULT_ALIAS_VISIBLE_CLAUSES
+        )
+        alias_refs: set[int] = set()
+
+        for select in parsed.find_all(exp.Select):
+            aliases = {
+                projection.alias.lower()
+                for projection in select.expressions
+                if isinstance(projection, exp.Alias) and projection.alias
+            }
+            if not aliases:
+                continue
+
+            standalone_only = dialect.lower() in ALIAS_STANDALONE_ONLY
+
+            for clause in clauses:
+                node = select.args.get(clause)
+                if node is None:
+                    continue
+                for column in node.find_all(exp.Column):
+                    # A qualified reference names a real table, so it is not an
+                    # alias use and stays subject to the normal column rule.
+                    if column.table or column.name.lower() not in aliases:
+                        continue
+                    # A nested SELECT re-declares its own scope; its clauses
+                    # are resolved on its own iteration, not this one.
+                    if column.find_ancestor(exp.Select) is not select:
+                        continue
+                    if standalone_only and not self._is_standalone_key(column, node):
+                        continue
+                    alias_refs.add(id(column))
+                    result.select_aliases.add(column.name.lower())
+
+        return alias_refs
+
+    def _is_real_column(self, name: str, result: OBQCResult) -> bool:
+        """Whether *name* is a column of some table the query references.
+
+        Args:
+            name: Bare or qualified column name, lower-cased.
+            result: Result carrying the query's tables.
+
+        Returns:
+            True if any queried table declares the column.
+        """
+        if self._schema_cache is None:
+            return False
+
+        bare = name.split(".")[-1]
+        for table_name in result.parsed_tables:
+            table = self._schema_cache.tables.get(table_name.lower())
+            if table and bare in table.columns:
+                return True
+        return False
+
+    def _is_standalone_key(self, column: exp.Column, clause_node: exp.Expr) -> bool:
+        """Whether *column* is a whole sort/group key rather than part of one.
+
+        ``ORDER BY t`` refers to the output name; ``ORDER BY t + 1`` is an
+        expression, which strict dialects evaluate over input columns only.
+
+        Args:
+            column: Candidate alias reference.
+            clause_node: The ORDER BY / GROUP BY node containing it.
+
+        Returns:
+            True if the column is one of the clause's top-level keys.
+        """
+        for key in clause_node.expressions:
+            # ORDER BY keys are wrapped in Ordered (carrying ASC/DESC etc.);
+            # GROUP BY keys are the expressions themselves.
+            target = key.this if isinstance(key, exp.Ordered) else key
+            if target is column:
+                return True
+        return False
 
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
@@ -589,6 +749,7 @@ class OBQCValidator:
             else:
                 # Unqualified column - check for ambiguity
                 col_key = col_ref.lower()
+
                 found_in_tables: list[str] = []
 
                 # Only check tables that are actually in the query
@@ -836,6 +997,24 @@ class OBQCValidator:
         for select in parsed.find_all(exp.Select):
             expressions = select.args.get("expressions", [])
 
+            # Aliases declared by this select, mapped to the column they stand
+            # for. GROUP BY may name either, and the two must be treated as the
+            # same key: "SELECT user_id AS uid ... GROUP BY uid" groups by
+            # user_id, but comparing the alias against the source column name
+            # reported user_id as not grouped.
+            alias_to_column: dict[str, str] = {}
+            for projection in expressions:
+                if (
+                    isinstance(projection, exp.Alias)
+                    and projection.alias
+                    and isinstance(projection.this, exp.Column)
+                ):
+                    source = projection.this
+                    qualified = source.name.lower()
+                    if source.table:
+                        qualified = f"{source.table.lower()}.{qualified}"
+                    alias_to_column[projection.alias.lower()] = qualified
+
             # Get GROUP BY columns
             group_by_cols: set[str] = set()
             if select.args.get("group"):
@@ -845,6 +1024,21 @@ class OBQCValidator:
                         if group_expr.table:
                             gb_col_name = f"{group_expr.table.lower()}.{gb_col_name}"
                         group_by_cols.add(gb_col_name)
+
+                        # Record the underlying column too, so grouping by an
+                        # alias satisfies the check on its source column.
+                        #
+                        # Only when the name is not itself a real column: a name
+                        # that is both an input column and an output alias
+                        # resolves to the input column, so "SELECT total AS
+                        # user_id ... GROUP BY user_id" groups by orders.user_id
+                        # and leaves total ungrouped. Verified against DuckDB,
+                        # which rejects exactly that query, and documented for
+                        # PostgreSQL.
+                        source_col = alias_to_column.get(gb_col_name)
+                        if source_col and not self._is_real_column(gb_col_name, result):
+                            group_by_cols.add(source_col)
+                            group_by_cols.add(source_col.split(".")[-1])
 
             # Check each SELECT expression
             for expr in expressions:

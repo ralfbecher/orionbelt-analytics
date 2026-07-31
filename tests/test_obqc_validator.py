@@ -466,6 +466,243 @@ class TestOBQCCatalogQueries(unittest.TestCase):
         self.assertFalse(result.is_valid)
 
 
+class TestOBQCSelectAliases(unittest.TestCase):
+    """SELECT aliases referenced by later clauses are not table columns.
+
+    ORDER BY / GROUP BY / HAVING are evaluated after the select list and can
+    see its output names. The column rule knew only about table columns, so
+    "ORDER BY revenue" over "SUM(total) AS revenue" was reported missing --
+    an error, which blocks the query.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_order_by_aggregate_alias(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue DESC"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_order_by_plain_column_alias(self):
+        result = self.validator.validate(
+            "SELECT name AS customer FROM users ORDER BY customer"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_group_by_and_order_by_alias(self):
+        result = self.validator.validate(
+            "SELECT COUNT(*) AS n FROM orders GROUP BY user_id ORDER BY n DESC"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_having_alias_rejected_on_postgres(self):
+        """PostgreSQL permits an output name in GROUP BY and ORDER BY, but not
+        in WHERE or HAVING -- so this is invalid and must be reported."""
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders "
+            "GROUP BY user_id HAVING revenue > 10",
+            dialect="postgresql",
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_having_alias_allowed_on_dialects_that_permit_it(self):
+        """Every supported database except PostgreSQL resolves the alias here.
+
+        Checked against vendor documentation, and directly against DuckDB.
+        Dremio is included by policy rather than by evidence: Trino's docs do
+        not state whether an output alias resolves in HAVING, and OBQC errors
+        block execution, so an unverified clause is left open -- a wrongly
+        allowed alias is rejected by the database itself, a wrongly forbidden
+        one stops a query that would have run.
+        """
+        for dialect in (
+            "mysql",
+            "clickhouse",
+            "snowflake",
+            "databricks",
+            "bigquery",
+            "duckdb",
+            "dremio",
+        ):
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT user_id, SUM(total) AS revenue FROM orders "
+                    "GROUP BY user_id HAVING revenue > 10",
+                    dialect=dialect,
+                )
+
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_where_alias_errors_except_on_duckdb(self):
+        """DuckDB resolves aliases laterally, including in WHERE."""
+        for dialect in ("postgresql", "mysql", "snowflake", "bigquery"):
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT total AS t FROM orders WHERE t > 5", dialect=dialect
+                )
+                self.assertFalse(result.is_valid)
+
+        duckdb_result = self.validator.validate(
+            "SELECT total AS t FROM orders WHERE t > 5", dialect="duckdb"
+        )
+
+        self.assertTrue(
+            duckdb_result.is_valid, [i.message for i in duckdb_result.issues]
+        )
+
+    def test_order_by_alias_allowed_on_every_dialect(self):
+        from src.constants import SUPPORTED_DB_TYPES
+
+        for dialect in SUPPORTED_DB_TYPES:
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue",
+                    dialect=dialect,
+                )
+
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_group_by_alias_satisfies_the_aggregation_rule(self):
+        """Grouping by an alias groups by its source column.
+
+        The GROUP BY key was recorded as the alias while the SELECT expression
+        was checked as the source column, so the two never matched and a valid
+        query was rejected as not grouped.
+        """
+        result = self.validator.validate(
+            "SELECT user_id AS uid, SUM(total) FROM orders GROUP BY uid"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_group_by_name_that_is_also_a_column_resolves_to_the_column(self):
+        """An ambiguous GROUP BY name is the input column, not the alias.
+
+        "SELECT total AS user_id ... GROUP BY user_id" groups by orders.user_id
+        and leaves total ungrouped. Treating the name as the alias marked total
+        as grouped and passed a query the database rejects. Verified against
+        DuckDB, which fails it with "column total must appear in the GROUP BY
+        clause", and documented for PostgreSQL.
+        """
+        for dialect in ("postgresql", "duckdb"):
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT total AS user_id, SUM(id) FROM orders GROUP BY user_id",
+                    dialect=dialect,
+                )
+
+                self.assertFalse(result.is_valid)
+
+    def test_unambiguous_group_by_alias_still_resolves(self):
+        """uid is not a column of any queried table, so it is the alias."""
+        result = self.validator.validate(
+            "SELECT user_id AS uid, SUM(total) FROM orders GROUP BY uid"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_alias_inside_an_order_by_expression_is_rejected_on_postgres(self):
+        """PostgreSQL takes an output name as a sort key only, not inside an
+        expression: ORDER BY t + 1 is evaluated over input columns."""
+        result = self.validator.validate(
+            "SELECT total AS t FROM orders ORDER BY t + 1", dialect="postgresql"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_alias_inside_an_order_by_expression_is_allowed_on_duckdb(self):
+        """DuckDB accepts it -- verified against duckdb 1.5.5."""
+        result = self.validator.validate(
+            "SELECT total AS t FROM orders ORDER BY t + 1", dialect="duckdb"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_standalone_sort_key_still_resolves_on_postgres(self):
+        """The restriction is about expressions, not about sort modifiers."""
+        for query in (
+            "SELECT total AS t FROM orders ORDER BY t",
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue DESC",
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue DESC NULLS LAST",
+        ):
+            with self.subTest(query=query):
+                result = self.validator.validate(query, dialect="postgresql")
+
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_subquery_alias_does_not_excuse_the_outer_query(self):
+        """Alias visibility is per SELECT scope.
+
+        Recording alias names globally let an inner query's alias excuse an
+        unrelated bogus column in the outer SELECT.
+        """
+        result = self.validator.validate(
+            "SELECT bogus, (SELECT total AS bogus FROM orders ORDER BY bogus "
+            "LIMIT 1) FROM orders"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_subquery_alias_still_works_in_its_own_scope(self):
+        result = self.validator.validate(
+            "SELECT (SELECT total AS t FROM orders ORDER BY t LIMIT 1) FROM orders"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_alias_is_recorded(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue"
+        )
+
+        self.assertIn("revenue", result.select_aliases)
+
+    def test_alias_matching_is_case_insensitive(self):
+        result = self.validator.validate(
+            "SELECT SUM(total) AS Revenue FROM orders ORDER BY REVENUE"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_alias_in_where_still_errors(self):
+        """WHERE is evaluated before the select list, so this is invalid SQL
+        and must keep failing."""
+        result = self.validator.validate("SELECT total AS t FROM orders WHERE t > 5")
+
+        self.assertFalse(result.is_valid)
+
+    def test_unknown_order_by_column_still_errors(self):
+        """The exemption covers declared aliases, not any ORDER BY name."""
+        result = self.validator.validate(
+            "SELECT total FROM orders ORDER BY nonexistent_col"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_qualified_reference_to_an_alias_still_errors(self):
+        """orders.t names a table column, and there is none called t."""
+        result = self.validator.validate(
+            "SELECT total AS t FROM orders ORDER BY orders.t"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_alias_does_not_leak_into_other_column_checks(self):
+        """Declaring an alias must not excuse a genuinely bad column."""
+        result = self.validator.validate(
+            "SELECT total AS t, bogus_col FROM orders ORDER BY t"
+        )
+
+        self.assertFalse(result.is_valid)
+
+
 class TestOBQCFanTrapDetection(unittest.TestCase):
     """Test suite specifically for fan-trap detection."""
 
