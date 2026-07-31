@@ -19,6 +19,7 @@ from typing import Any, cast
 import numpy as np
 
 from ..paths import OUTPUT_DIR
+from .embedder import DEFAULT_EMBEDDING_MODEL, EMBEDDING_SCHEMA_VERSION
 
 try:
     import chromadb
@@ -59,6 +60,7 @@ class ChromaDBVectorStore:
         connection_id: str = "default",
         schema_name: str = "default",
         dimension: int = 384,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
     ):
         """
         Initialize ChromaDB vector store.
@@ -67,6 +69,9 @@ class ChromaDBVectorStore:
             connection_id: Database connection fingerprint (for file isolation)
             schema_name: Schema identifier
             dimension: Embedding dimension (for compatibility, not used by ChromaDB)
+            embedding_model: Backend whose vectors this collection holds. A
+                collection built by a different backend is dropped and rebuilt,
+                since both emit 384 dimensions and would otherwise mix silently.
         """
         if not CHROMADB_AVAILABLE:
             raise ImportError(
@@ -76,6 +81,7 @@ class ChromaDBVectorStore:
         self.connection_id = connection_id
         self.schema_name = schema_name
         self.dimension = dimension
+        self.embedding_model = embedding_model
 
         # ChromaDB storage path
         db_path = OUTPUT_DIR / "chromadb" / connection_id
@@ -90,16 +96,46 @@ class ChromaDBVectorStore:
         # Collection name based on schema
         collection_name = f"schema_{schema_name}".replace("-", "_").replace(".", "_")
 
+        collection_metadata = {
+            "schema_name": schema_name,
+            "connection_id": connection_id,
+            "dimension": dimension,
+            "embedding_model": embedding_model,
+            "embedding_schema_version": EMBEDDING_SCHEMA_VERSION,
+        }
+
         # Get or create collection
         try:
             self.collection = self.client.get_or_create_collection(
                 name=collection_name,
-                metadata={
-                    "schema_name": schema_name,
-                    "connection_id": connection_id,
-                    "dimension": dimension,
-                },
+                metadata=collection_metadata,
             )
+
+            # A collection persisted by a different backend holds vectors of the
+            # right shape in the wrong space, so every query against it would be
+            # meaningless. get_or_create_collection does not update metadata on
+            # an existing collection, so compare what came back and rebuild on a
+            # mismatch. The data is a derived index -- dropping it costs one
+            # re-run of discover_schema(), not user data.
+            existing = self.collection.metadata or {}
+            if (
+                existing.get("embedding_model") != embedding_model
+                or existing.get("embedding_schema_version") != EMBEDDING_SCHEMA_VERSION
+            ):
+                logger.warning(
+                    f"Rebuilding ChromaDB collection {collection_name}: built with "
+                    f"model={existing.get('embedding_model')!r} "
+                    f"version={existing.get('embedding_schema_version')!r}, but this "
+                    f"process uses model={embedding_model!r} "
+                    f"version={EMBEDDING_SCHEMA_VERSION!r}. "
+                    "Re-run discover_schema() to repopulate it."
+                )
+                self.client.delete_collection(name=collection_name)
+                self.collection = self.client.get_or_create_collection(
+                    name=collection_name,
+                    metadata=collection_metadata,
+                )
+
             logger.info(
                 f"Initialized ChromaDB collection: {collection_name} at {db_path}"
             )

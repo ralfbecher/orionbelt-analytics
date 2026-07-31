@@ -156,7 +156,6 @@ async def _restore_workspace_core(
             if graphrag_section.get("initialized"):
                 try:
                     manager = GraphRAGManager(
-                        embedding_model="tfidf",
                         embedding_dimension=384,
                         connection_id=connection_id,
                         schema_name=sname,

@@ -5,15 +5,69 @@ Uses a lightweight embedding model to create semantic representations of:
 - Tables (name, description, columns)
 - Columns (name, type, relationships)
 - Relationships (foreign keys, join paths)
+
+Two backends are available:
+
+``minilm`` (default)
+    Sentence embeddings from all-MiniLM-L6-v2, run through the ONNX runtime
+    that ships with ChromaDB. Places semantically related text near each other,
+    so "which products are most profitable" reaches ``salesamount`` even though
+    they share no words.
+
+``tfidf``
+    Bag-of-words fallback. It has no notion of synonymy: a query term absent
+    from the fitted vocabulary contributes nothing, and a query whose terms are
+    *all* absent produces a zero vector, which scores 0.0 against every element
+    and degenerates the ranking to index order. It is kept only so the server
+    still works with no model available (offline install, restricted network).
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Backend identifiers. MINILM is the default; TFIDF is the offline fallback.
+MODEL_MINILM = "minilm"
+MODEL_TFIDF = "tfidf"
+MODEL_SENTENCE_TRANSFORMERS = "sentence-transformers"
+
+DEFAULT_EMBEDDING_MODEL = MODEL_MINILM
+
+# Bumped when a change to the embedding text or backend makes previously
+# persisted vectors incomparable to freshly generated ones. Both backends emit
+# 384 dimensions, so a stale index loads without any shape error and silently
+# returns nonsense -- the fingerprint is what makes that detectable.
+EMBEDDING_SCHEMA_VERSION = 2
+
+
+def resolve_embedding_model(requested: str | None = None) -> str:
+    """Pick the embedding backend, honouring GRAPHRAG_EMBEDDING_MODEL.
+
+    Args:
+        requested: Explicit backend name, or None to read the environment.
+
+    Returns:
+        One of ``minilm``, ``tfidf`` or ``sentence-transformers``. Unknown
+        names fall back to the default with a warning rather than raising, so a
+        typo in .env cannot stop the server from starting.
+    """
+    name = (requested or os.getenv("GRAPHRAG_EMBEDDING_MODEL") or "").strip().lower()
+    if not name:
+        return DEFAULT_EMBEDDING_MODEL
+    if name in (MODEL_MINILM, MODEL_TFIDF, MODEL_SENTENCE_TRANSFORMERS):
+        return name
+    logger.warning(
+        f"Unknown GRAPHRAG_EMBEDDING_MODEL '{name}'; "
+        f"using '{DEFAULT_EMBEDDING_MODEL}'. "
+        f"Valid values: {MODEL_MINILM}, {MODEL_TFIDF}, "
+        f"{MODEL_SENTENCE_TRANSFORMERS}."
+    )
+    return DEFAULT_EMBEDDING_MODEL
 
 
 @dataclass
@@ -31,19 +85,26 @@ class SchemaElement:
 class SchemaEmbedder:
     """Generates embeddings for schema elements using simple TF-IDF or sentence embeddings."""
 
-    def __init__(self, embedding_model: str = "tfidf"):
+    def __init__(self, embedding_model: str | None = None):
         """
         Initialize the schema embedder.
 
         Args:
-            embedding_model: Type of embedding ("tfidf", "sentence-transformers")
+            embedding_model: Backend name ("minilm", "tfidf",
+                "sentence-transformers"), or None to resolve from
+                GRAPHRAG_EMBEDDING_MODEL and fall back to the default.
         """
-        self.embedding_model = embedding_model
+        self.embedding_model = resolve_embedding_model(embedding_model)
         self._initialize_model()
 
     def _initialize_model(self) -> None:
-        """Initialize the embedding model."""
-        if self.embedding_model == "tfidf":
+        """Initialize the embedding model.
+
+        Any backend that cannot be loaded degrades to TF-IDF rather than
+        raising: a missing model must not stop the server from starting, and
+        the warning tells the operator that search quality is reduced.
+        """
+        if self.embedding_model == MODEL_TFIDF:
             from sklearn.feature_extraction.text import TfidfVectorizer
 
             self.vectorizer = TfidfVectorizer(
@@ -52,7 +113,33 @@ class SchemaEmbedder:
                 stop_words="english",
             )
             self._is_fitted = False
-        elif self.embedding_model == "sentence-transformers":
+        elif self.embedding_model == MODEL_MINILM:
+            try:
+                from chromadb.utils import embedding_functions
+
+                # Downloads all-MiniLM-L6-v2 (~79MB) into ~/.cache/chroma on
+                # first use, then runs locally. onnxruntime ships with chromadb,
+                # so this pulls in no extra dependency.
+                self._embedding_function = (
+                    embedding_functions.DefaultEmbeddingFunction()
+                )
+                logger.info("Loaded embedding model: all-MiniLM-L6-v2 (ONNX)")
+            except Exception as e:
+                # Broad by intent: an unavailable model shows up as an import
+                # error, a download failure, or an onnxruntime load error
+                # depending on the host, and every one of them must degrade
+                # rather than abort startup.
+                logger.warning(
+                    f"Could not load the MiniLM embedding model ({e}); falling "
+                    "back to TF-IDF. Semantic schema search will be much weaker "
+                    "-- queries sharing no literal words with the schema return "
+                    "results in index order. Set GRAPHRAG_EMBEDDING_MODEL=tfidf "
+                    "to silence this, or restore network access to "
+                    "~/.cache/chroma to use MiniLM."
+                )
+                self.embedding_model = MODEL_TFIDF
+                self._initialize_model()
+        elif self.embedding_model == MODEL_SENTENCE_TRANSFORMERS:
             try:
                 from sentence_transformers import SentenceTransformer
 
@@ -60,9 +147,9 @@ class SchemaEmbedder:
                 logger.info("Loaded sentence-transformers model: all-MiniLM-L6-v2")
             except ImportError:
                 logger.warning(
-                    "sentence-transformers not available, falling back to TF-IDF"
+                    "sentence-transformers not available, falling back to MiniLM"
                 )
-                self.embedding_model = "tfidf"
+                self.embedding_model = MODEL_MINILM
                 self._initialize_model()
 
     def create_table_embedding(
@@ -235,19 +322,22 @@ class SchemaEmbedder:
         Returns:
             Embedding vector
         """
-        if self.embedding_model == "sentence-transformers":
+        if self.embedding_model == MODEL_MINILM:
+            return np.asarray(self._embedding_function([text])[0], dtype=np.float32)
+        if self.embedding_model == MODEL_SENTENCE_TRANSFORMERS:
             encoded = self.model.encode(text, convert_to_numpy=True)
             return np.asarray(encoded)
-        else:
-            # TF-IDF embedding
-            if not self._is_fitted:
-                # For single document, we'll use a simple approach
-                # In production, fit on a corpus first
-                self.vectorizer.fit([text])
-                self._is_fitted = True
 
-            embedding = self.vectorizer.transform([text]).toarray()[0]
-            return np.asarray(embedding)
+        # TF-IDF embedding
+        if not self._is_fitted:
+            # Fitting on one document leaves a vocabulary of just that
+            # document's terms; batch_embed_schema() fits on the whole corpus
+            # first, so this only covers a lone embed before any indexing.
+            self.vectorizer.fit([text])
+            self._is_fitted = True
+
+        embedding = self.vectorizer.transform([text]).toarray()[0]
+        return np.asarray(embedding)
 
     def batch_embed_tables(
         self, tables_info: list[dict[str, Any]]

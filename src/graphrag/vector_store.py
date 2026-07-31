@@ -13,6 +13,8 @@ from typing import Any
 
 import numpy as np
 
+from .embedder import DEFAULT_EMBEDDING_MODEL, EMBEDDING_SCHEMA_VERSION
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,14 +33,20 @@ class StoredElement:
 class VectorStore:
     """In-memory vector store with similarity search capabilities."""
 
-    def __init__(self, dimension: int = 384):
+    def __init__(
+        self, dimension: int = 384, embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    ):
         """
         Initialize the vector store.
 
         Args:
             dimension: Embedding dimension
+            embedding_model: Backend whose vectors this store holds. Persisted
+                alongside the data so a store built by a different backend is
+                discarded on load instead of silently mis-answering.
         """
         self.dimension = dimension
+        self.embedding_model = embedding_model
         self.elements: list[StoredElement] = []
         self.embeddings_matrix: np.ndarray | None = None
         self._index_built = False
@@ -236,6 +244,11 @@ class VectorStore:
         """
         data = {
             "dimension": self.dimension,
+            # Which backend produced these vectors. Both backends emit 384
+            # dimensions, so without this a store written by one loads happily
+            # into the other and every similarity is meaningless.
+            "embedding_model": self.embedding_model,
+            "embedding_schema_version": EMBEDDING_SCHEMA_VERSION,
             "elements": [asdict(elem) for elem in self.elements],
         }
 
@@ -255,6 +268,27 @@ class VectorStore:
         """
         with open(filepath) as f:
             data = json.load(f)
+
+        # A store written by a different backend (or an older embedding-text
+        # format) is discarded rather than loaded. Its vectors have the right
+        # shape but live in an unrelated space, so keeping them would silently
+        # return nonsense; an empty store instead makes the caller re-index.
+        saved_model = data.get("embedding_model")
+        saved_version = data.get("embedding_schema_version")
+        if (
+            saved_model != self.embedding_model
+            or saved_version != EMBEDDING_SCHEMA_VERSION
+        ):
+            self.elements = []
+            self._index_built = False
+            logger.warning(
+                f"Discarding vector store at {filepath}: built with "
+                f"model={saved_model!r} version={saved_version!r}, but this "
+                f"process uses model={self.embedding_model!r} "
+                f"version={EMBEDDING_SCHEMA_VERSION!r}. Re-run discover_schema() "
+                "to rebuild the index."
+            )
+            return
 
         self.dimension = data["dimension"]
         self.elements = [StoredElement(**elem) for elem in data["elements"]]

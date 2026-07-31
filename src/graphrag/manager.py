@@ -41,7 +41,7 @@ class GraphRAGManager:
 
     def __init__(
         self,
-        embedding_model: str = "tfidf",
+        embedding_model: str | None = None,
         embedding_dimension: int = 384,
         connection_id: str | None = None,
         schema_name: str | None = None,
@@ -50,12 +50,18 @@ class GraphRAGManager:
         Initialize GraphRAG manager.
 
         Args:
-            embedding_model: Type of embedding ("tfidf", "sentence-transformers")
+            embedding_model: Backend name ("minilm", "tfidf",
+                "sentence-transformers"), or None to resolve from
+                GRAPHRAG_EMBEDDING_MODEL.
             embedding_dimension: Embedding vector dimension
             connection_id: Database connection fingerprint (for file isolation)
             schema_name: Schema name (for ChromaDB collection naming)
         """
         self.embedder = SchemaEmbedder(embedding_model=embedding_model)
+        # Read back from the embedder rather than the argument: it may have
+        # degraded to TF-IDF, and the store must record what actually produced
+        # the vectors.
+        resolved_model = self.embedder.embedding_model
 
         # Use ChromaDB if available, otherwise fallback to JSON-based storage.
         # Quoted deliberately: neither name is guaranteed bound at runtime --
@@ -67,12 +73,15 @@ class GraphRAGManager:
                 connection_id=connection_id or "default",
                 schema_name=schema_name or "default",
                 dimension=embedding_dimension,
+                embedding_model=resolved_model,
             )
             logger.info("Initialized ChromaDB vector store")
         else:
             from .vector_store import VectorStore
 
-            self.vector_store = VectorStore(dimension=embedding_dimension)
+            self.vector_store = VectorStore(
+                dimension=embedding_dimension, embedding_model=resolved_model
+            )
             logger.warning("Using JSON-based vector store (ChromaDB not available)")
 
         self.graph_retriever = GraphRetriever()

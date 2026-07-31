@@ -32,6 +32,9 @@ LOG_LEVEL=INFO
 # Set to false to disable automatic initialization
 AUTO_GRAPHRAG=true
 
+# Embedding backend for GraphRAG semantic schema search (minilm | tfidf)
+GRAPHRAG_EMBEDDING_MODEL=minilm
+
 # Phase 2: Auto-generate ontology in background after GraphRAG completes
 # Conservative default (false) - enable after testing
 # When enabled: ontology is automatically generated and stored in Oxigraph RDF store
@@ -202,6 +205,7 @@ DATABRICKS_SCHEMA=default
 |----------|---------|-------------|
 | `LOG_LEVEL` | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `AUTO_GRAPHRAG` | `true` | Auto-initialize GraphRAG when schema is analyzed |
+| `GRAPHRAG_EMBEDDING_MODEL` | `minilm` | Embedding backend for semantic schema search. `minilm` matches meaning (downloads ~79 MB on first use); `tfidf` is a keyword-only offline fallback that cannot match synonyms. See [Embedding model](#embedding-model) |
 | `AUTO_ONTOLOGY` | `false` | Auto-generate ontology after GraphRAG completes |
 | `ARTIFACT_KEEP_VERSIONS` | `3` | Generations of each ontology / schema / R2RML file to keep per schema. Older ones are pruned when a new one is written. Minimum 1 |
 | `AUTO_CLEANUP_ON_STARTUP` | `false` | Delete whole workspaces at startup: `false` (keep all), `true` (orphaned, or older than `WORKSPACE_MAX_AGE_DAYS`), `all` (delete every workspace). See [Startup workspace cleanup](#startup-workspace-cleanup) |
@@ -219,6 +223,23 @@ DATABRICKS_SCHEMA=default
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `1800` | Idle timeout before session eviction (0 to disable) |
 | `SESSION_SCAN_INTERVAL_SECONDS` | `60` | How often to scan for idle sessions |
 | `MCP_MASTER_PASSWORD` | *(unset)* | Master password for encrypting credentials in memory |
+
+### Embedding model
+
+`GRAPHRAG_EMBEDDING_MODEL` selects how GraphRAG turns schema elements into vectors for semantic search (`search_schema`). The two backends behave very differently.
+
+| | `minilm` (default) | `tfidf` |
+|---|---|---|
+| Method | all-MiniLM-L6-v2 sentence embeddings via the ONNX runtime bundled with ChromaDB | Bag-of-words term frequencies |
+| Matches synonyms | Yes | **No** |
+| First-use cost | Downloads ~79 MB to `~/.cache/chroma` (~168 MB unpacked), then fully local | None |
+| Network required | Only on first use | Never |
+
+**Why the default matters.** TF-IDF only matches words that literally appear in your schema. Asking *"which products are most profitable and get returned the most"* against columns named `salesamount`, `unitcost` and `returnquantity` produces a query vector of all zeros -- `products` does not match `product` (no stemming), `returned` does not match `returns`, and `profitable` appears nowhere. Every element then scores 0.0, and the ranking degenerates to **index insertion order**: the results look like plausible schema elements but are simply the first rows in the index. `minilm` scores the same query on meaning and surfaces `productname`, `returnquantity` and `salesamount`.
+
+Choose `tfidf` only for air-gapped installs or when the download is unacceptable, and expect intent-style questions to fail. If `minilm` cannot be loaded -- no network on first use, restricted cache directory -- the server logs a warning and falls back to `tfidf` rather than failing to start.
+
+**Switching backends re-indexes.** Both backends emit 384-dimension vectors, so a stored index built by one loads without error into the other while being numerically meaningless. Vector stores therefore record which backend wrote them; on mismatch the index is discarded (JSON store) or the collection is dropped and recreated (ChromaDB), with a warning. Re-run `discover_schema()` to repopulate. Only the derived index is affected -- no ontology, RDF or user data is touched.
 
 ### Startup workspace cleanup
 
