@@ -73,6 +73,24 @@ CATALOG_SCHEMAS = frozenset(
 # which they are not. src/security.py blocks them outright.
 
 
+# Where a SELECT alias may be referenced, by dialect.
+#
+# ORDER BY and GROUP BY see the select list's output names in every supported
+# database. HAVING does not, in most: PostgreSQL's SELECT documentation is
+# explicit that an output name is usable in GROUP BY and ORDER BY but not in
+# WHERE or HAVING. MySQL and ClickHouse do permit it there, so they are listed
+# separately rather than the permissive form being applied to everyone -- a
+# query relying on it would be rejected by PostgreSQL, and OBQC exists to say
+# so before execution. WHERE is never included: it is evaluated before the
+# select list in every dialect.
+DEFAULT_ALIAS_VISIBLE_CLAUSES = ("order", "group", "qualify")
+
+ALIAS_VISIBLE_CLAUSES = {
+    "mysql": ("order", "group", "having", "qualify"),
+    "clickhouse": ("order", "group", "having", "qualify"),
+}
+
+
 @dataclass
 class OBQCIssue:
     """Single OBQC validation issue."""
@@ -450,7 +468,7 @@ class OBQCValidator:
 
         # Extract query components
         self._extract_tables(parsed, result)
-        self._extract_columns(parsed, result)
+        self._extract_columns(parsed, result, dialect)
         self._extract_joins(parsed, result)
         self._extract_aggregations(parsed, result)
 
@@ -500,29 +518,53 @@ class OBQCValidator:
         # thing that would catch the non-catalog use, so it keeps applying.
         result.catalog_tables -= shadowed
 
-    def _extract_columns(self, parsed: exp.Expr, result: OBQCResult) -> None:
-        """Extract all column references from parsed query."""
+    def _extract_columns(
+        self, parsed: exp.Expr, result: OBQCResult, dialect: str = "postgresql"
+    ) -> None:
+        """Extract column references, excluding legal SELECT-alias references."""
+        alias_refs = self._select_alias_references(parsed, result, dialect)
+
         for column in parsed.find_all(exp.Column):
+            # Alias references resolve to the select list, not to a table, so
+            # they are not column references at all. Dropping them here rather
+            # than excusing their names later keeps the exemption tied to the
+            # exact node: a name is only excused where it really is an alias
+            # use, in the query scope that declared it.
+            if id(column) in alias_refs:
+                continue
             col_ref = column.name
             if column.table:
                 col_ref = f"{column.table}.{column.name}"
             if col_ref and col_ref not in result.parsed_columns:
                 result.parsed_columns.append(col_ref)
 
-        self._extract_select_aliases(parsed, result)
-
-    def _extract_select_aliases(self, parsed: exp.Expr, result: OBQCResult) -> None:
-        """Record SELECT aliases that are legally referenced by later clauses.
+    def _select_alias_references(
+        self, parsed: exp.Expr, result: OBQCResult, dialect: str
+    ) -> set[int]:
+        """Identify column nodes that legally reference a SELECT alias.
 
         ``SELECT SUM(total) AS revenue FROM orders ORDER BY revenue`` is valid
         SQL, but ``revenue`` is not a column of any table, so the column rule
         reported it missing and -- being an error -- blocked the query.
 
-        Only aliases actually used in ORDER BY, GROUP BY or HAVING are
-        recorded. Those are the clauses evaluated after the select list, so
-        they can see its output names; WHERE cannot, and an alias used there is
-        genuinely invalid SQL that should keep failing.
+        Resolution is per SELECT and per clause. An alias is visible only to
+        clauses evaluated after the select list, and only within the query that
+        declared it: a subquery's alias must not excuse a bogus name in the
+        outer SELECT.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to record resolved alias names on (reporting only).
+            dialect: Database dialect, which decides where aliases are visible.
+
+        Returns:
+            ``id()`` of every column node that is an alias reference.
         """
+        clauses = ALIAS_VISIBLE_CLAUSES.get(
+            dialect.lower(), DEFAULT_ALIAS_VISIBLE_CLAUSES
+        )
+        alias_refs: set[int] = set()
+
         for select in parsed.find_all(exp.Select):
             aliases = {
                 projection.alias.lower()
@@ -532,15 +574,23 @@ class OBQCValidator:
             if not aliases:
                 continue
 
-            for clause in ("order", "group", "having", "qualify"):
+            for clause in clauses:
                 node = select.args.get(clause)
                 if node is None:
                     continue
                 for column in node.find_all(exp.Column):
                     # A qualified reference names a real table, so it is not an
                     # alias use and stays subject to the normal column rule.
-                    if not column.table and column.name.lower() in aliases:
-                        result.select_aliases.add(column.name.lower())
+                    if column.table or column.name.lower() not in aliases:
+                        continue
+                    # A nested SELECT re-declares its own scope; its clauses
+                    # are resolved on its own iteration, not this one.
+                    if column.find_ancestor(exp.Select) is not select:
+                        continue
+                    alias_refs.add(id(column))
+                    result.select_aliases.add(column.name.lower())
+
+        return alias_refs
 
     def _extract_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract join information from parsed query."""
@@ -625,11 +675,6 @@ class OBQCValidator:
             else:
                 # Unqualified column - check for ambiguity
                 col_key = col_ref.lower()
-
-                # An alias resolves to the select list, not to a table, so it
-                # is neither missing nor ambiguous.
-                if col_key in result.select_aliases:
-                    continue
 
                 found_in_tables: list[str] = []
 
@@ -878,6 +923,24 @@ class OBQCValidator:
         for select in parsed.find_all(exp.Select):
             expressions = select.args.get("expressions", [])
 
+            # Aliases declared by this select, mapped to the column they stand
+            # for. GROUP BY may name either, and the two must be treated as the
+            # same key: "SELECT user_id AS uid ... GROUP BY uid" groups by
+            # user_id, but comparing the alias against the source column name
+            # reported user_id as not grouped.
+            alias_to_column: dict[str, str] = {}
+            for projection in expressions:
+                if (
+                    isinstance(projection, exp.Alias)
+                    and projection.alias
+                    and isinstance(projection.this, exp.Column)
+                ):
+                    source = projection.this
+                    qualified = source.name.lower()
+                    if source.table:
+                        qualified = f"{source.table.lower()}.{qualified}"
+                    alias_to_column[projection.alias.lower()] = qualified
+
             # Get GROUP BY columns
             group_by_cols: set[str] = set()
             if select.args.get("group"):
@@ -887,6 +950,13 @@ class OBQCValidator:
                         if group_expr.table:
                             gb_col_name = f"{group_expr.table.lower()}.{gb_col_name}"
                         group_by_cols.add(gb_col_name)
+
+                        # Record the underlying column too, so grouping by an
+                        # alias satisfies the check on its source column.
+                        source_col = alias_to_column.get(gb_col_name)
+                        if source_col:
+                            group_by_cols.add(source_col)
+                            group_by_cols.add(source_col.split(".")[-1])
 
             # Check each SELECT expression
             for expr in expressions:

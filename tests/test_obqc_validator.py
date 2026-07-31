@@ -501,10 +501,56 @@ class TestOBQCSelectAliases(unittest.TestCase):
 
         self.assertTrue(result.is_valid, [i.message for i in result.issues])
 
-    def test_having_alias(self):
+    def test_having_alias_rejected_on_postgres(self):
+        """PostgreSQL permits an output name in GROUP BY and ORDER BY, but not
+        in WHERE or HAVING -- so this is invalid and must be reported."""
         result = self.validator.validate(
             "SELECT SUM(total) AS revenue FROM orders "
-            "GROUP BY user_id HAVING revenue > 10"
+            "GROUP BY user_id HAVING revenue > 10",
+            dialect="postgresql",
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_having_alias_allowed_on_mysql(self):
+        """MySQL does permit it, so the same query must pass there."""
+        result = self.validator.validate(
+            "SELECT SUM(total) AS revenue FROM orders "
+            "GROUP BY user_id HAVING revenue > 10",
+            dialect="mysql",
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_group_by_alias_satisfies_the_aggregation_rule(self):
+        """Grouping by an alias groups by its source column.
+
+        The GROUP BY key was recorded as the alias while the SELECT expression
+        was checked as the source column, so the two never matched and a valid
+        query was rejected as not grouped.
+        """
+        result = self.validator.validate(
+            "SELECT user_id AS uid, SUM(total) FROM orders GROUP BY uid"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_subquery_alias_does_not_excuse_the_outer_query(self):
+        """Alias visibility is per SELECT scope.
+
+        Recording alias names globally let an inner query's alias excuse an
+        unrelated bogus column in the outer SELECT.
+        """
+        result = self.validator.validate(
+            "SELECT bogus, (SELECT total AS bogus FROM orders ORDER BY bogus "
+            "LIMIT 1) FROM orders"
+        )
+
+        self.assertFalse(result.is_valid)
+
+    def test_subquery_alias_still_works_in_its_own_scope(self):
+        result = self.validator.validate(
+            "SELECT (SELECT total AS t FROM orders ORDER BY t LIMIT 1) FROM orders"
         )
 
         self.assertTrue(result.is_valid, [i.message for i in result.issues])
