@@ -39,18 +39,26 @@ def semantic_context_entries(
     ``sales`` -- create a searchable entry for a table that does not exist, and
     query generation would then be steered toward it.
 
+    Targets are built from the raw SQL names the generator read back from the
+    ontology, never from the suggestion's own identifiers. Suggestions are
+    generated *from* the ontology, so they carry URI-safe names: a table called
+    ``order-items`` appears as ``order_items``, which matches nothing in an
+    index keyed by the real schema. An entry whose raw identity is unknown is
+    skipped rather than guessed, for the same reason unmatched suggestions are.
+
     Args:
         applied_names: Output of
             :meth:`OntologyGenerator.applied_semantic_names` -- dicts with
-            ``original_name``, ``suggested_name``, ``description`` and
-            ``table_name``. Loosely typed and defensively parsed: the values
-            originate from an LLM payload, so a caller may hand over entries
-            whose fields are not the strings the annotation promises.
+            ``suggested_name``, ``description`` and the raw ``table_name``,
+            ``column_name`` and ``related_table``. Loosely typed and
+            defensively parsed: the values originate from an LLM payload, so a
+            caller may hand over entries whose fields are not the strings the
+            annotation promises.
 
     Returns:
-        (target, context) pairs, where target is ``table`` or ``table.column``.
-        Entries with no original name, or with neither a suggested name nor a
-        description, are skipped: they would add no vocabulary.
+        (target, context) pairs, where target is ``table``, ``table.column`` or
+        ``from__to__to`` -- matching how GraphRAG identifies elements. Entries
+        carrying no vocabulary, or no resolvable target, are skipped.
     """
     entries: list[tuple[str, str]] = []
 
@@ -58,19 +66,26 @@ def semantic_context_entries(
         if not isinstance(suggestion, dict):
             continue
 
-        original = str(suggestion.get("original_name") or "").strip()
-        if not original:
-            continue
-
         suggested = str(suggestion.get("suggested_name") or "").strip()
         description = str(suggestion.get("description") or "").strip()
         if not suggested and not description:
             continue
 
-        # Properties are column-scoped; qualifying them keeps two tables'
-        # like-named columns from collapsing onto one index entry.
         table_name = str(suggestion.get("table_name") or "").strip()
-        target = f"{table_name}.{original}" if table_name else original
+        column_name = str(suggestion.get("column_name") or "").strip()
+        related_table = str(suggestion.get("related_table") or "").strip()
+
+        # Mirrors the element ids GraphRAG builds from the schema.
+        if table_name and column_name:
+            target = f"{table_name}.{column_name}"
+        elif table_name and related_table:
+            target = f"{table_name}__to__{related_table}"
+        elif table_name:
+            target = table_name
+        else:
+            # No annotation to anchor it to a real element -- inventing one is
+            # exactly the failure this function exists to avoid.
+            continue
 
         context = ". ".join(part for part in (suggested, description) if part)
         entries.append((target, context))
