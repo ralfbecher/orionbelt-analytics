@@ -73,21 +73,41 @@ CATALOG_SCHEMAS = frozenset(
 # which they are not. src/security.py blocks them outright.
 
 
-# Where a SELECT alias may be referenced, by dialect.
+# Where a SELECT alias may be referenced, keyed by the database type callers
+# pass to validate() (not the sqlglot parsing dialect -- dremio parses as
+# trino, but is configured here under its own name).
 #
-# ORDER BY and GROUP BY see the select list's output names in every supported
-# database. HAVING does not, in most: PostgreSQL's SELECT documentation is
-# explicit that an output name is usable in GROUP BY and ORDER BY but not in
-# WHERE or HAVING. MySQL and ClickHouse do permit it there, so they are listed
-# separately rather than the permissive form being applied to everyone -- a
-# query relying on it would be rejected by PostgreSQL, and OBQC exists to say
-# so before execution. WHERE is never included: it is evaluated before the
-# select list in every dialect.
-DEFAULT_ALIAS_VISIBLE_CLAUSES = ("order", "group", "qualify")
+# ORDER BY and GROUP BY see the select list's output names everywhere. HAVING
+# is where the dialects diverge, checked against vendor documentation:
+#
+#   postgresql  no   an output name may be used in GROUP BY and ORDER BY but
+#                    not in WHERE or HAVING (PostgreSQL SELECT reference)
+#   mysql       yes  permitted in HAVING
+#   clickhouse  yes  "reference aggregation results from SELECT clause in
+#                    HAVING clause by their alias" (HAVING clause docs)
+#   snowflake   yes  "expressions in the SELECT list can be referred to by the
+#                    column alias defined in the list" (HAVING docs)
+#   databricks  yes  resolvable in HAVING, though a real column of the same
+#                    name wins over the alias (name-resolution docs)
+#   bigquery    yes  aliases are visible to GROUP BY, HAVING and ORDER BY
+#   duckdb      yes  verified directly against duckdb 1.5.5 -- it accepts an
+#                    alias in every clause, WHERE included
+#   dremio      ?    Trino's SELECT docs describe GROUP BY and ORDER BY in
+#                    terms of input columns and ordinals without stating
+#                    whether an output alias resolves. Left permissive; see
+#                    below for why the unknown case errs that way.
+#
+# The default is permissive because OBQC errors block execution. Wrongly
+# allowing an alias costs nothing -- the database rejects the query itself,
+# with a better message. Wrongly forbidding one stops a query that would have
+# run. So a clause is only closed off where documentation says it is closed,
+# which today means PostgreSQL's HAVING.
+DEFAULT_ALIAS_VISIBLE_CLAUSES = ("order", "group", "having", "qualify")
 
 ALIAS_VISIBLE_CLAUSES = {
-    "mysql": ("order", "group", "having", "qualify"),
-    "clickhouse": ("order", "group", "having", "qualify"),
+    "postgresql": ("order", "group", "qualify"),
+    # DuckDB resolves aliases laterally, including in WHERE.
+    "duckdb": ("order", "group", "having", "qualify", "where"),
 }
 
 

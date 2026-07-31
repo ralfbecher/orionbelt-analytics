@@ -512,15 +512,62 @@ class TestOBQCSelectAliases(unittest.TestCase):
 
         self.assertFalse(result.is_valid)
 
-    def test_having_alias_allowed_on_mysql(self):
-        """MySQL does permit it, so the same query must pass there."""
-        result = self.validator.validate(
-            "SELECT SUM(total) AS revenue FROM orders "
-            "GROUP BY user_id HAVING revenue > 10",
-            dialect="mysql",
+    def test_having_alias_allowed_on_dialects_that_permit_it(self):
+        """Every supported database except PostgreSQL resolves the alias here.
+
+        Checked against vendor documentation, and directly against DuckDB.
+        Dremio is included by policy rather than by evidence: Trino's docs do
+        not state whether an output alias resolves in HAVING, and OBQC errors
+        block execution, so an unverified clause is left open -- a wrongly
+        allowed alias is rejected by the database itself, a wrongly forbidden
+        one stops a query that would have run.
+        """
+        for dialect in (
+            "mysql",
+            "clickhouse",
+            "snowflake",
+            "databricks",
+            "bigquery",
+            "duckdb",
+            "dremio",
+        ):
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT user_id, SUM(total) AS revenue FROM orders "
+                    "GROUP BY user_id HAVING revenue > 10",
+                    dialect=dialect,
+                )
+
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_where_alias_errors_except_on_duckdb(self):
+        """DuckDB resolves aliases laterally, including in WHERE."""
+        for dialect in ("postgresql", "mysql", "snowflake", "bigquery"):
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT total AS t FROM orders WHERE t > 5", dialect=dialect
+                )
+                self.assertFalse(result.is_valid)
+
+        duckdb_result = self.validator.validate(
+            "SELECT total AS t FROM orders WHERE t > 5", dialect="duckdb"
         )
 
-        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+        self.assertTrue(
+            duckdb_result.is_valid, [i.message for i in duckdb_result.issues]
+        )
+
+    def test_order_by_alias_allowed_on_every_dialect(self):
+        from src.constants import SUPPORTED_DB_TYPES
+
+        for dialect in SUPPORTED_DB_TYPES:
+            with self.subTest(dialect=dialect):
+                result = self.validator.validate(
+                    "SELECT SUM(total) AS revenue FROM orders ORDER BY revenue",
+                    dialect=dialect,
+                )
+
+                self.assertTrue(result.is_valid, [i.message for i in result.issues])
 
     def test_group_by_alias_satisfies_the_aggregation_rule(self):
         """Grouping by an alias groups by its source column.
