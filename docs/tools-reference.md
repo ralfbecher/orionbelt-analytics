@@ -365,6 +365,7 @@ Execute a SQL query with built-in validation, fan-trap protection, and automatic
 | `limit` | integer | No | `1000` | Maximum rows to return (max: 5,000) |
 | `checklist_completed` | boolean | No | `false` | Confirmation that the pre-execution checklist has been completed |
 | `query_intent` | string | No | Auto-extracted | Natural language description of what the query aims to retrieve |
+| `allow_fan_out` | boolean | No | `false` | Execute even when OBQC detects a fan-trap. The finding is still reported, as a warning rather than a blocking error. |
 
 **Returns:** Dictionary containing:
 - `success` -- boolean execution result
@@ -372,6 +373,7 @@ Execute a SQL query with built-in validation, fan-trap protection, and automatic
 - `rows` -- array of result rows
 - `row_count` -- number of rows returned
 - `execution_time_ms` -- query execution time in milliseconds
+- `obqc_fan_trap` -- `{detected, blocking, findings}`, present on every response
 - `next_tool` -- suggests `generate_chart` when results contain data
 
 **Key Features:**
@@ -382,7 +384,7 @@ Execute a SQL query with built-in validation, fan-trap protection, and automatic
 - Query timeout protection
 - Result size capped at 5,000 rows
 - Automatically retrieves GraphRAG context for relevant tables when available
-- Fan-trap detection warns about data multiplication in multi-table joins
+- Fan-trap detection **blocks** queries whose aggregates read across a 1:many join (a single such join is enough); `allow_fan_out: true` runs one anyway
 - `query_intent` enables better GraphRAG context retrieval; if omitted, intent is auto-extracted from the SQL
 
 ---

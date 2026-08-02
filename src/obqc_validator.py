@@ -185,6 +185,13 @@ class OBQCResult:
     has_aggregation: bool = False
     has_group_by: bool = False
     fan_trap_risk: bool = False
+    # One entry per fan-trap finding, as data rather than prose: a consumer
+    # that keys off fields (an agent reading "success") must be able to see a
+    # corrupted aggregate without parsing an English sentence out of warnings.
+    fan_trap_findings: list[dict[str, Any]] = field(default_factory=list)
+    # Whether a fan-trap finding blocks execution. False when the caller opted
+    # in with allow_fan_out.
+    fan_trap_blocking: bool = True
     ontology_compatible: bool = True  # Whether ontology has oba: annotations
 
     # Keys of parsed_joins that belong in a response. Everything else the
@@ -223,6 +230,11 @@ class OBQCResult:
             "has_aggregation": self.has_aggregation,
             "has_group_by": self.has_group_by,
             "fan_trap_risk": self.fan_trap_risk,
+            "obqc_fan_trap": {
+                "detected": self.fan_trap_risk,
+                "blocking": self.fan_trap_blocking,
+                "findings": self.fan_trap_findings,
+            },
             "obqc_error_count": sum(
                 1 for i in self.issues if i.severity == OBQCSeverity.ERROR
             ),
@@ -491,17 +503,26 @@ class OBQCValidator:
             return default
         return val.lower() in ("true", "1", "yes")
 
-    def validate(self, sql_query: str, dialect: str = "postgresql") -> OBQCResult:
+    def validate(
+        self,
+        sql_query: str,
+        dialect: str = "postgresql",
+        allow_fan_out: bool = False,
+    ) -> OBQCResult:
         """Validate SQL query against loaded ontology.
 
         Args:
             sql_query: The SQL query to validate
             dialect: Database dialect ("postgresql", "snowflake", "dremio")
+            allow_fan_out: Downgrade fan-trap findings from blocking errors to
+                warnings. For a caller that has judged the fan-out harmless or
+                wants the multiplied rows on purpose; the finding is still
+                reported either way.
 
         Returns:
             OBQCResult with validation findings
         """
-        result = OBQCResult(is_valid=True)
+        result = OBQCResult(is_valid=True, fan_trap_blocking=not allow_fan_out)
         self._cte_references = set()
 
         if not self._schema_cache:
@@ -561,7 +582,7 @@ class OBQCValidator:
         self._validate_joins(parsed, result)
         self._validate_type_compatibility(parsed, result)
         self._validate_aggregation_context(parsed, result)
-        self._detect_fan_trap(result)
+        self._detect_fan_trap(result, blocking=not allow_fan_out)
 
         # Set overall validity
         result.is_valid = not any(
@@ -960,6 +981,10 @@ class OBQCValidator:
             # may carry no ON and still be conditioned.
             where_joins = self._where_joins_tables(select)
 
+            # Tables whose columns this SELECT adds up. A join can only report
+            # a wrong number if it multiplies rows a measure is taken from.
+            measure_tables = self._measure_tables(select, alias_map)
+
             for join in select.args.get("joins") or []:
                 join_info: dict[str, Any] = {
                     "type": join.kind or "INNER",
@@ -975,6 +1000,8 @@ class OBQCValidator:
                     # detection needs to know which table this join attaches
                     # to, and the ON condition is the only place that says so.
                     "on_tables": [],
+                    # Tables this SELECT sums or averages over, lower-cased.
+                    "measure_tables": measure_tables,
                 }
 
                 # How to name this join in a message. A joined subquery has
@@ -1023,6 +1050,77 @@ class OBQCValidator:
                     join_info["on_tables"] = on_tables
 
                 result.parsed_joins.append(join_info)
+
+    def _measure_tables(
+        self, select: exp.Select, alias_map: dict[str, str]
+    ) -> set[str]:
+        """Tables whose columns this SELECT aggregates in a duplication-sensitive way.
+
+        A fan-out join only produces a wrong number when a measure is taken
+        from the side it multiplies. ``SUM(sales.amount)`` over a join that
+        repeats each sale is wrong; ``SUM(shipments.weight)`` over the same
+        join is right, because the repeated rows *are* the shipments.
+
+        Only aggregates that duplication changes are counted. MIN and MAX are
+        indifferent to repeated rows, and so is COUNT(DISTINCT ...); SUM, AVG
+        and a plain COUNT of a column are not. ``COUNT(*)`` names no table and
+        so attributes to none -- counting joined rows is usually the intent.
+
+        Args:
+            select: The SELECT to inspect.
+            alias_map: This scope's alias -> table name map.
+
+        Returns:
+            Lower-cased table names whose columns are summed or averaged.
+        """
+        sensitive = (exp.Sum, exp.Avg, exp.Count)
+        tables: set[str] = set()
+
+        for agg in self._own_aggregates(select):
+            if not isinstance(agg, sensitive):
+                continue
+            # sqlglot models DISTINCT as a node wrapping the argument, not as a
+            # flag on the call: COUNT(DISTINCT id) is Count(this=Distinct(...)).
+            if isinstance(agg.this, exp.Distinct):
+                continue
+
+            for column in agg.find_all(exp.Column):
+                if column.table:
+                    resolved = alias_map.get(column.table.lower())
+                    if resolved:
+                        tables.add(resolved.lower())
+                    continue
+
+                # Unqualified: attribute it only when exactly one table in
+                # scope declares the name. Spreading an ambiguous name over
+                # every candidate would blame tables the measure may not come
+                # from, and a fan-trap finding blocks the query.
+                owners = self._tables_declaring(column.name, alias_map)
+                if len(owners) == 1:
+                    tables.add(owners[0])
+
+        return tables
+
+    def _tables_declaring(self, column: str, alias_map: dict[str, str]) -> list[str]:
+        """In-scope tables that declare *column*, lower-cased.
+
+        Args:
+            column: Unqualified column name.
+            alias_map: This scope's alias -> table name map.
+
+        Returns:
+            Distinct lower-cased table names owning the column.
+        """
+        if self._schema_cache is None:
+            return []
+
+        key = column.lower()
+        owners = set()
+        for table in alias_map.values():
+            schema = self._schema_cache.tables.get(table.lower())
+            if schema and key in schema.columns:
+                owners.add(table.lower())
+        return sorted(owners)
 
     def _resolve_qualifier(
         self, select: exp.Select | None, qualifier: str
@@ -1962,14 +2060,98 @@ class OBQCValidator:
 
         return False
 
-    def _detect_fan_trap(self, result: OBQCResult) -> None:
-        """Rule: Detect potential fan-trap patterns.
+    def _inflated_measures(self, result: OBQCResult) -> list[dict[str, Any]]:
+        """Joins that repeat rows a measure in the same SELECT is taken from.
 
-        Prefers the ontology's own ``owl:disjointWith`` axioms (sibling facts
-        sharing a dimension — the canonical fan-trap shape) so OBQC and the
-        ontology agree by construction. Falls back to the relationship heuristic
-        when no disjointness axioms are present (e.g. minimal imports).
+        The single-child fan trap: ``FROM sales JOIN shipments ON
+        shipments.sale_id = sales.id`` with ``SUM(sales.amount)`` returns a
+        total inflated by every sale that shipped more than once, and an inner
+        join silently drops the ones that never shipped. One fan-out join is
+        enough to corrupt the number, so no count threshold applies.
+
+        A measure taken from the *many* side is fine -- ``SUM(shipments.cost)``
+        over the same join sums each shipment once -- so what matters is the
+        direction between the measure's table and the one joined to it, not
+        which table the query happened to put in FROM. ``FROM order_items JOIN
+        orders`` summing ``orders.total`` inflates exactly as ``FROM orders
+        JOIN order_items`` does: both produce one row per item. Each join is
+        therefore judged from both ends.
+
+        Args:
+            result: Result carrying the extracted joins.
+
+        Returns:
+            One finding per (measure table, fan-out table) pair, deduplicated.
         """
+        findings: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for join_info in result.parsed_joins:
+            if not join_info.get("scope_aggregates"):
+                continue
+
+            join_table = join_info.get("table")
+            measures = join_info.get("measure_tables") or set()
+            if not join_table or not measures:
+                continue
+
+            anchors = [
+                t
+                for t in join_info.get("on_tables", [])
+                if t.lower() != join_table.lower()
+            ]
+
+            for anchor in anchors:
+                # Both ends of the edge: whichever side holds the measure, the
+                # other one inflates it if the ontology puts it on the many
+                # side.
+                for measure_table, other in (
+                    (anchor, join_table),
+                    (join_table, anchor),
+                ):
+                    if measure_table.lower() not in measures:
+                        continue
+                    if not self._join_fans_out(other, measure_table):
+                        continue
+
+                    key = (measure_table.lower(), other.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append(
+                        {
+                            "kind": "measure_across_fan_out",
+                            "measure_table": measure_table,
+                            "fan_out_table": other,
+                            "tables": sorted({measure_table, other}),
+                        }
+                    )
+
+        return findings
+
+    def _detect_fan_trap(self, result: OBQCResult, blocking: bool = True) -> None:
+        """Rule: Detect fan-trap patterns.
+
+        Three findings, strongest first:
+
+        1. **Measure across a fan-out join.** The ontology says the joined
+           table is on the "many" side of the table a measure is taken from,
+           so every row of that measure is repeated and the total is inflated.
+           This holds for a *single* join -- ``sales JOIN shipments`` summing
+           ``sales.amount`` reports a wrong number with no second fact table in
+           sight, and used to pass in silence because the count heuristic below
+           needed two fan-outs before it said anything.
+        2. **Disjoint sibling facts**, from the ontology's own
+           ``owl:disjointWith`` axioms: the canonical fan-trap shape.
+        3. **Two or more fan-out joins** in one aggregating SELECT, the
+           heuristic fallback for ontologies with no disjointness axioms.
+
+        Args:
+            result: Result to record findings on.
+            blocking: Whether a finding blocks the query (ERROR) or merely
+                annotates it (WARNING).
+        """
+        severity = OBQCSeverity.ERROR if blocking else OBQCSeverity.WARNING
         # Only joins whose own SELECT aggregates can inflate a total. The
         # query-wide flag is true if an aggregate appears anywhere, so an
         # unrelated subquery's COUNT(*) used to raise a fan-trap warning about
@@ -1986,6 +2168,39 @@ class OBQCValidator:
         if self._schema_cache is None:
             return
 
+        # --- Measure multiplied by a fan-out join ----------------------------
+        #
+        # The most direct evidence there is: a table is summed, and a join in
+        # the same SELECT repeats its rows. One such join is enough.
+        inflated = self._inflated_measures(result)
+        if inflated:
+            result.fan_trap_risk = True
+            result.fan_trap_findings.extend(inflated)
+            for finding in inflated:
+                measure = anchor = finding["measure_table"]
+                fanning = finding["fan_out_table"]
+                result.issues.append(
+                    OBQCIssue(
+                        issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
+                        severity=severity,
+                        message=(
+                            f"Fan-trap: aggregating '{measure}' across the join to "
+                            f"'{fanning}', which the ontology puts on the many side of "
+                            f"'{anchor}'. Each {anchor} row is repeated once per "
+                            f"matching {fanning} row, so the total is inflated."
+                        ),
+                        location="Query structure",
+                        suggestion=(
+                            f"Pre-aggregate {fanning} in a CTE and join the one row per "
+                            f"{anchor} that produces, or aggregate each fact separately "
+                            "and combine with UNION ALL (Composite Fact Layer). "
+                            "COUNT(DISTINCT ...) also reads correctly across a fan-out."
+                        ),
+                        related_entities=sorted({measure, fanning, anchor}),
+                    )
+                )
+            return
+
         # --- Axiom-grounded path: disjoint sibling facts in one SELECT --------
         #
         # Scoped like the heuristic below. Reading the disjoint pair off every
@@ -2000,10 +2215,16 @@ class OBQCValidator:
         if disjoint_hits:
             result.fan_trap_risk = True
             involved = sorted({t for pair in disjoint_hits for t in pair})
+            result.fan_trap_findings.append(
+                {
+                    "kind": "disjoint_facts",
+                    "tables": involved,
+                }
+            )
             result.issues.append(
                 OBQCIssue(
                     issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
-                    severity=OBQCSeverity.WARNING,
+                    severity=severity,
                     message=(
                         "Potential fan-trap: query aggregates across tables the ontology "
                         f"declares disjoint (sibling facts sharing a dimension): "
@@ -2066,10 +2287,17 @@ class OBQCValidator:
 
         if one_to_many_count >= 2:
             result.fan_trap_risk = True
+            result.fan_trap_findings.append(
+                {
+                    "kind": "multiple_fan_out_joins",
+                    "tables": sorted(set(involved_tables)),
+                    "join_count": one_to_many_count,
+                }
+            )
             result.issues.append(
                 OBQCIssue(
                     issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
-                    severity=OBQCSeverity.WARNING,
+                    severity=severity,
                     message=f"Potential fan-trap: {one_to_many_count} one-to-many joins with aggregation",
                     location="Query structure",
                     suggestion=(

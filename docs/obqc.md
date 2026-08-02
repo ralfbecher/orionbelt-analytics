@@ -201,22 +201,65 @@ SELECT name, COUNT(*) FROM customers;
 SELECT status, region, SUM(amount) FROM orders GROUP BY region;
 ```
 
-### Fan-trap detection (WARNING)
+### Fan-trap detection (ERROR)
 
-Detects when a query aggregates across two or more one-to-many joins. This is the classic fan-trap pattern where rows multiply silently, producing inflated aggregation results.
+A fan-trap **blocks execution**. A query that aggregates across a one-to-many join returns a silently inflated number, and a wrong answer is worse than no answer -- particularly for a caller that keys off `success` and never reads the prose in `warnings`.
+
+Three findings, strongest first.
+
+**1. A measure multiplied by a fan-out join.** The ontology puts the joined table on the many side of the table a measure is taken from, so each measure row is repeated. **One join is enough** -- no second fact table required:
+
+```sql
+-- ERROR: Fan-trap: aggregating 'sales' across the join to 'shipments', which the
+-- ontology puts on the many side of 'sales'.
+SELECT SUM(s.amount)
+FROM sales s
+JOIN shipments sh ON sh.sale_id = s.id;
+```
+
+Which table sits in `FROM` makes no difference -- `FROM shipments JOIN sales` produces the same one-row-per-shipment result set, so both ends of every join are judged.
+
+A measure taken from the *many* side is fine, because the repeated rows are that measure's own rows:
+
+```sql
+-- OK: each shipment is summed once
+SELECT s.id, SUM(sh.cost) FROM sales s JOIN shipments sh ON sh.sale_id = s.id GROUP BY s.id;
+```
+
+Aggregates that duplication cannot change are left alone: `MIN`, `MAX`, `COUNT(DISTINCT ...)`, and `COUNT(*)` (which names no table -- counting the joined rows is usually the intent).
+
+**2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
+
+**3. Two or more fan-out joins** in one aggregating `SELECT` -- the heuristic fallback for ontologies carrying no disjointness axioms.
 
 Fan-out is judged per join, against the table that join's `ON` condition attaches to -- not by asking whether a table sits on the many side of some relationship elsewhere in the schema. Walking a chain of many-to-one lookups (`sales` -> `clients` -> `countries`) duplicates nothing and is not flagged, however many foreign keys those dimensions carry.
 
-```sql
--- WARNING: Potential fan-trap: 2 one-to-many joins with aggregation
-SELECT c.name, SUM(o.amount), COUNT(r.id)
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-JOIN reviews r ON c.id = r.customer_id
-GROUP BY c.name;
+#### The structured verdict
+
+Every `execute_sql_query` response carries `obqc_fan_trap`, whatever the outcome:
+
+```json
+{
+  "detected": true,
+  "blocking": true,
+  "findings": [
+    {
+      "kind": "measure_across_fan_out",
+      "measure_table": "sales",
+      "fan_out_table": "shipments",
+      "tables": ["sales", "shipments"]
+    }
+  ]
+}
 ```
 
-OBQC suggests using `UNION ALL` to aggregate each fact table separately, or CTEs to pre-aggregate before joining. See [Fan-Trap Prevention](fan-trap-prevention.md) for detailed patterns.
+`kind` is one of `measure_across_fan_out`, `disjoint_facts`, or `multiple_fan_out_joins`. A clean query reports `{"detected": false, "blocking": true, "findings": []}` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
+
+#### Running one anyway
+
+`execute_sql_query(..., allow_fan_out=True)` downgrades the finding to a warning and executes. The finding is still reported and `blocking` becomes `false`. Use it only when the multiplied rows are what you want, or when you know the relationship is 1:1 in practice despite the declared cardinality.
+
+The fix is usually to pre-aggregate the fanning table in a CTE and join the one row per key that produces, or to aggregate each fact separately and combine with `UNION ALL`. See [Fan-Trap Prevention](fan-trap-prevention.md) for the patterns.
 
 ## How the LLM uses OBQC
 
@@ -225,6 +268,7 @@ OBQC results are returned as structured data in the tool response, not displayed
 - `obqc_valid`: overall pass/fail
 - `obqc_issues`: list of issues with type, severity, message, location, and suggestion
 - `fan_trap_risk`: boolean flag
+- `obqc_fan_trap`: `{detected, blocking, findings}` -- the fan-trap verdict as data, present on every response
 - `obqc_error_count` / `obqc_warning_count`: summary counts
 
 When `execute_sql_query` blocks a query, the LLM sees the error details and suggestions, and can revise the SQL and retry -- often without the user ever seeing the failed attempt.

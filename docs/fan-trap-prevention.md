@@ -71,24 +71,32 @@ These warnings appear in the `discover_schema()` output so the LLM (or user) is 
 
 ### Layer 2: OBQC Query Validation (built into `execute_sql_query`)
 
-The Ontology Basic Quality Criteria (OBQC) validator runs automatically inside `execute_sql_query` before the query is run. It parses SQL queries using sqlglot and checks them against the ontology's relationship metadata. It counts how many one-to-many joins a query traverses. If two or more one-to-many joins co-occur with aggregation functions, the validator flags the query:
+The Ontology Basic Quality Criteria (OBQC) validator runs automatically inside `execute_sql_query` before the query is run. It parses SQL queries using sqlglot and checks them against the ontology's relationship metadata. **A detected fan-trap is a blocking error**: the query is refused rather than answered with an inflated number.
+
+The strongest finding needs only a *single* one-to-many join. If an aggregate reads a measure from the "one" side of a join, every one of its rows is repeated:
 
 ```python
-# From src/obqc_validator.py
-if one_to_many_count >= 2:
-    result.fan_trap_risk = True
-    result.issues.append(OBQCIssue(
-        issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
-        severity=OBQCSeverity.WARNING,
-        message=f"Potential fan-trap: {one_to_many_count} "
-                "one-to-many joins with aggregation",
-        suggestion="Use UNION ALL pattern for separate aggregations "
-                   "per fact table, or use CTEs to pre-aggregate "
-                   "before joining",
-    ))
+# From src/obqc_validator.py -- _inflated_measures()
+for measure_table, other in ((anchor, join_table), (join_table, anchor)):
+    if measure_table.lower() not in measures:
+        continue
+    if not self._join_fans_out(other, measure_table):
+        continue
+    findings.append({
+        "kind": "measure_across_fan_out",
+        "measure_table": measure_table,
+        "fan_out_table": other,
+        ...
+    })
 ```
 
+Both ends of every join are checked, so `FROM order_items JOIN orders` summing `orders.total` is caught exactly like `FROM orders JOIN order_items`. Aggregates that duplication cannot change (`MIN`, `MAX`, `COUNT(DISTINCT ...)`, `COUNT(*)`) are left alone, as is a measure taken from the many side.
+
+Two weaker findings follow: sibling facts the ontology declares `owl:disjointWith`, and the older heuristic of two or more one-to-many joins in one aggregating `SELECT`.
+
 The validator knows which relationships are one-to-many because the ontology stores `oba:relationshipType` annotations on every OWL ObjectProperty.
+
+Every response carries an `obqc_fan_trap` object (`{detected, blocking, findings}`) so a caller can read the verdict as data instead of parsing `warnings`. To run a flagged query anyway, pass `allow_fan_out=True` -- the finding is still reported, as a warning.
 
 ### Layer 3: GraphRAG Context Retrieval
 

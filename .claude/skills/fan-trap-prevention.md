@@ -4,9 +4,25 @@
 
 ## What is a Fan-Trap?
 
-A fan-trap occurs when a parent table has multiple 1:many relationships and you JOIN them with aggregation, causing data multiplication (Cartesian product).
+A fan-trap occurs when you aggregate a measure across a 1:many join, so each measure row is repeated once per matching child row and the total comes back inflated.
 
-### Example:
+**A single 1:many join is enough.** The classic multi-fact shape is the worst case, not the threshold.
+
+### Example — one join is already wrong:
+```
+sales (1) → shipments (many)
+```
+```sql
+-- ❌ each sale's amount is added once per shipment
+SELECT SUM(public.sales.amount)
+FROM public.sales
+JOIN public.shipments ON public.shipments.sale_id = public.sales.id;
+```
+The inner join also drops sales that never shipped, so the number is wrong in both directions.
+
+Which table you put in `FROM` makes no difference: `FROM shipments JOIN sales` produces the same one-row-per-shipment result.
+
+### Example — the multi-fact shape:
 ```
 orders (1) → order_items (many)
 orders (1) → shipments (many)
@@ -33,10 +49,16 @@ Before writing multi-table queries with aggregation:
 1. **Review foreign_keys** from `discover_schema()` FIRST
 2. **Identify relationship patterns:**
    - Safe: 1:1 relationships (customers → customer_profiles)
-   - Requires care: 1:many (customers → orders)
-   - High risk: Multiple 1:many from same parent (fan-trap potential)
-3. **Let `execute_sql_query()` validate** — it runs OBQC fan-trap checks automatically before executing
-4. **Validate results** against source tables
+   - Safe: measure taken from the **many** side (`SUM(order_items.qty)` across orders → order_items)
+   - Fan-trap: measure taken from the **one** side across a 1:many join (`SUM(orders.total)` with order_items joined)
+   - Fan-trap: multiple 1:many from the same parent
+3. **Let `execute_sql_query()` validate** — OBQC runs before execution and a fan-trap is a **blocking error**, not a warning. Read the `obqc_fan_trap` field on the response: `{detected, blocking, findings}`, where each finding names the `measure_table` being inflated and the `fan_out_table` doing it.
+4. **Fix the query, don't force it.** Pre-aggregate the fanning table in a CTE, or use UNION ALL. `allow_fan_out=True` exists for the rare case where the multiplied rows are genuinely wanted — it does not make the numbers right.
+5. **Validate results** against source tables
+
+### Aggregates that survive a fan-out
+
+`MIN`, `MAX`, `COUNT(DISTINCT ...)` and `COUNT(*)` are unaffected by repeated rows, so OBQC does not block them. `SUM`, `AVG` and `COUNT(col)` are.
 
 ---
 

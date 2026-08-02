@@ -208,6 +208,7 @@ async def execute_sql_query(
     checklist_completed: bool | str,
     query_intent: str | None,
     services: "HandlerContext",
+    allow_fan_out: bool | str = False,
 ) -> dict[str, Any]:
     """Execute SQL query with built-in validation and fan-trap protection.
 
@@ -217,6 +218,8 @@ async def execute_sql_query(
         limit: Maximum rows to return
         checklist_completed: Pre-execution checklist confirmation
         query_intent: Natural language query description
+        allow_fan_out: Run the query even if OBQC finds a fan-trap. The finding
+            is still reported, as a warning rather than a blocking error.
         get_session_data: Function to get session data
         get_session_db_manager: Function to get session db manager
         get_session_obqc_validator: Function to get OBQC validator
@@ -225,6 +228,8 @@ async def execute_sql_query(
     try:
         if isinstance(checklist_completed, str):
             checklist_completed = checklist_completed.lower() in ("true", "1", "yes")
+        if isinstance(allow_fan_out, str):
+            allow_fan_out = allow_fan_out.lower() in ("true", "1", "yes")
 
         db_manager = services.get_session_db_manager(ctx)
 
@@ -254,10 +259,22 @@ async def execute_sql_query(
 
         # OBQC validation (fan-trap detection, ontology-aware checks)
         obqc_warnings = []
+        # Structured fan-trap verdict, carried onto the response whatever the
+        # outcome. A consumer that keys off fields rather than reading prose
+        # must be able to see a corrupted aggregate, and the success path used
+        # to say nothing at all.
+        fan_trap_report: dict[str, Any] = {
+            "detected": False,
+            "blocking": not allow_fan_out,
+            "findings": [],
+        }
         obqc_validator = services.get_session_obqc_validator(ctx)
         if obqc_validator:
             db_type = db_manager.connection_info.get("type", "postgresql")
-            obqc_result = obqc_validator.validate(sql_query.strip(), dialect=db_type)
+            obqc_result = obqc_validator.validate(
+                sql_query.strip(), dialect=db_type, allow_fan_out=allow_fan_out
+            )
+            fan_trap_report = obqc_result.to_dict()["obqc_fan_trap"]
 
             if not obqc_result.is_valid:
                 error_details = []
@@ -276,6 +293,7 @@ async def execute_sql_query(
                     "error_type": "obqc_error",
                     "obqc_issues": error_details,
                     "fan_trap_risk": obqc_result.fan_trap_risk,
+                    "obqc_fan_trap": fan_trap_report,
                     "warnings": [],
                     "query_plan": None,
                     "limit_applied": False,
@@ -289,9 +307,12 @@ async def execute_sql_query(
                     obqc_warnings.append(msg)
 
             if obqc_result.fan_trap_risk:
+                # Only reachable with allow_fan_out: otherwise a fan-trap is an
+                # error and the query never got here.
                 obqc_warnings.append(
-                    "[OBQC] FAN-TRAP RISK: Query aggregates across multiple "
-                    "1:many relationships. Consider UNION ALL pattern."
+                    "[OBQC] FAN-TRAP RISK accepted via allow_fan_out: aggregates "
+                    "read across a 1:many join and are inflated. See "
+                    "obqc_fan_trap for the tables involved."
                 )
 
             logger.debug(
@@ -328,6 +349,10 @@ async def execute_sql_query(
         if obqc_warnings:
             existing_warnings = result.get("warnings", [])
             result["warnings"] = existing_warnings + obqc_warnings
+
+        # Always present, so "no fan-trap" is an answer the caller can read
+        # rather than the absence of a sentence in warnings.
+        result["obqc_fan_trap"] = fan_trap_report
 
         if result.get("success"):
             logger.info(

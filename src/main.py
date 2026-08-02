@@ -468,6 +468,7 @@ async def execute_sql_query(
     limit: int = 1000,
     checklist_completed: bool = False,
     query_intent: _ShortText | None = None,
+    allow_fan_out: bool = False,
 ) -> dict[str, Any]:
     """Execute SQL query with built-in syntax validation, security checks, OBQC
     validation, and fan-trap protection.
@@ -481,6 +482,13 @@ async def execute_sql_query(
     is loaded, OBQC checks (fan-trap detection, semantic validation) run too — errors
     block execution, warnings are included in the result.
 
+    A detected fan-trap blocks execution: aggregating across a 1:many join returns
+    a silently inflated number, so the query is refused rather than answered wrongly.
+    Every response carries `obqc_fan_trap` ({detected, blocking, findings}) so the
+    verdict is readable as data. Pre-aggregate in a CTE or use the UNION ALL
+    Composite Fact Layer to fix the query; pass allow_fan_out=True only to run it
+    anyway.
+
     REQUIRES: connect_database must be called first.
 
     Args:
@@ -488,6 +496,11 @@ async def execute_sql_query(
         limit: Maximum rows to return (default: 1000, max: 5,000)
         checklist_completed: Confirmation that pre-execution checklist is complete
         query_intent: Optional natural language description of query intent
+        allow_fan_out: Execute even when OBQC finds a fan-trap. Aggregates read
+            across a 1:many join are inflated, so only set this when the
+            multiplied rows are what you want (or you have verified the join is
+            1:1 in practice). The finding is still reported, as a warning
+            instead of a blocking error, and `obqc_fan_trap` names the tables.
     """
     return await _h_query.execute_sql_query(
         ctx,
@@ -496,6 +509,7 @@ async def execute_sql_query(
         checklist_completed,
         query_intent,
         services=_services(),
+        allow_fan_out=allow_fan_out,
     )
 
 
