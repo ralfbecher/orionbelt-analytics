@@ -987,6 +987,43 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
             [("orders", "order_items")],
         )
 
+    def test_duplication_proof_aggregates_survive_two_fan_outs(self):
+        """MAX reads the same answer however often its rows are repeated.
+
+        The count heuristic fired on any aggregate at all, so it blocked
+        queries the measure rule deliberately leaves alone -- and once
+        fan-traps became errors, that stopped them running.
+        """
+        for aggregate in (
+            "MAX(orders.total)",
+            "MIN(orders.total)",
+            "COUNT(DISTINCT orders.id)",
+        ):
+            with self.subTest(aggregate=aggregate):
+                result = self.validator.validate(
+                    f"SELECT orders.id, {aggregate} "
+                    "FROM orders "
+                    "JOIN order_items ON orders.id = order_items.order_id "
+                    "JOIN shipments ON orders.id = shipments.order_id "
+                    "GROUP BY orders.id"
+                )
+
+                self.assertFalse(
+                    result.fan_trap_risk, [i.message for i in result.issues]
+                )
+
+    def test_count_star_across_two_fan_outs_is_still_a_fan_trap(self):
+        """COUNT(*) names no table, but it counts rows -- here, their product."""
+        result = self.validator.validate(
+            "SELECT orders.id, COUNT(*) "
+            "FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
     def test_two_facts_on_one_dimension_is_still_a_fan_trap(self):
         """The true positive must survive: orders fans out twice."""
         result = self.validator.validate(
@@ -1651,6 +1688,35 @@ class TestSingleFanOutMeasure(unittest.TestCase):
             "SELECT users.name, SUM(orders.total) "
             "FROM orders JOIN users ON orders.user_id = users.id "
             "GROUP BY users.name"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_comma_join_spelling_is_caught_too(self):
+        """The older syntax states the same join and inflates identically.
+
+        Anchors were read only from ON, so writing the join the pre-SQL-92 way
+        skipped fan-trap detection entirely.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(o.total) FROM orders o, order_items i "
+            "WHERE i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(
+            [
+                (f["measure_table"], f["fan_out_table"])
+                for f in result.fan_trap_findings
+            ],
+            [("orders", "order_items")],
+        )
+
+    def test_comma_join_measure_from_the_many_side_is_fine(self):
+        result = self.validator.validate(
+            "SELECT SUM(i.quantity) FROM orders o, order_items i "
+            "WHERE i.order_id = o.id"
         )
 
         self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])

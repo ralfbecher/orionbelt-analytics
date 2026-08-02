@@ -226,7 +226,11 @@ A measure taken from the *many* side is fine, because the repeated rows are that
 SELECT s.id, SUM(sh.cost) FROM sales s JOIN shipments sh ON sh.sale_id = s.id GROUP BY s.id;
 ```
 
-Aggregates that duplication cannot change are left alone: `MIN`, `MAX`, `COUNT(DISTINCT ...)`, and `COUNT(*)` (which names no table -- counting the joined rows is usually the intent).
+Aggregates that duplication cannot change are left alone entirely -- `MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so no join shape makes them wrong and none of the three rules fires on a query that uses only those.
+
+`COUNT(*)` is a middle case. It names no table, so it never triggers this rule -- counting the joined rows is usually the intent. But it does count rows, so across *two* fan-out joins it returns the product of the two children and rules 2 and 3 below still apply.
+
+The comma form is judged identically: `FROM orders o, order_items i WHERE i.order_id = o.id` states the same join as the `ON` spelling and inflates the same way.
 
 **2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
 

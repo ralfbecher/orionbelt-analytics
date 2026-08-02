@@ -58,7 +58,11 @@ Before writing multi-table queries with aggregation:
 
 ### Aggregates that survive a fan-out
 
-`MIN`, `MAX`, `COUNT(DISTINCT ...)` and `COUNT(*)` are unaffected by repeated rows, so OBQC does not block them. `SUM`, `AVG` and `COUNT(col)` are.
+`MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so OBQC never blocks a query that aggregates only with those — no join shape makes them wrong.
+
+`SUM`, `AVG` and `COUNT(col)` are corrupted by duplication and are what the checks look for.
+
+`COUNT(*)` sits between the two: counting the joined rows is usually what you meant across a single 1:many join, so it is not blocked there — but across **two** fan-out joins it returns the product of the two children, which is meaningless, and is blocked.
 
 ---
 

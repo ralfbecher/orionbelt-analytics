@@ -966,7 +966,12 @@ class OBQCValidator:
             # inflates a total if the aggregation happens over these joins --
             # an aggregate in some unrelated subquery does not.
             scope_aggregates = self._select_aggregates(select)
-            if scope_aggregates:
+            # Whether any of them is one duplication would corrupt. MAX and
+            # COUNT(DISTINCT ...) read the same answer off multiplied rows, so
+            # a query using only those is safe across any join shape -- and was
+            # being blocked outright by the rules below.
+            scope_sensitive = bool(self._duplication_sensitive_aggregates(select))
+            if scope_sensitive:
                 result.aggregating_scopes.append(
                     tuple(
                         dict.fromkeys(
@@ -991,6 +996,8 @@ class OBQCValidator:
                     "table": None,
                     "on_condition": None,
                     "scope_aggregates": scope_aggregates,
+                    # Whether this scope's aggregates can be corrupted at all.
+                    "scope_sensitive": scope_sensitive,
                     # Identifies the owning SELECT so fan-out is counted within
                     # one query rather than pooled across unrelated ones. A
                     # traversal index, not id(select): object addresses vary
@@ -1038,18 +1045,109 @@ class OBQCValidator:
                 on_clause = join.args.get("on")
                 if on_clause is not None:
                     join_info["on_condition"] = on_clause.sql()
-                    on_tables: list[str] = []
-                    for column in on_clause.find_all(exp.Column):
-                        if not column.table:
-                            continue
-                        # Columns are qualified by alias far more often than by
-                        # table name, so resolve through the alias map.
-                        resolved = alias_map.get(column.table.lower(), column.table)
-                        if resolved not in on_tables:
-                            on_tables.append(resolved)
-                    join_info["on_tables"] = on_tables
+                    join_info["on_tables"] = self._condition_tables(
+                        on_clause, alias_map
+                    )
+                elif join_info["table"]:
+                    # A comma join states the same relationship in WHERE.
+                    # Reading anchors only from ON let the identical query
+                    # escape fan-trap detection by being written the older way:
+                    # "FROM orders o, order_items i WHERE i.order_id = o.id"
+                    # inflates SUM(o.total) exactly as the JOIN ... ON spelling
+                    # does, and returned fan_trap_risk=False.
+                    join_info["on_tables"] = self._where_anchors(
+                        select, join.this, alias_map
+                    )
 
                 result.parsed_joins.append(join_info)
+
+    @staticmethod
+    def _condition_tables(condition: exp.Expr, alias_map: dict[str, str]) -> list[str]:
+        """Real table names a join condition refers to.
+
+        Args:
+            condition: An ON clause, or a WHERE predicate acting as one.
+            alias_map: The owning scope's alias -> table name map.
+
+        Returns:
+            Distinct table names, in the order the condition names them.
+        """
+        tables: list[str] = []
+        for column in condition.find_all(exp.Column):
+            if not column.table:
+                continue
+            # Columns are qualified by alias far more often than by table
+            # name, so resolve through the alias map.
+            resolved = alias_map.get(column.table.lower(), column.table)
+            if resolved not in tables:
+                tables.append(resolved)
+        return tables
+
+    def _where_anchors(
+        self, select: exp.Select, joined: exp.Expr, alias_map: dict[str, str]
+    ) -> list[str]:
+        """Tables that *joined* is tied to by an equality in this SELECT's WHERE.
+
+        The comma form's counterpart to reading anchors off an ON clause.
+
+        Args:
+            select: The SELECT owning the join and the WHERE.
+            joined: The table introduced by the comma join.
+            alias_map: The scope's alias -> table name map.
+
+        Returns:
+            Table names the join attaches to, including the joined table
+            itself, matching what an ON clause would have yielded.
+        """
+        if not isinstance(joined, exp.Table):
+            return []
+
+        where = select.args.get("where")
+        if where is None:
+            return []
+
+        key = (joined.alias or joined.name).lower()
+        anchors: list[str] = []
+
+        for eq in where.find_all(exp.EQ):
+            # An equality inside a nested subquery belongs to that scope.
+            if eq.find_ancestor(exp.Select) is not select:
+                continue
+            left, right = eq.this, eq.expression
+            if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+                continue
+            qualifiers = {side.table.lower() for side in (left, right) if side.table}
+            if key not in qualifiers or len(qualifiers) < 2:
+                continue
+            for name in self._condition_tables(eq, alias_map):
+                if name not in anchors:
+                    anchors.append(name)
+
+        return anchors
+
+    def _duplication_sensitive_aggregates(self, select: exp.Select) -> list[Any]:
+        """This SELECT's aggregates whose value repeated rows would change.
+
+        MIN and MAX read the same answer off a duplicated set, and so does
+        COUNT(DISTINCT ...). SUM, AVG and a plain COUNT do not. ``COUNT(*)``
+        counts rows, so it belongs here even though it names no table -- across
+        two fan-out joins it returns the product of the two children.
+
+        Args:
+            select: The SELECT to inspect.
+
+        Returns:
+            Aggregate expressions of this scope that duplication corrupts.
+        """
+        sensitive = (exp.Sum, exp.Avg, exp.Count)
+        return [
+            agg
+            for agg in self._own_aggregates(select)
+            if isinstance(agg, sensitive)
+            # sqlglot models DISTINCT as a node wrapping the argument, not as a
+            # flag on the call: COUNT(DISTINCT id) is Count(this=Distinct(...)).
+            and not isinstance(agg.this, exp.Distinct)
+        ]
 
     def _measure_tables(
         self, select: exp.Select, alias_map: dict[str, str]
@@ -1073,17 +1171,9 @@ class OBQCValidator:
         Returns:
             Lower-cased table names whose columns are summed or averaged.
         """
-        sensitive = (exp.Sum, exp.Avg, exp.Count)
         tables: set[str] = set()
 
-        for agg in self._own_aggregates(select):
-            if not isinstance(agg, sensitive):
-                continue
-            # sqlglot models DISTINCT as a node wrapping the argument, not as a
-            # flag on the call: COUNT(DISTINCT id) is Count(this=Distinct(...)).
-            if isinstance(agg.this, exp.Distinct):
-                continue
-
+        for agg in self._duplication_sensitive_aggregates(select):
             for column in agg.find_all(exp.Column):
                 if column.table:
                     resolved = alias_map.get(column.table.lower())
@@ -2156,9 +2246,12 @@ class OBQCValidator:
         # query-wide flag is true if an aggregate appears anywhere, so an
         # unrelated subquery's COUNT(*) used to raise a fan-trap warning about
         # outer joins that aggregate nothing.
-        aggregating_joins = [
-            j for j in result.parsed_joins if j.get("scope_aggregates")
-        ]
+        # Only joins in a SELECT whose aggregates duplication can corrupt. A
+        # scope aggregating solely with MAX, MIN or COUNT(DISTINCT ...) reads
+        # the same answer however many times its rows are repeated, so no join
+        # shape makes it wrong -- and blocking it contradicted the rule that
+        # those aggregates survive a fan-out.
+        aggregating_joins = [j for j in result.parsed_joins if j.get("scope_sensitive")]
         if not aggregating_joins:
             return
 
