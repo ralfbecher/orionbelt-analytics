@@ -54,6 +54,15 @@ SELECT c.name, ut.revenue FROM user_totals ut JOIN customers c ON c.id = ut.cust
 
 The exemption covers references to the CTE, not the query behind it: tables and columns inside the CTE body are validated normally. A CTE body is also not treated as a nested scope, since it cannot reference the `FROM` of the query that declares it.
 
+A name is only exempt where its `WITH` clause is actually in scope. A CTE declared inside a subquery does not excuse a real table of the same name in the enclosing query:
+
+```sql
+-- ERROR: Column 'nonexistent' not found in table 'users' -- the inner CTE is
+-- not in scope out here, so `users` is the real table
+SELECT users.nonexistent FROM users
+WHERE EXISTS (WITH users AS (SELECT 1 AS x FROM orders) SELECT 1 FROM users);
+```
+
 ### Column existence (ERROR)
 
 Checks that every column reference resolves to an actual column in its table.
@@ -110,6 +119,15 @@ SELECT total FROM orders JOIN order_items USING (id);
 
 A `WHERE` predicate only stands in for a join when it equates columns qualified by two different tables; a filter on a single table (`WHERE o.total > 100`) leaves the cross product reported.
 
+The rule is connectivity, not a count of conditions: the scope's tables are nodes, its join conditions are edges, and the query is fully joined only when they form one connected component. A partially joined `FROM` is still an error, and the message names the tables that fell off:
+
+```sql
+-- ERROR: ... (Cartesian product): shipments not joined to the rest of the query
+SELECT o.total FROM orders o, users u, shipments s WHERE o.user_id = u.id;
+```
+
+Aliases are what identify a table here, so an unconditioned self-join (`FROM orders a, orders b`) is two nodes and is reported, while `WHERE a.id = b.id` connects them.
+
 #### Non-matching join condition (WARNING)
 
 Join condition does not match any declared foreign key relationship in the ontology. The query still runs, but OBQC suggests the correct join condition from the ontology.
@@ -129,7 +147,7 @@ Checks `WHERE` and `ON` clause comparisons for type mismatches. Types are inferr
 SELECT * FROM products WHERE name > 100;
 ```
 
-Columns qualified by a table alias are resolved to their table first, so aliased comparisons -- most real SQL -- are checked rather than skipped. A string literal holding a date or timestamp is typed as temporal, since that is how every dialect writes one; `order_date >= '2024-01-01'` is idiomatic, while `order_date = 'hello'` is still reported.
+Columns qualified by a table alias are resolved to their table first, so aliased comparisons -- most real SQL -- are checked rather than skipped. A string literal holding a date or timestamp is accepted **against a temporal column**, since that is how every dialect writes one: `order_date >= '2024-01-01'` is idiomatic. The literal is judged from the pair, not on its own -- opposite a string column it is just a string, so `email = '2024-01-01'` is an ordinary comparison, and `order_date = 'hello'` is still reported.
 
 Comparisons within the same category are allowed (e.g. integer vs. decimal). Comparisons across categories produce a warning.
 

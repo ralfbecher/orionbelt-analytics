@@ -121,11 +121,16 @@ ALIAS_VISIBLE_CLAUSES = {
 ALIAS_STANDALONE_ONLY = frozenset({"postgresql"})
 
 # A string literal holding a date or timestamp. SQL has no date literal syntax
-# in common use -- every dialect accepts a string and converts it -- so typing
-# these as strings reported "order_date >= '2024-01-01'" as a type mismatch.
+# in common use -- every dialect accepts a string and converts it -- so reading
+# these as plain strings reported "order_date >= '2024-01-01'" as a mismatch.
+# Only consulted against a temporal column: on its own such a literal is still
+# a string, and "email = '2024-01-01'" is an ordinary string comparison.
 TEMPORAL_LITERAL = re.compile(
     r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$"
 )
+
+# XSD type names the ontology uses for dates and times.
+TEMPORAL_XSD_TYPES = frozenset({"date", "datetime", "time", "gyear", "gyearmonth"})
 
 
 @dataclass
@@ -556,27 +561,70 @@ class OBQCValidator:
         return result
 
     def _extract_ctes(self, parsed: exp.Expr, result: OBQCResult) -> None:
-        """Record every name declared by a WITH clause.
+        """Record which table references resolve to a WITH alias.
 
         A CTE is a table the query defines for itself, so the ontology never
         describes it. Without this, ``WITH recent AS (...) SELECT ... FROM
         recent`` was rejected outright: ``recent`` was reported as a table not
         found in the ontology, an error, which blocks execution.
 
-        Names are collected across the whole tree, so CTEs declared inside a
-        subquery count too. Scoping them to the exact SELECT that declared them
-        would be more precise, but the cost of over-collecting is only that a
-        real table sharing a CTE's name goes unchecked, while under-collecting
-        blocks a valid query.
+        A name only counts where the CTE declaring it is actually in scope.
+        Collecting names across the whole tree let a CTE hide a real table
+        somewhere else in the query: ``SELECT users.nonexistent FROM users
+        WHERE EXISTS (WITH users AS (...) SELECT 1 FROM users)`` reported
+        nothing, because the inner CTE's name excused the outer table too.
+
+        A name used both ways is not exempted, following the same rule as
+        catalog tables: the exemption is tracked by name, so keeping it would
+        leave the real reference unchecked.
 
         Args:
             parsed: Parsed query.
             result: Result to record the names on.
         """
-        for cte in parsed.find_all(exp.CTE):
-            name = cte.alias_or_name
-            if name:
+        shadowed: set[str] = set()
+
+        for table in parsed.find_all(exp.Table):
+            name = table.name
+            if not name:
+                continue
+            if name.lower() in self._visible_ctes(table):
                 result.cte_names.add(name.lower())
+            else:
+                shadowed.add(name.lower())
+
+        result.cte_names -= shadowed
+
+    @staticmethod
+    def _visible_ctes(node: exp.Expression) -> set[str]:
+        """Lower-cased WITH aliases in scope at *node*.
+
+        Only enclosing WITH clauses are visible. One declared in a sibling
+        subquery is not in scope here, which is exactly what makes a name
+        usable as a CTE in one place and a real table in another.
+
+        Args:
+            node: The table reference to resolve from.
+
+        Returns:
+            CTE names visible at that position.
+        """
+        names: set[str] = set()
+        current: exp.Expr | None = node
+        while current is not None:
+            # Found by node type rather than by arg name: sqlglot spells the
+            # key "with" in some versions and "with_" in others, and a lookup
+            # by the wrong name silently finds no CTEs at all.
+            for value in current.args.values():
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, exp.With):
+                        names |= {
+                            cte.alias_or_name.lower()
+                            for cte in item.expressions
+                            if cte.alias_or_name
+                        }
+            current = current.parent
+        return names
 
     def _extract_tables(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract all table references, noting which come from a catalog schema."""
@@ -1120,29 +1168,24 @@ class OBQCValidator:
             if len(tables) < 2:
                 continue
 
-            # Comma-separated FROM items arrive as joins carrying no ON, so a
-            # cross product is a scope whose joins all lack one.
-            #
-            # "Lacks one" is not the same as "has no ON": USING and NATURAL
-            # state the join just as explicitly, and the older test read them
-            # as cross products -- "FROM sales JOIN clients USING (client_id)"
-            # was rejected outright.
-            joins = select.args.get("joins") or []
-            if joins and any(self._join_is_qualified(join) for join in joins):
-                continue
-
-            # The comma form puts its condition in WHERE, where it is a join in
-            # everything but syntax: "FROM sales s, clients c WHERE s.client_id
-            # = c.id" is the same query as the JOIN ... ON spelling, and was
-            # rejected as a cross product.
-            if self._where_joins_tables(select):
+            # Every table has to be tied to the rest, so this is a
+            # connectivity question rather than a count of conditions. Asking
+            # only whether *some* condition existed passed a scope that was
+            # partly joined: "FROM orders o, users u, shipments s WHERE
+            # o.user_id = u.id" leaves shipments a cross product, and one
+            # qualified equality anywhere used to excuse the whole FROM.
+            unjoined = self._unjoined_tables(select, tables)
+            if not unjoined:
                 continue
 
             result.issues.append(
                 OBQCIssue(
                     issue_type=OBQCIssueType.MISSING_JOIN_CONDITION,
                     severity=OBQCSeverity.ERROR,
-                    message="Multiple tables without explicit JOIN (Cartesian product)",
+                    message=(
+                        "Multiple tables without explicit JOIN (Cartesian product): "
+                        f"{', '.join(unjoined)} not joined to the rest of the query"
+                    ),
                     location="FROM clause",
                     suggestion="Add explicit JOIN ... ON conditions",
                 )
@@ -1150,6 +1193,103 @@ class OBQCValidator:
             found = True
 
         return found
+
+    def _unjoined_tables(
+        self, select: exp.Select, tables: list[exp.Table]
+    ) -> list[str]:
+        """FROM items of *select* that no condition ties to the others.
+
+        The scope's tables are nodes and its join conditions are edges; a query
+        is fully joined when they form one connected component. Anything left
+        in a separate component is multiplied against the rest.
+
+        Identity is the alias where there is one, so a self-join stays two
+        nodes -- collapsing ``FROM orders a, orders b`` to a single "orders"
+        would make an unconditioned self-join look connected to itself.
+
+        Args:
+            select: The SELECT whose FROM to judge.
+            tables: Its own table references.
+
+        Returns:
+            Names of the tables in the smaller components, empty if the scope
+            is fully joined.
+        """
+        parent: dict[str, str] = {}
+
+        def find(node: str) -> str:
+            parent.setdefault(node, node)
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        def union(a: str, b: str) -> None:
+            root_a, root_b = find(a), find(b)
+            if root_a != root_b:
+                parent[root_a] = root_b
+
+        # Node identity, and the display name to report it under.
+        label = {(t.alias or t.name).lower(): t.name for t in tables}
+        for key in label:
+            find(key)
+
+        def connect(expr: exp.Expression | None, scope: exp.Select) -> None:
+            """Union the qualifiers of every cross-table equality in *expr*."""
+            if expr is None:
+                return
+            for eq in expr.find_all(exp.EQ):
+                # An equality inside a nested subquery is that scope's.
+                if eq.find_ancestor(exp.Select) is not scope:
+                    continue
+                left, right = eq.this, eq.expression
+                if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+                    continue
+                if left.table and right.table:
+                    union(left.table.lower(), right.table.lower())
+
+        # The comma form writes its conditions in WHERE, where they join just
+        # as effectively as an ON clause.
+        connect(select.args.get("where"), select)
+
+        preceding: list[str] = []
+        first = next(iter(label), None)
+        if first is not None:
+            preceding.append(first)
+
+        for join in select.args.get("joins") or []:
+            joined = join.this
+            if not isinstance(joined, exp.Table):
+                continue
+            key = (joined.alias or joined.name).lower()
+            find(key)
+
+            on_clause = join.args.get("on")
+            if on_clause is not None:
+                connect(on_clause, select)
+            elif self._join_is_qualified(join):
+                # USING and NATURAL name no qualifiers, so there is nothing to
+                # read a pair off; they join this item to what came before it.
+                for earlier in preceding:
+                    union(key, earlier)
+            preceding.append(key)
+
+        components: dict[str, list[str]] = {}
+        for key, name in label.items():
+            components.setdefault(find(key), []).append(name)
+
+        if len(components) < 2:
+            return []
+
+        # Report the odd ones out rather than the whole FROM: the largest
+        # component is the query, the rest are what fell off it.
+        largest = max(components.values(), key=len)
+        return sorted(
+            name
+            for group in components.values()
+            if group is not largest
+            for name in group
+        )
 
     @staticmethod
     def _join_is_qualified(join: exp.Join) -> bool:
@@ -1323,6 +1463,7 @@ class OBQCValidator:
                 left_type
                 and right_type
                 and not self._types_compatible(left_type, right_type)
+                and not self._is_date_literal_comparison(left, right)
             ):
                 result.issues.append(
                     OBQCIssue(
@@ -1333,6 +1474,36 @@ class OBQCValidator:
                         suggestion="Ensure compared values have compatible types",
                     )
                 )
+
+    def _is_date_literal_comparison(self, left: exp.Expr, right: exp.Expr) -> bool:
+        """Whether this is a temporal value written the only way SQL allows.
+
+        No dialect in common use has a date literal syntax, so a date is
+        written as a string and converted: ``order_date >= '2024-01-01'`` is
+        idiomatic, not a mismatch.
+
+        Decided from the pair, not from the literal alone. Typing every
+        ISO-looking string as temporal fixed date columns but broke string
+        ones -- ``email = '2024-01-01'`` is a perfectly ordinary string
+        comparison, and was reported as "string vs dateTime".
+
+        Args:
+            left: Left operand of the comparison.
+            right: Right operand.
+
+        Returns:
+            True if one side is a temporal column and the other a string
+            literal holding a date or timestamp.
+        """
+        for column, literal in ((left, right), (right, left)):
+            if not isinstance(literal, exp.Literal) or not literal.is_string:
+                continue
+            if not TEMPORAL_LITERAL.match(literal.this):
+                continue
+            xsd = self._infer_type(column, column.find_ancestor(exp.Select))
+            if xsd and self._type_name(xsd).lower() in TEMPORAL_XSD_TYPES:
+                return True
+        return False
 
     def _infer_type(
         self, expr: exp.Expr, scope: exp.Select | None = None
@@ -1376,13 +1547,6 @@ class OBQCValidator:
             elif expr.is_number:
                 return str(XSD.decimal)
             elif expr.is_string:
-                # Every dialect writes date and timestamp values as string
-                # literals, so "order_date >= '2024-01-01'" is idiomatic rather
-                # than a mismatch. Judged on the text: a string that is not a
-                # date still compares as a string, so "order_date = 'hello'"
-                # is still reported.
-                if TEMPORAL_LITERAL.match(expr.this):
-                    return str(XSD.dateTime)
                 return str(XSD.string)
 
         return None

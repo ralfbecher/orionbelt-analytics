@@ -1622,6 +1622,18 @@ class TestTemporalLiterals(unittest.TestCase):
             [],
         )
 
+    def test_string_column_against_a_date_shaped_literal_is_fine(self):
+        """The literal is only temporal opposite a temporal column.
+
+        Typing every ISO-looking string as a date fixed date columns and broke
+        string ones: "email = '2024-01-01'" is an ordinary string comparison,
+        and was reported as "string vs dateTime".
+        """
+        self.assertEqual(
+            self._messages("SELECT u.id FROM users u WHERE u.email = '2024-01-01'"),
+            [],
+        )
+
     def test_a_string_that_is_not_a_date_still_mismatches(self):
         self.assertTrue(
             any(
@@ -1710,6 +1722,38 @@ class TestCommonTableExpressions(unittest.TestCase):
         )
 
         self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_inner_cte_does_not_excuse_an_outer_real_table(self):
+        """A CTE is only a table where its WITH clause is in scope.
+
+        Collecting names across the whole query let a CTE declared inside a
+        subquery hide a real table of the same name in the outer one.
+        """
+        errors = self._errors(
+            "SELECT users.nonexistent FROM users "
+            "WHERE EXISTS (WITH users AS (SELECT 1 AS x FROM orders) "
+            "SELECT 1 FROM users)"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_cte_named_after_a_real_table_still_shadows_it(self):
+        """Where the WITH *is* in scope, the CTE wins."""
+        self.assertEqual(
+            self._errors(
+                "WITH users AS (SELECT id AS uid FROM orders) SELECT uid FROM users"
+            ),
+            [],
+        )
+
+    def test_cte_declared_inside_a_subquery_is_exempt_there(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM users u WHERE u.id IN ("
+                "WITH t AS (SELECT user_id FROM orders) SELECT user_id FROM t)"
+            ),
+            [],
+        )
 
     def test_recursive_cte_self_reference(self):
         """A recursive CTE names itself; that reference is not a missing table."""
@@ -1837,6 +1881,62 @@ class TestJoinsWithoutOnClause(unittest.TestCase):
         errors = self._errors("SELECT u.name, o.total FROM orders o, users u")
 
         self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+    def test_partially_joined_scope_is_flagged(self):
+        """Every table must be tied in, not just some pair.
+
+        One qualified equality used to excuse the whole FROM clause, so a
+        third table joined to nothing rode along as a cross product.
+        """
+        errors = self._errors(
+            "SELECT o.total FROM orders o, users u, shipments s "
+            "WHERE o.user_id = u.id"
+        )
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+        self.assertTrue(any("shipments" in e for e in errors), errors)
+
+    def test_the_unjoined_table_is_named(self):
+        """The joined pair is not the problem, so it is not reported."""
+        errors = self._errors(
+            "SELECT o.total FROM orders o JOIN users u ON o.user_id = u.id, "
+            "shipments s"
+        )
+
+        self.assertTrue(any("shipments" in e for e in errors), errors)
+        self.assertFalse(any("users" in e for e in errors), errors)
+
+    def test_unconditioned_self_join_is_flagged(self):
+        """Two aliases of one table are two nodes, not one."""
+        errors = self._errors("SELECT a.id FROM orders a, orders b")
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+    def test_conditioned_self_join_is_not_flagged(self):
+        self.assertEqual(
+            self._errors("SELECT a.id FROM orders a, orders b WHERE a.id = b.id"),
+            [],
+        )
+
+    def test_chain_of_conditions_connects_every_table(self):
+        """Connectivity is transitive: c reaches a through b."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM orders o, users u, order_items i "
+                "WHERE o.user_id = u.id AND i.order_id = o.id"
+            ),
+            [],
+        )
+
+    def test_using_join_connects_to_what_precedes_it(self):
+        """USING names no qualifiers, so it joins to the preceding items."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o JOIN users u ON o.user_id = u.id "
+                "JOIN order_items USING (id)"
+            ),
+            [],
+        )
 
     def test_where_filter_on_one_table_is_not_a_join(self):
         """A predicate must relate two tables to stand in for a join."""
