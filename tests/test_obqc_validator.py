@@ -1542,5 +1542,364 @@ class TestIncompatibleOntology(unittest.TestCase):
         self.assertTrue(result_dict["obqc_ontology_compatible"])
 
 
+class TestWindowFunctions(unittest.TestCase):
+    """A windowed aggregate collapses no rows, so it imposes no GROUP BY."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_window_aggregate_needs_no_group_by(self):
+        """The reported false positive: a window SUM demanded a GROUP BY."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.id, o.total, SUM(o.total) OVER (PARTITION BY o.user_id) "
+                "FROM orders o"
+            ),
+            [],
+        )
+
+    def test_running_total_over_order_by(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT o.order_date, SUM(o.total) OVER (ORDER BY o.order_date) "
+                "FROM orders o"
+            ),
+            [],
+        )
+
+    def test_rank_beside_a_real_aggregate(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, SUM(o.total), RANK() OVER (ORDER BY SUM(o.total) DESC) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY u.name"
+            ),
+            [],
+        )
+
+    def test_grouping_is_still_required_beside_a_window(self):
+        """A window does not excuse a bare column from a real GROUP BY."""
+        errors = self._errors(
+            "SELECT u.name, o.order_date, SUM(o.total), "
+            "AVG(o.total) OVER (PARTITION BY u.name) "
+            "FROM orders o JOIN users u ON o.user_id = u.id "
+            "GROUP BY u.name"
+        )
+
+        self.assertTrue(any("order_date" in e for e in errors), errors)
+
+
+class TestTemporalLiterals(unittest.TestCase):
+    """Dates are written as string literals in every dialect."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _messages(self, sql):
+        return [i.message for i in self.validator.validate(sql).issues]
+
+    def test_date_literal_is_not_a_type_mismatch(self):
+        self.assertEqual(
+            self._messages(
+                "SELECT o.id FROM orders o WHERE o.order_date >= '2024-01-01'"
+            ),
+            [],
+        )
+
+    def test_timestamp_literal_is_not_a_type_mismatch(self):
+        self.assertEqual(
+            self._messages(
+                "SELECT o.id FROM orders o WHERE o.order_date < '2024-01-01 12:30:00'"
+            ),
+            [],
+        )
+
+    def test_a_string_that_is_not_a_date_still_mismatches(self):
+        self.assertTrue(
+            any(
+                "mismatch" in m.lower()
+                for m in self._messages(
+                    "SELECT o.id FROM orders o WHERE o.order_date = 'hello'"
+                )
+            )
+        )
+
+    def test_alias_qualified_comparison_is_type_checked(self):
+        """Unresolved aliases meant most real SQL was never type-checked."""
+        self.assertTrue(
+            any(
+                "mismatch" in m.lower()
+                for m in self._messages(
+                    "SELECT o.id FROM orders o JOIN users u ON o.user_id = u.name"
+                )
+            )
+        )
+
+
+class TestCommonTableExpressions(unittest.TestCase):
+    """A WITH alias is a table the query defines, not one the ontology owns."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_cte_name_is_not_reported_missing(self):
+        """The reported bug: a WITH alias was rejected as an unknown table."""
+        self.assertEqual(
+            self._errors(
+                "WITH user_totals AS ("
+                "  SELECT user_id, SUM(total) AS revenue FROM orders GROUP BY user_id"
+                ") "
+                "SELECT u.name, ut.revenue "
+                "FROM user_totals ut JOIN users u ON u.id = ut.user_id"
+            ),
+            [],
+        )
+
+    def test_cte_output_column_is_not_reported_missing(self):
+        """A CTE's columns come from its select list, not from the ontology."""
+        self.assertEqual(
+            self._errors(
+                "WITH t AS (SELECT SUM(total) AS revenue FROM orders) "
+                "SELECT revenue FROM t"
+            ),
+            [],
+        )
+
+    def test_join_to_cte_is_not_warned_about_foreign_keys(self):
+        """A CTE has no declared FK, so the FK check can only cry wolf."""
+        result = self.validator.validate(
+            "WITH t AS (SELECT user_id FROM orders) "
+            "SELECT u.name FROM t JOIN users u ON t.user_id = u.id"
+        )
+
+        self.assertEqual(
+            [
+                i.message
+                for i in result.issues
+                if i.issue_type == OBQCIssueType.INVALID_JOIN
+            ],
+            [],
+        )
+
+    def test_cte_body_is_still_validated(self):
+        """Exempting the WITH alias must not exempt the query behind it."""
+        errors = self._errors(
+            "WITH t AS (SELECT bogus_column FROM orders) SELECT user_id FROM t"
+        )
+
+        self.assertTrue(any("bogus_column" in e for e in errors), errors)
+
+    def test_cte_body_cannot_see_the_declaring_query(self):
+        """A CTE body is not a nested scope, so outer tables cannot excuse it."""
+        errors = self._errors(
+            "WITH t AS (SELECT o.nonexistent FROM orders o) SELECT user_id FROM t"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_recursive_cte_self_reference(self):
+        """A recursive CTE names itself; that reference is not a missing table."""
+        self.assertEqual(
+            self._errors(
+                "WITH RECURSIVE chain AS ("
+                "  SELECT id, user_id FROM orders WHERE user_id = 1"
+                "  UNION ALL"
+                "  SELECT o.id, o.user_id FROM orders o JOIN chain c ON o.id = c.id"
+                ") SELECT id FROM chain"
+            ),
+            [],
+        )
+
+
+class TestGroupingSetConstructs(unittest.TestCase):
+    """ROLLUP, CUBE and GROUPING SETS declare grouping keys like GROUP BY does."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_rollup_columns_count_as_grouped(self):
+        """The reported bug: ROLLUP keys read as grouping by nothing at all."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, o.order_date, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY ROLLUP(u.name, o.order_date)"
+            ),
+            [],
+        )
+
+    def test_cube_columns_count_as_grouped(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY CUBE(u.name)"
+            ),
+            [],
+        )
+
+    def test_grouping_sets_columns_count_as_grouped(self):
+        """Members nest inside Paren/Tuple wrappers; "()" contributes none."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY GROUPING SETS ((u.name), ())"
+            ),
+            [],
+        )
+
+    def test_plain_and_rollup_keys_combine(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, o.order_date, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY u.name, ROLLUP(o.order_date)"
+            ),
+            [],
+        )
+
+    def test_column_missing_from_rollup_is_still_flagged(self):
+        """Recognising ROLLUP must not stop the rule doing its job."""
+        errors = self._errors(
+            "SELECT u.name, o.order_date, SUM(o.total) "
+            "FROM orders o JOIN users u ON o.user_id = u.id "
+            "GROUP BY ROLLUP(u.name)"
+        )
+
+        self.assertTrue(any("order_date" in e for e in errors), errors)
+
+
+class TestJoinsWithoutOnClause(unittest.TestCase):
+    """USING, NATURAL and the comma form are joins, not cross products."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_comma_join_with_where_condition(self):
+        """The pre-SQL-92 form states its join in WHERE."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, o.total FROM orders o, users u WHERE o.user_id = u.id"
+            ),
+            [],
+        )
+
+    def test_comma_join_across_three_tables(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, i.quantity "
+                "FROM orders o, users u, order_items i "
+                "WHERE o.user_id = u.id AND i.order_id = o.id"
+            ),
+            [],
+        )
+
+    def test_using_join(self):
+        result = self.validator.validate(
+            "SELECT quantity FROM orders JOIN order_items USING (id)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_natural_join(self):
+        result = self.validator.validate("SELECT total FROM orders NATURAL JOIN users")
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_genuine_cross_product_is_still_flagged(self):
+        errors = self._errors("SELECT u.name, o.total FROM orders o, users u")
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+    def test_where_filter_on_one_table_is_not_a_join(self):
+        """A predicate must relate two tables to stand in for a join."""
+        errors = self._errors(
+            "SELECT u.name, o.total FROM orders o, users u WHERE o.total > 100"
+        )
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+
+class TestAliasQualifiedColumns(unittest.TestCase):
+    """A column qualified by a table alias resolves to that table."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_bogus_column_behind_an_alias_is_caught(self):
+        """Unresolved qualifiers made the aliased spelling escape the check."""
+        errors = self._errors("SELECT o.nonexistent FROM orders o")
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+        self.assertTrue(any("orders" in e for e in errors), errors)
+
+    def test_real_column_behind_an_alias_passes(self):
+        self.assertEqual(self._errors("SELECT o.total FROM orders o"), [])
+
+    def test_alias_resolves_through_a_subquery(self):
+        errors = self._errors(
+            "SELECT u.name FROM users u "
+            "WHERE u.id IN (SELECT o.nonexistent FROM orders o)"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_outer_alias_is_visible_to_a_correlated_subquery(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM users u "
+                "WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
+            ),
+            [],
+        )
+
+    def test_derived_table_alias_is_not_resolved_against_the_ontology(self):
+        """A subquery's output columns are not any table's columns."""
+        self.assertEqual(
+            self._errors(
+                "SELECT x.revenue FROM (SELECT SUM(total) AS revenue FROM orders) x"
+            ),
+            [],
+        )
+
+    def test_reported_column_keeps_the_alias_the_query_wrote(self):
+        result = self.validator.validate("SELECT o.total FROM orders o")
+
+        self.assertIn("o.total", result.parsed_columns)
+
+
 if __name__ == "__main__":
     unittest.main()

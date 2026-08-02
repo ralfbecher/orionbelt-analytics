@@ -44,6 +44,16 @@ When a table is not found, OBQC suggests up to 10 available table names from the
 
 Tables reached through a database catalog schema -- `information_schema`, `pg_catalog`, `system`, `performance_schema`, `snowflake`, `sys` -- are exempt: they describe the database rather than user data, so they are never part of a generated ontology. MySQL's `mysql` schema is **not** exempt, because it holds accounts and grants rather than metadata; `src/security.py` blocks those tables outright. A bare name that merely looks like a catalog table (`FROM tables`) is still checked.
 
+Names declared by a `WITH` clause are exempt too -- a CTE is a table the query defines for itself, so the ontology never describes it:
+
+```sql
+-- OK: user_totals is a CTE, not a missing table
+WITH user_totals AS (SELECT customer_id, SUM(total) AS revenue FROM orders GROUP BY customer_id)
+SELECT c.name, ut.revenue FROM user_totals ut JOIN customers c ON c.id = ut.customer_id;
+```
+
+The exemption covers references to the CTE, not the query behind it: tables and columns inside the CTE body are validated normally. A CTE body is also not treated as a nested scope, since it cannot reference the `FROM` of the query that declares it.
+
 ### Column existence (ERROR)
 
 Checks that every column reference resolves to an actual column in its table.
@@ -53,12 +63,13 @@ Checks that every column reference resolves to an actual column in its table.
 SELECT emial FROM customers;
 ```
 
-For qualified references (`table.column`), the column is checked against the specific table. For unqualified references, OBQC searches the tables in that reference's own scope -- the `SELECT` it appears in, plus any enclosing ones, so a correlated subquery can still use the outer query's tables. A subquery's tables never resolve names in the outer query.
+For qualified references (`table.column`), the column is checked against the specific table; a qualifier that is a table alias (`FROM orders o` ... `o.total`) is resolved to the table it names, searching enclosing scopes so a correlated subquery can qualify with an outer alias. A qualifier naming something the ontology cannot describe -- a derived table or a CTE -- is left alone. For unqualified references, OBQC searches the tables in that reference's own scope -- the `SELECT` it appears in, plus any enclosing ones, so a correlated subquery can still use the outer query's tables. A subquery's tables never resolve names in the outer query.
 
 Two kinds of name are not columns and are not reported missing:
 
 - **`SELECT` aliases** referenced from a later clause. `ORDER BY revenue` over `SUM(total) AS revenue` resolves to the select list. Visibility follows the dialect: PostgreSQL allows an output name in `GROUP BY` and `ORDER BY` but not `HAVING` or `WHERE`, and only as a whole sort key (`ORDER BY t + 1` is an expression over input columns); DuckDB resolves aliases in every clause. A name that is *both* an alias and a real column resolves to the column.
 - **Columns of a catalog table**, which the ontology does not describe. If a query touches one, an unqualified name that matches no user table is left alone rather than reported.
+- **Columns of a CTE**, for the same reason: they come from its select list, so a name in a scope that includes a `WITH` alias is not reported missing.
 
 ### Ambiguous columns (WARNING)
 
@@ -89,6 +100,16 @@ Judged per `SELECT`. A subquery contributes its own tables to its own scope, so 
 SELECT id FROM customers WHERE id IN (SELECT customer_id FROM orders);
 ```
 
+`ON` is not the only way to state a join. `USING`, `NATURAL`, and the comma form with a cross-table predicate in `WHERE` all count as conditioned:
+
+```sql
+-- OK: joined, just not with an ON clause
+SELECT c.name, o.total FROM customers c, orders o WHERE o.customer_id = c.id;
+SELECT total FROM orders JOIN order_items USING (id);
+```
+
+A `WHERE` predicate only stands in for a join when it equates columns qualified by two different tables; a filter on a single table (`WHERE o.total > 100`) leaves the cross product reported.
+
 #### Non-matching join condition (WARNING)
 
 Join condition does not match any declared foreign key relationship in the ontology. The query still runs, but OBQC suggests the correct join condition from the ontology.
@@ -108,6 +129,8 @@ Checks `WHERE` and `ON` clause comparisons for type mismatches. Types are inferr
 SELECT * FROM products WHERE name > 100;
 ```
 
+Columns qualified by a table alias are resolved to their table first, so aliased comparisons -- most real SQL -- are checked rather than skipped. A string literal holding a date or timestamp is typed as temporal, since that is how every dialect writes one; `order_date >= '2024-01-01'` is idiomatic, while `order_date = 'hello'` is still reported.
+
 Comparisons within the same category are allowed (e.g. integer vs. decimal). Comparisons across categories produce a warning.
 
 ### Aggregation correctness (ERROR)
@@ -115,6 +138,23 @@ Comparisons within the same category are allowed (e.g. integer vs. decimal). Com
 When aggregate functions (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`) are used, OBQC checks that all non-aggregated columns in `SELECT` appear in `GROUP BY`. Grouping by an alias satisfies the check on the column it stands for.
 
 Evaluated per `SELECT`: an aggregate inside a subquery belongs to that subquery, so `SELECT name FROM users WHERE id = (SELECT MAX(user_id) FROM orders)` needs no `GROUP BY` in the outer query.
+
+Windowed aggregates are excluded. `SUM(total) OVER (PARTITION BY region)` computes a value per row and collapses nothing, so it imposes no `GROUP BY` at all and does not make the columns beside it need one:
+
+```sql
+-- OK: a window function is not a grouping aggregate
+SELECT id, total, SUM(total) OVER (PARTITION BY customer_id) FROM orders;
+```
+
+A window does not *excuse* a column either: beside a real `GROUP BY`, a bare column that only appears inside an `OVER (...)` still has to be grouped.
+
+`ROLLUP`, `CUBE` and `GROUPING SETS` declare grouping keys like a plain `GROUP BY` does, and a column named in one is a legal non-aggregated selection -- super-aggregate rows null it out rather than making it ambiguous:
+
+```sql
+-- OK: both columns are grouping keys
+SELECT region, status, SUM(amount) FROM orders GROUP BY ROLLUP(region, status);
+SELECT region, SUM(amount) FROM orders GROUP BY GROUPING SETS ((region), ());
+```
 
 ```sql
 -- ERROR: Column 'name' in SELECT with aggregation but no GROUP BY

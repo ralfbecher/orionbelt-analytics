@@ -6,6 +6,7 @@ and fan-trap patterns without using LLM.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, ClassVar
@@ -119,6 +120,13 @@ ALIAS_VISIBLE_CLAUSES = {
 # where it is legal would block a query the database would have run.
 ALIAS_STANDALONE_ONLY = frozenset({"postgresql"})
 
+# A string literal holding a date or timestamp. SQL has no date literal syntax
+# in common use -- every dialect accepts a string and converts it -- so typing
+# these as strings reported "order_date >= '2024-01-01'" as a type mismatch.
+TEMPORAL_LITERAL = re.compile(
+    r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$"
+)
+
 
 @dataclass
 class OBQCIssue:
@@ -143,6 +151,11 @@ class OBQCResult:
     # (information_schema and friends). They are legitimately absent from the
     # ontology, which describes user data, so ontology-existence rules skip them.
     catalog_tables: set[str] = field(default_factory=set)
+    # Lower-cased names declared by a WITH clause. A CTE is defined by the query
+    # itself, so it is legitimately absent from the ontology and its projected
+    # columns are not describable by it either; ontology-existence rules skip
+    # references to these names (but not the tables inside the CTE bodies).
+    cte_names: set[str] = field(default_factory=set)
     parsed_columns: list[str] = field(default_factory=list)
     # Lower-cased SELECT aliases referenced from ORDER BY / GROUP BY / HAVING.
     # They resolve to select-list output, not to any table's column.
@@ -519,7 +532,9 @@ class OBQCValidator:
             )
             return result
 
-        # Extract query components
+        # Extract query components. CTE names first: the rules below need to
+        # know which references name a WITH alias rather than a real table.
+        self._extract_ctes(parsed, result)
         self._extract_tables(parsed, result)
         self._extract_columns(parsed, result, dialect)
         self._extract_joins(parsed, result)
@@ -539,6 +554,29 @@ class OBQCValidator:
         )
 
         return result
+
+    def _extract_ctes(self, parsed: exp.Expr, result: OBQCResult) -> None:
+        """Record every name declared by a WITH clause.
+
+        A CTE is a table the query defines for itself, so the ontology never
+        describes it. Without this, ``WITH recent AS (...) SELECT ... FROM
+        recent`` was rejected outright: ``recent`` was reported as a table not
+        found in the ontology, an error, which blocks execution.
+
+        Names are collected across the whole tree, so CTEs declared inside a
+        subquery count too. Scoping them to the exact SELECT that declared them
+        would be more precise, but the cost of over-collecting is only that a
+        real table sharing a CTE's name goes unchecked, while under-collecting
+        blocks a valid query.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to record the names on.
+        """
+        for cte in parsed.find_all(exp.CTE):
+            name = cte.alias_or_name
+            if name:
+                result.cte_names.add(name.lower())
 
     def _extract_tables(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Extract all table references, noting which come from a catalog schema."""
@@ -594,14 +632,24 @@ class OBQCValidator:
             if col_ref not in result.parsed_columns:
                 result.parsed_columns.append(col_ref)
 
+            owner = column.find_ancestor(exp.Select)
+
+            # Validation needs the table, not the alias the query happened to
+            # write. The reference is reported as written (above); only the
+            # form the rules consume is resolved.
+            scoped_ref = col_ref
+            if column.table:
+                real_table = self._resolve_qualifier(owner, column.table)
+                if real_table:
+                    scoped_ref = f"{real_table}.{column.name}"
+
             # Which tables the name could resolve against, which is a property
             # of where it appears. Resolving against every table in the query
             # let a subquery's table answer for the outer SELECT: "SELECT
             # quantity FROM users WHERE id IN (SELECT order_id FROM
             # order_items)" found quantity in order_items and reported nothing.
-            owner = column.find_ancestor(exp.Select)
             scope = self._scope_tables(owner, scope_cache) if owner else ()
-            entry = (col_ref, scope)
+            entry = (scoped_ref, scope)
             if entry not in result.column_scopes:
                 result.column_scopes.append(entry)
 
@@ -637,12 +685,35 @@ class OBQCValidator:
                 if t.name and t.find_ancestor(exp.Select) is select
             )
         )
-        parent = select.parent_select
+        # A CTE body is not a nested scope of the query that declares it: it
+        # may reference earlier CTEs and real tables, never the outer FROM.
+        # Treating it as nested let the outer query's tables answer for names
+        # inside the CTE -- and, once WITH aliases became undescribable, let a
+        # mere reference to the CTE excuse any bogus name in its own body.
+        parent = None if self._is_cte_body(select) else select.parent_select
         outer = self._scope_tables(parent, cache) if parent is not None else ()
 
         levels = (own, *outer) if own else outer
         cache[id(select)] = levels
         return levels
+
+    @staticmethod
+    def _is_cte_body(select: exp.Select) -> bool:
+        """Whether *select* is the body of a WITH clause definition.
+
+        Args:
+            select: The SELECT to classify.
+
+        Returns:
+            True if the nearest enclosing construct is a CTE definition rather
+            than an enclosing query.
+        """
+        node = select.parent
+        while node is not None and not isinstance(node, exp.Select):
+            if isinstance(node, exp.CTE):
+                return True
+            node = node.parent
+        return False
 
     def _select_alias_references(
         self, parsed: exp.Expr, result: OBQCResult, dialect: str
@@ -735,7 +806,12 @@ class OBQCValidator:
         Returns:
             True if the column is one of the clause's top-level keys.
         """
-        for key in clause_node.expressions:
+        keys = (
+            self._group_by_keys(clause_node)
+            if isinstance(clause_node, exp.Group)
+            else clause_node.expressions
+        )
+        for key in keys:
             # ORDER BY keys are wrapped in Ordered (carrying ASC/DESC etc.);
             # GROUP BY keys are the expressions themselves.
             target = key.this if isinstance(key, exp.Ordered) else key
@@ -768,6 +844,10 @@ class OBQCValidator:
                     )
                 )
 
+            # The comma form's join conditions live in WHERE, so a join here
+            # may carry no ON and still be conditioned.
+            where_joins = self._where_joins_tables(select)
+
             for join in select.args.get("joins") or []:
                 join_info: dict[str, Any] = {
                     "type": join.kind or "INNER",
@@ -789,6 +869,16 @@ class OBQCValidator:
                 if join.this and isinstance(join.this, exp.Table):
                     join_info["table"] = join.this.name
 
+                # Whether the join is conditioned at all -- by ON, by USING or
+                # NATURAL, or by a cross-table predicate in WHERE. Recorded so
+                # the missing-condition rule does not demand an ON that these
+                # forms never have. None of them yields a pair of qualified
+                # columns in the join itself, so they are not judged for
+                # fan-out.
+                join_info["has_condition"] = (
+                    self._join_is_qualified(join) or where_joins
+                )
+
                 # Get ON condition
                 on_clause = join.args.get("on")
                 if on_clause is not None:
@@ -805,6 +895,38 @@ class OBQCValidator:
                     join_info["on_tables"] = on_tables
 
                 result.parsed_joins.append(join_info)
+
+    def _resolve_qualifier(
+        self, select: exp.Select | None, qualifier: str
+    ) -> str | None:
+        """Resolve a column's qualifier to the table it names.
+
+        ``FROM sales s`` makes ``s.amount`` a reference to ``sales``. Rules
+        that look the qualifier up in the ontology directly found nothing and
+        said nothing, so ``SELECT s.bogus FROM sales s`` passed while the
+        unaliased spelling was correctly rejected -- and aliased comparisons,
+        which is most real SQL, were never type-checked at all.
+
+        Enclosing scopes are searched too, since a correlated subquery may
+        qualify with an outer alias. A CTE body ends the search: it cannot see
+        the query that declares it.
+
+        Args:
+            select: The SELECT the reference appears in.
+            qualifier: The alias or table name written before the dot.
+
+        Returns:
+            The real table name, or None if the qualifier names something the
+            ontology cannot describe (a derived table, an unknown alias).
+        """
+        key = qualifier.lower()
+        node = select
+        while node is not None:
+            resolved = self._build_alias_map(node).get(key)
+            if resolved is not None:
+                return resolved
+            node = None if self._is_cte_body(node) else node.parent_select
+        return None
 
     def _build_alias_map(self, select: exp.Expr) -> dict[str, str]:
         """Map one SELECT's table aliases (and bare names) to real table names.
@@ -853,6 +975,9 @@ class OBQCValidator:
             # be; demanding it appear there blocks catalog queries outright.
             if table_name in result.catalog_tables:
                 continue
+            # A WITH alias is defined by the query, not by the ontology.
+            if table_name.lower() in result.cte_names:
+                continue
             if table_name.lower() not in self._schema_cache.tables:
                 available_tables = list(self._schema_cache.tables.keys())[:10]
                 result.issues.append(
@@ -877,6 +1002,13 @@ class OBQCValidator:
                 table_name, col_name = parts[0], parts[1]
                 table_key = table_name.lower()
                 col_key = col_name.lower()
+
+                # Columns of a CTE come from its select list, which the
+                # ontology does not describe. The name also shadows any real
+                # table it collides with, so the ontology's columns for that
+                # table are not the right thing to check against either.
+                if table_key in result.cte_names:
+                    continue
 
                 if table_key in self._schema_cache.tables:
                     table_schema = self._schema_cache.tables[table_key]
@@ -923,9 +1055,16 @@ class OBQCValidator:
                 # called missing.
                 # Unresolved names are judged against every level, since any of
                 # them could legitimately have provided the name.
+                # A CTE in scope is undescribable for the same reason: its
+                # output columns are whatever its select list produced, so an
+                # unqualified name that matches no ontology table may well be
+                # one of them.
                 visible = [t for level in scope for t in level]
                 describable_tables = [
-                    t for t in visible if t not in result.catalog_tables
+                    t
+                    for t in visible
+                    if t not in result.catalog_tables
+                    and t.lower() not in result.cte_names
                 ]
                 all_tables_describable = len(describable_tables) == len(visible)
 
@@ -983,8 +1122,20 @@ class OBQCValidator:
 
             # Comma-separated FROM items arrive as joins carrying no ON, so a
             # cross product is a scope whose joins all lack one.
+            #
+            # "Lacks one" is not the same as "has no ON": USING and NATURAL
+            # state the join just as explicitly, and the older test read them
+            # as cross products -- "FROM sales JOIN clients USING (client_id)"
+            # was rejected outright.
             joins = select.args.get("joins") or []
-            if joins and any(join.args.get("on") for join in joins):
+            if joins and any(self._join_is_qualified(join) for join in joins):
+                continue
+
+            # The comma form puts its condition in WHERE, where it is a join in
+            # everything but syntax: "FROM sales s, clients c WHERE s.client_id
+            # = c.id" is the same query as the JOIN ... ON spelling, and was
+            # rejected as a cross product.
+            if self._where_joins_tables(select):
                 continue
 
             result.issues.append(
@@ -999,6 +1150,59 @@ class OBQCValidator:
             found = True
 
         return found
+
+    @staticmethod
+    def _join_is_qualified(join: exp.Join) -> bool:
+        """Whether *join* states how the two sides line up.
+
+        ON, USING and NATURAL are three spellings of the same thing. Only a
+        join with none of them produces a cross product.
+
+        Args:
+            join: The JOIN to inspect.
+
+        Returns:
+            True if the join carries a condition.
+        """
+        return bool(
+            join.args.get("on")
+            or join.args.get("using")
+            # sqlglot records NATURAL as the join *method*, not its kind.
+            or (join.args.get("method") or "").upper() == "NATURAL"
+        )
+
+    def _where_joins_tables(self, select: exp.Select) -> bool:
+        """Whether this SELECT's WHERE equates columns of two different tables.
+
+        The pre-SQL-92 comma form writes its join conditions in WHERE, so a
+        scope with no ON clause may still be fully joined.
+
+        Qualified names are what make this decidable: two columns qualified by
+        different aliases are a cross-table predicate. Unqualified names are
+        ignored -- resolving them would take the full scope, and guessing wrong
+        would either excuse a real cross product or block a valid query.
+
+        Args:
+            select: The SELECT whose WHERE clause to inspect.
+
+        Returns:
+            True if some equality compares columns of two distinct tables.
+        """
+        where = select.args.get("where")
+        if where is None:
+            return False
+
+        for eq in where.find_all(exp.EQ):
+            # An EQ inside a nested subquery belongs to that subquery's scope.
+            if eq.find_ancestor(exp.Select) is not select:
+                continue
+            left, right = eq.this, eq.expression
+            if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+                continue
+            if left.table and right.table and left.table.lower() != right.table.lower():
+                return True
+
+        return False
 
     def _validate_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Rule: Validate joins use declared FK relationships."""
@@ -1015,6 +1219,9 @@ class OBQCValidator:
             on_condition = join_info.get("on_condition")
 
             if not on_condition:
+                if join_info.get("has_condition"):
+                    # USING / NATURAL / comma-form: joined, just not with an ON.
+                    continue
                 result.issues.append(
                     OBQCIssue(
                         issue_type=OBQCIssueType.MISSING_JOIN_CONDITION,
@@ -1024,6 +1231,12 @@ class OBQCValidator:
                         suggestion="Add ON condition based on foreign key relationship",
                     )
                 )
+                continue
+
+            # A CTE has no declared FK relationships -- it is not in the
+            # ontology at all -- so the check below could only ever say "may
+            # not match", on every join to a WITH alias.
+            if join_table and join_table.lower() in result.cte_names:
                 continue
 
             # Check if join condition matches a declared relationship
@@ -1099,8 +1312,12 @@ class OBQCValidator:
             left = comp.left
             right = comp.right
 
-            left_type = self._infer_type(left)
-            right_type = self._infer_type(right)
+            # The scope is what makes an alias resolvable, so it travels with
+            # the expression: "WHERE s.amount = c.name" is only checkable once
+            # s and c are known to be sales and clients.
+            scope = comp.find_ancestor(exp.Select)
+            left_type = self._infer_type(left, scope)
+            right_type = self._infer_type(right, scope)
 
             if (
                 left_type
@@ -1117,8 +1334,19 @@ class OBQCValidator:
                     )
                 )
 
-    def _infer_type(self, expr: exp.Expr) -> str | None:
-        """Infer the XSD type of an expression from ontology."""
+    def _infer_type(
+        self, expr: exp.Expr, scope: exp.Select | None = None
+    ) -> str | None:
+        """Infer the XSD type of an expression from ontology.
+
+        Args:
+            expr: The expression to type.
+            scope: SELECT the expression sits in, used to resolve a column's
+                table alias. Without it, only unaliased references type.
+
+        Returns:
+            The XSD type URI as a string, or None if it cannot be determined.
+        """
         if self._schema_cache is None:
             return None
 
@@ -1127,6 +1355,7 @@ class OBQCValidator:
             column = expr.name
 
             if table:
+                table = self._resolve_qualifier(scope, table) or table
                 table_key = table.lower()
                 col_key = column.lower()
                 if table_key in self._schema_cache.tables:
@@ -1147,6 +1376,13 @@ class OBQCValidator:
             elif expr.is_number:
                 return str(XSD.decimal)
             elif expr.is_string:
+                # Every dialect writes date and timestamp values as string
+                # literals, so "order_date >= '2024-01-01'" is idiomatic rather
+                # than a mismatch. Judged on the text: a string that is not a
+                # date still compares as a string, so "order_date = 'hello'"
+                # is still reported.
+                if TEMPORAL_LITERAL.match(expr.this):
+                    return str(XSD.dateTime)
                 return str(XSD.string)
 
         return None
@@ -1197,10 +1433,32 @@ class OBQCValidator:
             if agg.find_ancestor(exp.Select) is select
         ]
 
+    def _grouping_aggregates(self, select: exp.Select) -> list[Any]:
+        """This SELECT's aggregates that collapse rows into groups.
+
+        A windowed aggregate does not: ``SUM(total) OVER (PARTITION BY region)``
+        computes a value per row and leaves the row count alone, so it imposes
+        no GROUP BY at all. Counting it as one made every other selected column
+        look ungrouped, and rejected valid window queries outright.
+
+        Args:
+            select: The SELECT to inspect.
+
+        Returns:
+            Aggregate expressions of this scope that are not windowed.
+        """
+        return [
+            agg
+            for agg in self._own_aggregates(select)
+            if agg.find_ancestor(exp.Window) is None
+        ]
+
     def _select_aggregates(self, select: exp.Select) -> bool:
         """Whether this SELECT itself applies an aggregate function.
 
         Aggregates inside a nested subquery belong to that subquery, not here.
+        Windowed aggregates count: they read the joined rows, so duplicated
+        rows corrupt them exactly as they corrupt a grouped total.
 
         Args:
             select: The SELECT to inspect.
@@ -1209,6 +1467,37 @@ class OBQCValidator:
             True if an aggregate call sits in this SELECT's own scope.
         """
         return bool(self._own_aggregates(select))
+
+    @staticmethod
+    def _group_by_keys(group: exp.Group) -> list[exp.Expression]:
+        """Every grouping key of a GROUP BY, including grouping-set constructs.
+
+        sqlglot does not put ROLLUP / CUBE / GROUPING SETS members in
+        ``Group.expressions``; they hang off separate ``rollup``, ``cube`` and
+        ``grouping_sets`` args. Reading only ``expressions`` therefore saw
+        ``GROUP BY ROLLUP(country, client)`` as grouping by nothing at all, and
+        reported both selected columns as not in the GROUP BY -- an error,
+        which blocked every rollup query.
+
+        A column named anywhere in a grouping set is a legal non-aggregated
+        selection: super-aggregate rows null it out rather than making it
+        ambiguous, which is what the rule is guarding against.
+
+        Args:
+            group: The GROUP BY node.
+
+        Returns:
+            The grouping keys, with grouping-set nesting flattened away.
+        """
+        keys: list[exp.Expression] = list(group.expressions)
+
+        for arg in ("rollup", "cube", "grouping_sets"):
+            for construct in group.args.get(arg) or []:
+                # A grouping set nests its members in Paren/Tuple wrappers, and
+                # "()" (the grand total) simply contributes none.
+                keys.extend(construct.find_all(exp.Column))
+
+        return keys
 
     def _validate_aggregation_context(
         self, parsed: exp.Expr, result: OBQCResult
@@ -1223,7 +1512,10 @@ class OBQCValidator:
             # to make the outer SELECT look like it aggregates -- and every
             # plain column in it was reported as missing from a GROUP BY that
             # the query never needed.
-            if not self._select_aggregates(select):
+            #
+            # Windowed aggregates are excluded: they group nothing, so they
+            # cannot be what makes a column need grouping.
+            if not self._grouping_aggregates(select):
                 continue
 
             expressions = select.args.get("expressions", [])
@@ -1249,7 +1541,7 @@ class OBQCValidator:
             # Get GROUP BY columns
             group_by_cols: set[str] = set()
             if select.args.get("group"):
-                for group_expr in select.args["group"].expressions:
+                for group_expr in self._group_by_keys(select.args["group"]):
                     if isinstance(group_expr, exp.Column):
                         gb_col_name = group_expr.name.lower()
                         if group_expr.table:
@@ -1324,9 +1616,11 @@ class OBQCValidator:
 
         Aggregates in a nested subquery are that subquery's; counting them here
         made an outer column look aggregated because some inner aggregate
-        happened to mention the same name.
+        happened to mention the same name. A windowed aggregate does not excuse
+        a column either -- it collapses nothing, so a bare column beside it
+        still needs grouping.
         """
-        for agg in self._own_aggregates(select):
+        for agg in self._grouping_aggregates(select):
             for col in agg.find_all(exp.Column):
                 if (
                     isinstance(expr, exp.Column)
