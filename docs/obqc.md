@@ -44,6 +44,37 @@ When a table is not found, OBQC suggests up to 10 available table names from the
 
 Tables reached through a database catalog schema -- `information_schema`, `pg_catalog`, `system`, `performance_schema`, `snowflake`, `sys` -- are exempt: they describe the database rather than user data, so they are never part of a generated ontology. MySQL's `mysql` schema is **not** exempt, because it holds accounts and grants rather than metadata; `src/security.py` blocks those tables outright. A bare name that merely looks like a catalog table (`FROM tables`) is still checked.
 
+Names declared by a `WITH` clause are exempt too -- a CTE is a table the query defines for itself, so the ontology never describes it:
+
+```sql
+-- OK: user_totals is a CTE, not a missing table
+WITH user_totals AS (SELECT customer_id, SUM(total) AS revenue FROM orders GROUP BY customer_id)
+SELECT c.name, ut.revenue FROM user_totals ut JOIN customers c ON c.id = ut.customer_id;
+```
+
+The exemption covers references to the CTE, not the query behind it: tables and columns inside the CTE body are validated normally. A CTE body is also not treated as a nested scope, since it cannot reference the `FROM` of the query that declares it.
+
+The exemption belongs to each *reference*, not to the name, so a name can be a CTE in one scope and a real table in another. A CTE declared inside a subquery does not excuse a real table of the same name in the enclosing query:
+
+```sql
+-- ERROR: Column 'nonexistent' not found in table 'users' -- the inner CTE is
+-- not in scope out here, so `users` is the real table
+SELECT users.nonexistent FROM users
+WHERE EXISTS (WITH users AS (SELECT 1 AS x FROM orders) SELECT 1 FROM users);
+```
+
+And the reverse holds in the same query: the inner `users` is the CTE, so its own output columns are exempt there even though the outer `users` is a real table being checked.
+
+Position inside the `WITH` counts as well. A CTE sees the siblings declared *before* it, and itself only when the `WITH` is `RECURSIVE`; the query body sees all of them. So a CTE's own body reads the real table of that name, and a forward reference to a later sibling is not a CTE at all -- matching what the database does:
+
+```sql
+-- ERROR: 'nonexistent' -- inside the body, `orders` is the real table
+WITH orders AS (SELECT nonexistent FROM orders) SELECT id FROM orders;
+
+-- ERROR: Table 'b' not found -- `b` is declared after `a`, so `a` cannot see it
+WITH a AS (SELECT id FROM b), b AS (SELECT id FROM orders) SELECT id FROM a;
+```
+
 ### Column existence (ERROR)
 
 Checks that every column reference resolves to an actual column in its table.
@@ -53,12 +84,13 @@ Checks that every column reference resolves to an actual column in its table.
 SELECT emial FROM customers;
 ```
 
-For qualified references (`table.column`), the column is checked against the specific table. For unqualified references, OBQC searches the tables in that reference's own scope -- the `SELECT` it appears in, plus any enclosing ones, so a correlated subquery can still use the outer query's tables. A subquery's tables never resolve names in the outer query.
+For qualified references (`table.column`), the column is checked against the specific table; a qualifier that is a table alias (`FROM orders o` ... `o.total`) is resolved to the table it names, searching enclosing scopes so a correlated subquery can qualify with an outer alias. A qualifier naming something the ontology cannot describe -- a derived table or a CTE -- is left alone. For unqualified references, OBQC searches the tables in that reference's own scope -- the `SELECT` it appears in, plus any enclosing ones, so a correlated subquery can still use the outer query's tables. A subquery's tables never resolve names in the outer query.
 
 Two kinds of name are not columns and are not reported missing:
 
 - **`SELECT` aliases** referenced from a later clause. `ORDER BY revenue` over `SUM(total) AS revenue` resolves to the select list. Visibility follows the dialect: PostgreSQL allows an output name in `GROUP BY` and `ORDER BY` but not `HAVING` or `WHERE`, and only as a whole sort key (`ORDER BY t + 1` is an expression over input columns); DuckDB resolves aliases in every clause. A name that is *both* an alias and a real column resolves to the column.
 - **Columns of a catalog table**, which the ontology does not describe. If a query touches one, an unqualified name that matches no user table is left alone rather than reported.
+- **Columns of a CTE**, for the same reason: they come from its select list, so a name in a scope that includes a `WITH` alias is not reported missing. Decided per reference, like the table rule above.
 
 ### Ambiguous columns (WARNING)
 
@@ -89,6 +121,32 @@ Judged per `SELECT`. A subquery contributes its own tables to its own scope, so 
 SELECT id FROM customers WHERE id IN (SELECT customer_id FROM orders);
 ```
 
+`ON` is not the only way to state a join. `USING`, `NATURAL`, and the comma form with a cross-table predicate in `WHERE` all count as conditioned:
+
+```sql
+-- OK: joined, just not with an ON clause
+SELECT c.name, o.total FROM customers c, orders o WHERE o.customer_id = c.id;
+SELECT total FROM orders JOIN order_items USING (id);
+```
+
+A `WHERE` predicate only stands in for a join when it relates columns qualified by two different tables; a filter on a single table (`WHERE o.total > 100`) leaves the cross product reported. Any comparison counts, not just equality -- `WHERE a.starts < b.ends` relates the two tables as surely as `=` does.
+
+An explicit `JOIN ... ON` always counts, whatever shape its predicate takes. A theta join (`ON s.cost > o.total`), an `ON` with one side unqualified (`ON users.id = user_id`), or one naming no other table at all are all stated joins:
+
+```sql
+-- OK: an ON clause is a statement about this join, not a pattern to match
+SELECT o.total FROM orders o JOIN shipments s ON s.cost > o.total;
+```
+
+The rule is connectivity, not a count of conditions: the scope's tables are nodes, its join conditions are edges, and the query is fully joined only when they form one connected component. A partially joined `FROM` is still an error, and the message names the tables that fell off:
+
+```sql
+-- ERROR: ... (Cartesian product): shipments not joined to the rest of the query
+SELECT o.total FROM orders o, users u, shipments s WHERE o.user_id = u.id;
+```
+
+Aliases are what identify a table here, so an unconditioned self-join (`FROM orders a, orders b`) is two nodes and is reported, while `WHERE a.id = b.id` connects them.
+
 #### Non-matching join condition (WARNING)
 
 Join condition does not match any declared foreign key relationship in the ontology. The query still runs, but OBQC suggests the correct join condition from the ontology.
@@ -108,6 +166,8 @@ Checks `WHERE` and `ON` clause comparisons for type mismatches. Types are inferr
 SELECT * FROM products WHERE name > 100;
 ```
 
+Columns qualified by a table alias are resolved to their table first, so aliased comparisons -- most real SQL -- are checked rather than skipped. A string literal holding a date or timestamp is accepted **against a temporal column**, since that is how every dialect writes one: `order_date >= '2024-01-01'` is idiomatic. The literal is judged from the pair, not on its own -- opposite a string column it is just a string, so `email = '2024-01-01'` is an ordinary comparison, and `order_date = 'hello'` is still reported.
+
 Comparisons within the same category are allowed (e.g. integer vs. decimal). Comparisons across categories produce a warning.
 
 ### Aggregation correctness (ERROR)
@@ -115,6 +175,23 @@ Comparisons within the same category are allowed (e.g. integer vs. decimal). Com
 When aggregate functions (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`) are used, OBQC checks that all non-aggregated columns in `SELECT` appear in `GROUP BY`. Grouping by an alias satisfies the check on the column it stands for.
 
 Evaluated per `SELECT`: an aggregate inside a subquery belongs to that subquery, so `SELECT name FROM users WHERE id = (SELECT MAX(user_id) FROM orders)` needs no `GROUP BY` in the outer query.
+
+Windowed aggregates are excluded. `SUM(total) OVER (PARTITION BY region)` computes a value per row and collapses nothing, so it imposes no `GROUP BY` at all and does not make the columns beside it need one:
+
+```sql
+-- OK: a window function is not a grouping aggregate
+SELECT id, total, SUM(total) OVER (PARTITION BY customer_id) FROM orders;
+```
+
+A window does not *excuse* a column either: beside a real `GROUP BY`, a bare column that only appears inside an `OVER (...)` still has to be grouped.
+
+`ROLLUP`, `CUBE` and `GROUPING SETS` declare grouping keys like a plain `GROUP BY` does, and a column named in one is a legal non-aggregated selection -- super-aggregate rows null it out rather than making it ambiguous:
+
+```sql
+-- OK: both columns are grouping keys
+SELECT region, status, SUM(amount) FROM orders GROUP BY ROLLUP(region, status);
+SELECT region, SUM(amount) FROM orders GROUP BY GROUPING SETS ((region), ());
+```
 
 ```sql
 -- ERROR: Column 'name' in SELECT with aggregation but no GROUP BY
@@ -124,22 +201,100 @@ SELECT name, COUNT(*) FROM customers;
 SELECT status, region, SUM(amount) FROM orders GROUP BY region;
 ```
 
-### Fan-trap detection (WARNING)
+### Fan-trap detection (ERROR / WARNING)
 
-Detects when a query aggregates across two or more one-to-many joins. This is the classic fan-trap pattern where rows multiply silently, producing inflated aggregation results.
+A **provable** fan-trap blocks execution: a query that aggregates a measure across a one-to-many join returns a silently inflated number, and a wrong answer is worse than no answer -- particularly for a caller that keys off `success` and never reads the prose in `warnings`. One finding below (rule 4) is reported without blocking, because the SQL does not say whether it is wrong; `blocking` on the verdict tells you which happened.
+
+Four findings, strongest first. The first three block; the fourth is reported without blocking.
+
+**1. A measure multiplied by a fan-out join.** The ontology puts the joined table on the many side of the table a measure is taken from, so each measure row is repeated. **One join is enough** -- no second fact table required:
+
+```sql
+-- ERROR: Fan-trap: aggregating 'sales' across the join to 'shipments', which the
+-- ontology puts on the many side of 'sales'.
+SELECT SUM(s.amount)
+FROM sales s
+JOIN shipments sh ON sh.sale_id = s.id;
+```
+
+Which table sits in `FROM` makes no difference -- `FROM shipments JOIN sales` produces the same one-row-per-shipment result set, so both ends of every join are judged.
+
+A measure taken from the *many* side is fine, because the repeated rows are that measure's own rows:
+
+```sql
+-- OK: each shipment is summed once
+SELECT s.id, SUM(sh.cost) FROM sales s JOIN shipments sh ON sh.sale_id = s.id GROUP BY s.id;
+```
+
+Within an aggregate, only the columns producing its *value* are read as measures. A column tested in a condition contributes nothing to the total, so a conditional aggregate measures the branch, not the test:
+
+```sql
+-- OK: measures order_items, merely filters on orders
+SELECT o.id, SUM(CASE WHEN o.total > 100 THEN oi.quantity ELSE 0 END)
+FROM orders o JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id;
+
+-- ERROR: the branch itself is the parent's measure, so it still inflates
+SELECT o.id, SUM(CASE WHEN oi.quantity > 1 THEN o.total ELSE 0 END)
+FROM orders o JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id;
+```
+
+Aggregates that duplication cannot change are left alone entirely -- `MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so no join shape makes them wrong and none of the rules fires on a query that uses only those.
+
+`COUNT(*)` is a middle case. It names no table, so it never triggers this rule -- counting the joined rows is usually the intent. But it does count rows, so across *two* fan-out joins it returns the product of the two children and rules 2 and 3 below still apply.
+
+The comma form is judged identically: `FROM orders o, order_items i WHERE i.order_id = o.id` states the same join as the `ON` spelling and inflates the same way.
+
+**2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
+
+**3. Two or more fan-out joins** in one aggregating `SELECT` -- the heuristic fallback for ontologies carrying no disjointness axioms.
+
+**4. A conditional row count over a repeated table (WARNING, never blocks).** A constant-valued conditional aggregate -- `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, or the same thing as `COUNT(*) FILTER (WHERE …)` -- has no measure column, but the join still repeats what it counts:
+
+```sql
+-- WARNING: counts order_items rows matching an orders condition, not orders rows
+SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END)
+FROM orders o JOIN order_items i ON i.order_id = o.id;
+```
+
+This one is **reported without blocking**, because the SQL does not say which count was meant. The identical shape is a ubiquitous correct idiom in a star join -- `SUM(CASE WHEN u.segment = 'SMB' THEN 1 ELSE 0 END)` over `orders JOIN users` counts orders, which is exactly right, and reads as an inflated count of users only if that is what you wanted. Blocking it would reject ordinary analytics SQL, so OBQC states the ambiguity and leaves the call to you.
+
+Only conditions naming a single table qualify. One that also names the child counts at the child's grain, which no join corrupts, and an unconditional `COUNT(*)` names nothing at all. Unqualified condition columns resolve the same way value columns do -- against the tables in scope, and only when exactly one of them declares the name.
 
 Fan-out is judged per join, against the table that join's `ON` condition attaches to -- not by asking whether a table sits on the many side of some relationship elsewhere in the schema. Walking a chain of many-to-one lookups (`sales` -> `clients` -> `countries`) duplicates nothing and is not flagged, however many foreign keys those dimensions carry.
 
-```sql
--- WARNING: Potential fan-trap: 2 one-to-many joins with aggregation
-SELECT c.name, SUM(o.amount), COUNT(r.id)
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-JOIN reviews r ON c.id = r.customer_id
-GROUP BY c.name;
+#### The structured verdict
+
+Every `execute_sql_query` response carries `obqc_fan_trap`, whatever the outcome:
+
+```json
+{
+  "evaluated": true,
+  "detected": true,
+  "blocking": true,
+  "findings": [
+    {
+      "kind": "measure_across_fan_out",
+      "measure_table": "sales",
+      "fan_out_table": "shipments",
+      "tables": ["sales", "shipments"]
+    }
+  ]
+}
 ```
 
-OBQC suggests using `UNION ALL` to aggregate each fact table separately, or CTEs to pre-aggregate before joining. See [Fan-Trap Prevention](fan-trap-prevention.md) for detailed patterns.
+`kind` is one of `measure_across_fan_out`, `conditional_row_count`, `disjoint_facts`, or `multiple_fan_out_joins`.
+
+`blocking` says whether this verdict actually stopped the query, not what the caller asked for: it is `false` for a clean query, `false` when `allow_fan_out` was passed, `false` for a `conditional_row_count`, which reports without blocking even under the default policy, and `false` whenever `evaluated` is `false`, since a run that never checked blocked nothing. A clean query reports `detected: false` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
+
+`evaluated` separates *checked and clean* from *never checked*, which are not the same answer. It is `false` when the rules never ran: no ontology loaded, an ontology without `oba:` annotations, or a request that failed before validation (no connection, bad limit, empty SQL, checklist not confirmed). **A caller must treat `evaluated: false` as "unknown", not as a clean bill of health** -- a query can run and return inflated numbers with `detected: false` when no ontology was loaded to check it against.
+
+The field is present on every `execute_sql_query` response, including those early failures, so reading it needs no special case.
+
+#### Running one anyway
+
+`execute_sql_query(..., allow_fan_out=True)` downgrades the finding to a warning and executes. The finding is still reported and `blocking` becomes `false`. Use it only when the multiplied rows are what you want, or when you know the relationship is 1:1 in practice despite the declared cardinality.
+
+The fix is usually to pre-aggregate the fanning table in a CTE and join the one row per key that produces, or to aggregate each fact separately and combine with `UNION ALL`. See [Fan-Trap Prevention](fan-trap-prevention.md) for the patterns.
 
 ## How the LLM uses OBQC
 
@@ -148,6 +303,7 @@ OBQC results are returned as structured data in the tool response, not displayed
 - `obqc_valid`: overall pass/fail
 - `obqc_issues`: list of issues with type, severity, message, location, and suggestion
 - `fan_trap_risk`: boolean flag
+- `obqc_fan_trap`: `{evaluated, detected, blocking, findings}` -- the fan-trap verdict as data, present on every response
 - `obqc_error_count` / `obqc_warning_count`: summary counts
 
 When `execute_sql_query` blocks a query, the LLM sees the error details and suggestions, and can revise the SQL and retry -- often without the user ever seeing the failed attempt.

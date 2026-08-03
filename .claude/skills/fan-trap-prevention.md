@@ -4,9 +4,25 @@
 
 ## What is a Fan-Trap?
 
-A fan-trap occurs when a parent table has multiple 1:many relationships and you JOIN them with aggregation, causing data multiplication (Cartesian product).
+A fan-trap occurs when you aggregate a measure across a 1:many join, so each measure row is repeated once per matching child row and the total comes back inflated.
 
-### Example:
+**A single 1:many join is enough.** The classic multi-fact shape is the worst case, not the threshold.
+
+### Example — one join is already wrong:
+```
+sales (1) → shipments (many)
+```
+```sql
+-- ❌ each sale's amount is added once per shipment
+SELECT SUM(public.sales.amount)
+FROM public.sales
+JOIN public.shipments ON public.shipments.sale_id = public.sales.id;
+```
+The inner join also drops sales that never shipped, so the number is wrong in both directions.
+
+Which table you put in `FROM` makes no difference: `FROM shipments JOIN sales` produces the same one-row-per-shipment result.
+
+### Example — the multi-fact shape:
 ```
 orders (1) → order_items (many)
 orders (1) → shipments (many)
@@ -33,10 +49,30 @@ Before writing multi-table queries with aggregation:
 1. **Review foreign_keys** from `discover_schema()` FIRST
 2. **Identify relationship patterns:**
    - Safe: 1:1 relationships (customers → customer_profiles)
-   - Requires care: 1:many (customers → orders)
-   - High risk: Multiple 1:many from same parent (fan-trap potential)
-3. **Let `execute_sql_query()` validate** — it runs OBQC fan-trap checks automatically before executing
-4. **Validate results** against source tables
+   - Safe: measure taken from the **many** side (`SUM(order_items.qty)` across orders → order_items)
+   - Fan-trap: measure taken from the **one** side across a 1:many join (`SUM(orders.total)` with order_items joined)
+   - Fan-trap: multiple 1:many from the same parent
+3. **Conditional aggregates measure the branch, not the test.** `SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END)` measures `order_items`; the `orders` column only filters. Putting the parent's measure in the branch does still inflate.
+4. **Let `execute_sql_query()` validate** — OBQC runs before execution. Read the `obqc_fan_trap` field on the response: `{evaluated, detected, blocking, findings}`, where each finding names its `kind`, the `measure_table` being inflated and the `fan_out_table` doing it.
+   - `evaluated: false` — OBQC never ran (no ontology loaded, or the request failed before validation). Treat as **unknown**, not safe.
+   - `blocking: true` — this query was refused. A provable fan-trap (a measure read across a 1:many join) blocks.
+   - `blocking: false` with `detected: true` — reported but executed. A `conditional_row_count` warns instead of blocking, because the same shape is a correct star-join idiom; decide from the finding whether your count meant the coarser table.
+5. **Fix the query, don't force it.** Pre-aggregate the fanning table in a CTE, or use UNION ALL. `allow_fan_out=True` exists for the rare case where the multiplied rows are genuinely wanted — it does not make the numbers right.
+6. **Validate results** against source tables
+
+### Conditional row counts
+
+`SUM(CASE WHEN <table> … THEN 1 ELSE 0 END)` and `COUNT(*) FILTER (WHERE <table> …)` count *rows*, and a join repeats the rows of whatever the condition names. OBQC **warns without blocking** here, because the SQL cannot say which count you meant — over `orders JOIN order_items` a condition on `orders` counts items, not orders; over `orders JOIN users` a condition on `users` counts orders, which is usually exactly right.
+
+If you meant the coarser count, use `COUNT(DISTINCT <table>.<key>)` or filter with `EXISTS` instead of joining.
+
+### Aggregates that survive a fan-out
+
+`MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so OBQC never blocks a query that aggregates only with those — no join shape makes them wrong.
+
+`SUM`, `AVG` and `COUNT(col)` are corrupted by duplication and are what the checks look for.
+
+`COUNT(*)` sits between the two: counting the joined rows is usually what you meant across a single 1:many join, so it is not blocked there — but across **two** fan-out joins it returns the product of the two children, which is meaningless, and is blocked.
 
 ---
 
