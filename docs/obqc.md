@@ -54,7 +54,7 @@ SELECT c.name, ut.revenue FROM user_totals ut JOIN customers c ON c.id = ut.cust
 
 The exemption covers references to the CTE, not the query behind it: tables and columns inside the CTE body are validated normally. A CTE body is also not treated as a nested scope, since it cannot reference the `FROM` of the query that declares it.
 
-A name is only exempt where its `WITH` clause is actually in scope. A CTE declared inside a subquery does not excuse a real table of the same name in the enclosing query:
+The exemption belongs to each *reference*, not to the name, so a name can be a CTE in one scope and a real table in another. A CTE declared inside a subquery does not excuse a real table of the same name in the enclosing query:
 
 ```sql
 -- ERROR: Column 'nonexistent' not found in table 'users' -- the inner CTE is
@@ -62,6 +62,8 @@ A name is only exempt where its `WITH` clause is actually in scope. A CTE declar
 SELECT users.nonexistent FROM users
 WHERE EXISTS (WITH users AS (SELECT 1 AS x FROM orders) SELECT 1 FROM users);
 ```
+
+And the reverse holds in the same query: the inner `users` is the CTE, so its own output columns are exempt there even though the outer `users` is a real table being checked.
 
 ### Column existence (ERROR)
 
@@ -78,7 +80,7 @@ Two kinds of name are not columns and are not reported missing:
 
 - **`SELECT` aliases** referenced from a later clause. `ORDER BY revenue` over `SUM(total) AS revenue` resolves to the select list. Visibility follows the dialect: PostgreSQL allows an output name in `GROUP BY` and `ORDER BY` but not `HAVING` or `WHERE`, and only as a whole sort key (`ORDER BY t + 1` is an expression over input columns); DuckDB resolves aliases in every clause. A name that is *both* an alias and a real column resolves to the column.
 - **Columns of a catalog table**, which the ontology does not describe. If a query touches one, an unqualified name that matches no user table is left alone rather than reported.
-- **Columns of a CTE**, for the same reason: they come from its select list, so a name in a scope that includes a `WITH` alias is not reported missing.
+- **Columns of a CTE**, for the same reason: they come from its select list, so a name in a scope that includes a `WITH` alias is not reported missing. Decided per reference, like the table rule above.
 
 ### Ambiguous columns (WARNING)
 
@@ -117,7 +119,14 @@ SELECT c.name, o.total FROM customers c, orders o WHERE o.customer_id = c.id;
 SELECT total FROM orders JOIN order_items USING (id);
 ```
 
-A `WHERE` predicate only stands in for a join when it equates columns qualified by two different tables; a filter on a single table (`WHERE o.total > 100`) leaves the cross product reported.
+A `WHERE` predicate only stands in for a join when it relates columns qualified by two different tables; a filter on a single table (`WHERE o.total > 100`) leaves the cross product reported. Any comparison counts, not just equality -- `WHERE a.starts < b.ends` relates the two tables as surely as `=` does.
+
+An explicit `JOIN ... ON` always counts, whatever shape its predicate takes. A theta join (`ON s.cost > o.total`), an `ON` with one side unqualified (`ON users.id = user_id`), or one naming no other table at all are all stated joins:
+
+```sql
+-- OK: an ON clause is a statement about this join, not a pattern to match
+SELECT o.total FROM orders o JOIN shipments s ON s.cost > o.total;
+```
 
 The rule is connectivity, not a count of conditions: the scope's tables are nodes, its join conditions are edges, and the query is fully joined only when they form one connected component. A partially joined `FROM` is still an error, and the message names the tables that fell off:
 

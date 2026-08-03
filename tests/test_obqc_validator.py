@@ -1737,6 +1737,22 @@ class TestCommonTableExpressions(unittest.TestCase):
 
         self.assertTrue(any("nonexistent" in e for e in errors), errors)
 
+    def test_both_readings_of_one_name_coexist(self):
+        """A name can be a CTE in one scope and a real table in another.
+
+        The exemption is per reference. Tracking it by name broke one half or
+        the other: globally, the inner CTE excused the outer real table;
+        by-name-minus-conflicts, the outer real table stopped the inner CTE's
+        own columns from being exempt, and a valid query was blocked.
+        """
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM users u WHERE u.id IN ("
+                "WITH users AS (SELECT id AS uid FROM orders) SELECT uid FROM users)"
+            ),
+            [],
+        )
+
     def test_cte_named_after_a_real_table_still_shadows_it(self):
         """Where the WITH *is* in scope, the CTE wins."""
         self.assertEqual(
@@ -1905,6 +1921,45 @@ class TestJoinsWithoutOnClause(unittest.TestCase):
 
         self.assertTrue(any("shipments" in e for e in errors), errors)
         self.assertFalse(any("users" in e for e in errors), errors)
+
+    def test_theta_join_is_not_a_cross_product(self):
+        """An ON clause need not be an equality to be a join.
+
+        Reading connectivity as pairs of qualified equalities rejected
+        ordinary SQL and, because this is an ERROR, blocked it.
+        """
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o JOIN shipments s ON s.cost > o.total"
+            ),
+            [],
+        )
+
+    def test_on_clause_with_an_unqualified_side_is_a_join(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT users.id FROM users JOIN orders ON users.id = user_id"
+            ),
+            [],
+        )
+
+    def test_on_clause_naming_no_other_table_is_still_a_join(self):
+        """An explicit ON is a stated join whatever the predicate says."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o JOIN shipments s ON s.cost > 10"
+            ),
+            [],
+        )
+
+    def test_cross_table_where_comparison_connects(self):
+        """The comma form's condition need not be an equality either."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o, shipments s WHERE s.cost > o.total"
+            ),
+            [],
+        )
 
     def test_unconditioned_self_join_is_flagged(self):
         """Two aliases of one table are two nodes, not one."""

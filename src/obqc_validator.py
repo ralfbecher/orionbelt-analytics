@@ -129,6 +129,10 @@ TEMPORAL_LITERAL = re.compile(
     r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$"
 )
 
+# Comparison operators that can relate two tables. A join condition is not
+# always an equality: "ON a.starts < b.ends" is an ordinary theta join.
+COMPARISON_TYPES = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+
 # XSD type names the ontology uses for dates and times.
 TEMPORAL_XSD_TYPES = frozenset({"date", "datetime", "time", "gyear", "gyearmonth"})
 
@@ -156,11 +160,13 @@ class OBQCResult:
     # (information_schema and friends). They are legitimately absent from the
     # ontology, which describes user data, so ontology-existence rules skip them.
     catalog_tables: set[str] = field(default_factory=set)
-    # Lower-cased names declared by a WITH clause. A CTE is defined by the query
-    # itself, so it is legitimately absent from the ontology and its projected
-    # columns are not describable by it either; ontology-existence rules skip
-    # references to these names (but not the tables inside the CTE bodies).
+    # Lower-cased WITH aliases the query referred to, for reporting. The rules
+    # do not consult this: whether a reference is a CTE is a property of that
+    # reference, not of its name, and is decided where the reference appears.
     cte_names: set[str] = field(default_factory=set)
+    # Table references the ontology is expected to describe: every name in
+    # parsed_tables except those that resolved to a CTE where they appear.
+    checked_tables: list[str] = field(default_factory=list)
     parsed_columns: list[str] = field(default_factory=list)
     # Lower-cased SELECT aliases referenced from ORDER BY / GROUP BY / HAVING.
     # They resolve to select-list output, not to any table's column.
@@ -168,7 +174,7 @@ class OBQCResult:
     # (column reference, tables it may resolve against) per occurrence. Name
     # resolution is scoped to the SELECT a column appears in plus its enclosing
     # ones, so a subquery's tables cannot answer for the outer query.
-    column_scopes: list[tuple[str, tuple[tuple[str, ...], ...]]] = field(
+    column_scopes: list[tuple[str, tuple[tuple[tuple[str, bool], ...], ...]]] = field(
         default_factory=list
     )
     parsed_joins: list[dict[str, Any]] = field(default_factory=list)
@@ -297,6 +303,9 @@ class OBQCValidator:
         # pairs of lower-cased table names declared owl:disjointWith each other
         # (sibling facts sharing a dimension — the canonical fan-trap shape).
         self._disjoint_pairs: set[frozenset] = set()
+        # id() of table nodes in the query under validation that name a CTE
+        # rather than a real table. Per-parse state, reset by validate().
+        self._cte_references: set[int] = set()
 
     def load_ontology(self, ontology_graph: Graph, base_uri: str) -> None:
         """Load and cache schema from ontology graph.
@@ -493,6 +502,7 @@ class OBQCValidator:
             OBQCResult with validation findings
         """
         result = OBQCResult(is_valid=True)
+        self._cte_references = set()
 
         if not self._schema_cache:
             result.issues.append(
@@ -568,32 +578,40 @@ class OBQCValidator:
         recent`` was rejected outright: ``recent`` was reported as a table not
         found in the ontology, an error, which blocks execution.
 
-        A name only counts where the CTE declaring it is actually in scope.
-        Collecting names across the whole tree let a CTE hide a real table
-        somewhere else in the query: ``SELECT users.nonexistent FROM users
-        WHERE EXISTS (WITH users AS (...) SELECT 1 FROM users)`` reported
-        nothing, because the inner CTE's name excused the outer table too.
+        The decision belongs to each *reference*, not to the name. A name can
+        be a CTE in one scope and a real table in another, and neither reading
+        may leak into the other:
 
-        A name used both ways is not exempted, following the same rule as
-        catalog tables: the exemption is tracked by name, so keeping it would
-        leave the real reference unchecked.
+        - Collecting names globally let a CTE hide a real table elsewhere in
+          the query, so ``SELECT users.nonexistent FROM users WHERE EXISTS
+          (WITH users AS (...) SELECT 1 FROM users)`` reported nothing.
+        - Dropping the name from the exemption when it is used both ways fixed
+          that but broke the other half: the inner CTE's own columns were then
+          checked against the real table, and a valid query was blocked.
+
+        So the exemption is recorded against the table node, and ``cte_names``
+        stays purely informational.
 
         Args:
             parsed: Parsed query.
             result: Result to record the names on.
         """
-        shadowed: set[str] = set()
-
         for table in parsed.find_all(exp.Table):
             name = table.name
-            if not name:
-                continue
-            if name.lower() in self._visible_ctes(table):
+            if name and name.lower() in self._visible_ctes(table):
                 result.cte_names.add(name.lower())
-            else:
-                shadowed.add(name.lower())
+                self._cte_references.add(id(table))
 
-        result.cte_names -= shadowed
+    def _is_cte_reference(self, table: exp.Table | None) -> bool:
+        """Whether this table node resolves to a WITH alias rather than a table.
+
+        Args:
+            table: The reference to classify, or None.
+
+        Returns:
+            True if a CTE of that name was in scope at the reference.
+        """
+        return table is not None and id(table) in self._cte_references
 
     @staticmethod
     def _visible_ctes(node: exp.Expression) -> set[str]:
@@ -641,6 +659,15 @@ class OBQCValidator:
             if table_name not in result.parsed_tables:
                 result.parsed_tables.append(table_name)
 
+            # A reference the ontology is expected to describe. Judged per
+            # reference, so the same name can be a CTE in one scope and a real
+            # table needing to exist in another.
+            if (
+                not self._is_cte_reference(table)
+                and table_name not in result.checked_tables
+            ):
+                result.checked_tables.append(table_name)
+
             # Without the qualifier a catalog reference is indistinguishable
             # from a user table: sqlglot reports information_schema.tables as
             # simply "tables". Both positions are checked -- ``db`` carries the
@@ -662,7 +689,7 @@ class OBQCValidator:
     ) -> None:
         """Extract column references, excluding legal SELECT-alias references."""
         alias_refs = self._select_alias_references(parsed, result, dialect)
-        scope_cache: dict[int, tuple[tuple[str, ...], ...]] = {}
+        scope_cache: dict[int, tuple[tuple[tuple[str, bool], ...], ...]] = {}
 
         for column in parsed.find_all(exp.Column):
             # Alias references resolve to the select list, not to a table, so
@@ -687,9 +714,15 @@ class OBQCValidator:
             # form the rules consume is resolved.
             scoped_ref = col_ref
             if column.table:
-                real_table = self._resolve_qualifier(owner, column.table)
-                if real_table:
-                    scoped_ref = f"{real_table}.{column.name}"
+                source = self._resolve_qualifier_table(owner, column.table)
+                if self._is_cte_reference(source):
+                    # The qualifier names a CTE here, so its columns come from
+                    # that CTE's select list and the ontology cannot judge
+                    # them. Dropped at the node, so the same name qualifying a
+                    # real table elsewhere is still checked.
+                    continue
+                if source is not None and source.name:
+                    scoped_ref = f"{source.name}.{column.name}"
 
             # Which tables the name could resolve against, which is a property
             # of where it appears. Resolving against every table in the query
@@ -702,8 +735,10 @@ class OBQCValidator:
                 result.column_scopes.append(entry)
 
     def _scope_tables(
-        self, select: exp.Select, cache: dict[int, tuple[tuple[str, ...], ...]]
-    ) -> tuple[tuple[str, ...], ...]:
+        self,
+        select: exp.Select,
+        cache: dict[int, tuple[tuple[tuple[str, bool], ...], ...]],
+    ) -> tuple[tuple[tuple[str, bool], ...], ...]:
         """Tables a name in *select* may resolve against, innermost level first.
 
         Returned as levels rather than one flat set because SQL resolves a name
@@ -720,7 +755,8 @@ class OBQCValidator:
             cache: Memo keyed by ``id(select)``.
 
         Returns:
-            One tuple of table names per scope level, innermost first.
+            One tuple per scope level, innermost first, each holding
+            ``(table name, is a CTE reference)`` pairs.
         """
         cached = cache.get(id(select))
         if cached is not None:
@@ -728,7 +764,7 @@ class OBQCValidator:
 
         own = tuple(
             dict.fromkeys(
-                t.name
+                (t.name, self._is_cte_reference(t))
                 for t in select.find_all(exp.Table)
                 if t.name and t.find_ancestor(exp.Select) is select
             )
@@ -913,9 +949,25 @@ class OBQCValidator:
                     "on_tables": [],
                 }
 
+                # How to name this join in a message. A joined subquery has
+                # no table name, and the missing-condition error read "JOIN
+                # with 'None' has no ON condition".
+                joined_item = join.this
+                join_info["label"] = (
+                    (
+                        getattr(joined_item, "alias", "")
+                        or getattr(joined_item, "name", "")
+                    )
+                    if joined_item is not None
+                    else ""
+                ) or "subquery"
+
                 # Get joined table
                 if join.this and isinstance(join.this, exp.Table):
                     join_info["table"] = join.this.name
+                    # Judged at the reference: the FK rule cannot speak about a
+                    # CTE, but the same name may be a real table elsewhere.
+                    join_info["table_is_cte"] = self._is_cte_reference(join.this)
 
                 # Whether the join is conditioned at all -- by ON, by USING or
                 # NATURAL, or by a cross-table predicate in WHERE. Recorded so
@@ -967,12 +1019,35 @@ class OBQCValidator:
             The real table name, or None if the qualifier names something the
             ontology cannot describe (a derived table, an unknown alias).
         """
+        source = self._resolve_qualifier_table(select, qualifier)
+        return source.name if source is not None and source.name else None
+
+    def _resolve_qualifier_table(
+        self, select: exp.Select | None, qualifier: str
+    ) -> exp.Table | None:
+        """The table node a column's qualifier names.
+
+        The node rather than the name, because the two answer different
+        questions: whether a reference is a CTE is a property of *that*
+        reference, and a name alone cannot say -- the same name may be a WITH
+        alias in one scope and a real table in another.
+
+        Args:
+            select: The SELECT the reference appears in.
+            qualifier: The alias or table name written before the dot.
+
+        Returns:
+            The table node, or None when the qualifier names something else
+            (a derived table, an unknown alias).
+        """
         key = qualifier.lower()
         node = select
         while node is not None:
-            resolved = self._build_alias_map(node).get(key)
-            if resolved is not None:
-                return resolved
+            for table in node.find_all(exp.Table):
+                if not table.name or table.find_ancestor(exp.Select) is not node:
+                    continue
+                if key in {table.name.lower(), (table.alias or "").lower()}:
+                    return table
             node = None if self._is_cte_body(node) else node.parent_select
         return None
 
@@ -1018,13 +1093,12 @@ class OBQCValidator:
         if self._schema_cache is None:
             return
 
-        for table_name in result.parsed_tables:
+        # CTE references are already excluded: a WITH alias is defined by the
+        # query, not by the ontology.
+        for table_name in result.checked_tables:
             # Catalog metadata is not described by the ontology and never will
             # be; demanding it appear there blocks catalog queries outright.
             if table_name in result.catalog_tables:
-                continue
-            # A WITH alias is defined by the query, not by the ontology.
-            if table_name.lower() in result.cte_names:
                 continue
             if table_name.lower() not in self._schema_cache.tables:
                 available_tables = list(self._schema_cache.tables.keys())[:10]
@@ -1051,13 +1125,9 @@ class OBQCValidator:
                 table_key = table_name.lower()
                 col_key = col_name.lower()
 
-                # Columns of a CTE come from its select list, which the
-                # ontology does not describe. The name also shadows any real
-                # table it collides with, so the ontology's columns for that
-                # table are not the right thing to check against either.
-                if table_key in result.cte_names:
-                    continue
-
+                # A qualifier naming a CTE was already dropped at extraction,
+                # at the reference itself, so anything reaching here is a real
+                # table.
                 if table_key in self._schema_cache.tables:
                     table_schema = self._schema_cache.tables[table_key]
                     if col_key not in table_schema.columns:
@@ -1084,9 +1154,10 @@ class OBQCValidator:
                 for level in scope:
                     matches = [
                         table_name
-                        for table_name in level
+                        for table_name, is_cte in level
                         if (
-                            table_name.lower() in self._schema_cache.tables
+                            not is_cte
+                            and table_name.lower() in self._schema_cache.tables
                             and col_key
                             in self._schema_cache.tables[table_name.lower()].columns
                         )
@@ -1106,13 +1177,13 @@ class OBQCValidator:
                 # A CTE in scope is undescribable for the same reason: its
                 # output columns are whatever its select list produced, so an
                 # unqualified name that matches no ontology table may well be
-                # one of them.
-                visible = [t for level in scope for t in level]
+                # one of them. Judged per reference: a name that is a CTE here
+                # may be a real table in another scope.
+                visible = [pair for level in scope for pair in level]
                 describable_tables = [
-                    t
-                    for t in visible
-                    if t not in result.catalog_tables
-                    and t.lower() not in result.cte_names
+                    name
+                    for name, is_cte in visible
+                    if not is_cte and name not in result.catalog_tables
                 ]
                 all_tables_describable = len(describable_tables) == len(visible)
 
@@ -1234,23 +1305,24 @@ class OBQCValidator:
         for key in label:
             find(key)
 
-        def connect(expr: exp.Expression | None, scope: exp.Select) -> None:
-            """Union the qualifiers of every cross-table equality in *expr*."""
-            if expr is None:
+        def connect_where(where: exp.Expression | None) -> None:
+            """Union the qualifiers of each cross-table comparison in WHERE."""
+            if where is None:
                 return
-            for eq in expr.find_all(exp.EQ):
-                # An equality inside a nested subquery is that scope's.
-                if eq.find_ancestor(exp.Select) is not scope:
+            for comp in where.find_all(*COMPARISON_TYPES):
+                # A comparison inside a nested subquery is that scope's.
+                if comp.find_ancestor(exp.Select) is not select:
                     continue
-                left, right = eq.this, eq.expression
+                left, right = comp.this, comp.expression
                 if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
                     continue
                 if left.table and right.table:
                     union(left.table.lower(), right.table.lower())
 
         # The comma form writes its conditions in WHERE, where they join just
-        # as effectively as an ON clause.
-        connect(select.args.get("where"), select)
+        # as effectively as an ON clause. Any comparison counts, not just
+        # equality: "WHERE a.starts < b.ends" relates the two tables too.
+        connect_where(select.args.get("where"))
 
         preceding: list[str] = []
         first = next(iter(label), None)
@@ -1266,7 +1338,27 @@ class OBQCValidator:
 
             on_clause = join.args.get("on")
             if on_clause is not None:
-                connect(on_clause, select)
+                # An explicit ON is a statement about *this* join, whatever
+                # shape the predicate takes. Reading it as pairs of qualified
+                # equalities rejected ordinary SQL: "JOIN shipments s ON s.cost
+                # > o.total" is a theta join, and "JOIN orders ON users.id =
+                # user_id" leaves one side unqualified -- both were reported as
+                # Cartesian products and blocked.
+                qualifiers = {
+                    column.table.lower()
+                    for column in on_clause.find_all(exp.Column)
+                    if column.table
+                }
+                others = qualifiers - {key}
+                if others:
+                    for other in others:
+                        union(key, other)
+                else:
+                    # The ON names nothing else to attach to (a constant
+                    # predicate, or only this table's own columns). It is still
+                    # an explicit join, so it joins to what came before it.
+                    for earlier in preceding:
+                        union(key, earlier)
             elif self._join_is_qualified(join):
                 # USING and NATURAL name no qualifiers, so there is nothing to
                 # read a pair off; they join this item to what came before it.
@@ -1312,7 +1404,7 @@ class OBQCValidator:
         )
 
     def _where_joins_tables(self, select: exp.Select) -> bool:
-        """Whether this SELECT's WHERE equates columns of two different tables.
+        """Whether this SELECT's WHERE relates columns of two different tables.
 
         The pre-SQL-92 comma form writes its join conditions in WHERE, so a
         scope with no ON clause may still be fully joined.
@@ -1326,14 +1418,16 @@ class OBQCValidator:
             select: The SELECT whose WHERE clause to inspect.
 
         Returns:
-            True if some equality compares columns of two distinct tables.
+            True if some comparison relates columns of two distinct tables.
         """
         where = select.args.get("where")
         if where is None:
             return False
 
-        for eq in where.find_all(exp.EQ):
-            # An EQ inside a nested subquery belongs to that subquery's scope.
+        # The same operators the connectivity rule accepts, so a scope it
+        # judges joined is never then asked for a missing ON clause.
+        for eq in where.find_all(*COMPARISON_TYPES):
+            # A comparison in a nested subquery belongs to that scope.
             if eq.find_ancestor(exp.Select) is not select:
                 continue
             left, right = eq.this, eq.expression
@@ -1366,7 +1460,10 @@ class OBQCValidator:
                     OBQCIssue(
                         issue_type=OBQCIssueType.MISSING_JOIN_CONDITION,
                         severity=OBQCSeverity.ERROR,
-                        message=f"JOIN with '{join_table}' has no ON condition",
+                        message=(
+                            f"JOIN with '{join_info.get('label') or join_table}' "
+                            "has no ON condition"
+                        ),
                         location="JOIN clause",
                         suggestion="Add ON condition based on foreign key relationship",
                     )
@@ -1376,7 +1473,7 @@ class OBQCValidator:
             # A CTE has no declared FK relationships -- it is not in the
             # ontology at all -- so the check below could only ever say "may
             # not match", on every join to a WITH alias.
-            if join_table and join_table.lower() in result.cte_names:
+            if join_info.get("table_is_cte"):
                 continue
 
             # Check if join condition matches a declared relationship
@@ -1446,9 +1543,7 @@ class OBQCValidator:
         self, parsed: exp.Expr, result: OBQCResult
     ) -> None:
         """Rule: Check type compatibility in comparisons."""
-        comparison_types = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
-
-        for comp in parsed.find_all(*comparison_types):
+        for comp in parsed.find_all(*COMPARISON_TYPES):
             left = comp.left
             right = comp.right
 
