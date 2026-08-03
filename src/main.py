@@ -482,12 +482,18 @@ async def execute_sql_query(
     is loaded, OBQC checks (fan-trap detection, semantic validation) run too — errors
     block execution, warnings are included in the result.
 
-    A detected fan-trap blocks execution: aggregating across a 1:many join returns
-    a silently inflated number, so the query is refused rather than answered wrongly.
-    Every response carries `obqc_fan_trap` ({detected, blocking, findings}) so the
-    verdict is readable as data. Pre-aggregate in a CTE or use the UNION ALL
-    Composite Fact Layer to fix the query; pass allow_fan_out=True only to run it
-    anyway.
+    Aggregating across a 1:many join returns a silently inflated number, so a
+    provable fan-trap blocks execution rather than answering wrongly. Fix it by
+    pre-aggregating in a CTE or using the UNION ALL Composite Fact Layer; pass
+    allow_fan_out=True only to run it anyway.
+
+    Every response carries `obqc_fan_trap`: {evaluated, detected, blocking,
+    findings}. Read `evaluated` first -- false means the rules never ran (no
+    ontology loaded, or the request failed before validation), which is "unknown",
+    not "clean". `blocking` says whether the verdict actually stopped this query.
+    Not every finding blocks: a `conditional_row_count` (SUM(CASE WHEN ... THEN 1
+    END) over a join that repeats what it counts) is reported as a warning,
+    because the same shape is a correct star-join idiom.
 
     REQUIRES: connect_database must be called first.
 

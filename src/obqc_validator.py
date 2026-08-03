@@ -189,9 +189,11 @@ class OBQCResult:
     # that keys off fields (an agent reading "success") must be able to see a
     # corrupted aggregate without parsing an English sentence out of warnings.
     fan_trap_findings: list[dict[str, Any]] = field(default_factory=list)
-    # Whether a fan-trap finding blocks execution. False when the caller opted
-    # in with allow_fan_out.
-    fan_trap_blocking: bool = True
+    # Whether the fan-trap verdict actually stopped the query. Computed from
+    # the issues that were raised, so it starts false: a run that returns
+    # before the rules execute blocked nothing, and saying otherwise
+    # contradicted the field's own meaning.
+    fan_trap_blocking: bool = False
     # Whether the fan-trap rules actually ran. False means "not checked", which
     # is not the same answer as "nothing found" -- without it, a query validated
     # with no ontology loaded reported detected=false and read as a clean bill
@@ -533,7 +535,7 @@ class OBQCValidator:
         Returns:
             OBQCResult with validation findings
         """
-        result = OBQCResult(is_valid=True, fan_trap_blocking=not allow_fan_out)
+        result = OBQCResult(is_valid=True)
         self._cte_references = set()
 
         if not self._schema_cache:

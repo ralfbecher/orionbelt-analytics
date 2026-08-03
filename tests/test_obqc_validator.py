@@ -1918,6 +1918,30 @@ class TestSingleFanOutMeasure(unittest.TestCase):
         )
         self.assertFalse(result.to_dict()["obqc_fan_trap"]["blocking"])
 
+    def test_a_run_that_never_checked_did_not_block(self):
+        """blocking says the verdict stopped the query, so it starts false.
+
+        Initialising it from the caller's flag made an ontology without oba:
+        annotations -- where the rules never run -- report blocking: true on a
+        query that executed fine.
+        """
+        from rdflib import Graph
+
+        bare = OBQCValidator()
+        bare.load_ontology(Graph(), "http://example.com/")
+
+        for label, validator in (
+            ("no ontology", OBQCValidator()),
+            ("ontology without oba: annotations", bare),
+        ):
+            with self.subTest(case=label):
+                report = validator.validate("SELECT id FROM orders").to_dict()[
+                    "obqc_fan_trap"
+                ]
+
+                self.assertFalse(report["evaluated"])
+                self.assertFalse(report["blocking"])
+
     def test_clean_query_reports_no_fan_trap(self):
         """The verdict is a field even when the answer is no."""
         report = self.validator.validate("SELECT users.name FROM users").to_dict()[

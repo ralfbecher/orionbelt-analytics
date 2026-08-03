@@ -284,7 +284,7 @@ Every `execute_sql_query` response carries `obqc_fan_trap`, whatever the outcome
 
 `kind` is one of `measure_across_fan_out`, `conditional_row_count`, `disjoint_facts`, or `multiple_fan_out_joins`.
 
-`blocking` says whether this verdict actually stopped the query, not what the caller asked for: it is `false` for a clean query, `false` when `allow_fan_out` was passed, and `false` for a `conditional_row_count`, which reports without blocking even under the default policy. A clean query reports `detected: false` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
+`blocking` says whether this verdict actually stopped the query, not what the caller asked for: it is `false` for a clean query, `false` when `allow_fan_out` was passed, `false` for a `conditional_row_count`, which reports without blocking even under the default policy, and `false` whenever `evaluated` is `false`, since a run that never checked blocked nothing. A clean query reports `detected: false` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
 
 `evaluated` separates *checked and clean* from *never checked*, which are not the same answer. It is `false` when the rules never ran: no ontology loaded, an ontology without `oba:` annotations, or a request that failed before validation (no connection, bad limit, empty SQL, checklist not confirmed). **A caller must treat `evaluated: false` as "unknown", not as a clean bill of health** -- a query can run and return inflated numbers with `detected: false` when no ontology was loaded to check it against.
 
