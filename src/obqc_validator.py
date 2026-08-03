@@ -129,6 +129,21 @@ TEMPORAL_LITERAL = re.compile(
     r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$"
 )
 
+# The fan-trap findings OBQC can report, strongest first. Named here so the
+# rules, the response and the documentation cannot drift apart -- each has gone
+# stale separately while this was built.
+KIND_MEASURE_ACROSS_FAN_OUT = "measure_across_fan_out"
+KIND_DISJOINT_FACTS = "disjoint_facts"
+KIND_MULTIPLE_FAN_OUT_JOINS = "multiple_fan_out_joins"
+KIND_CONDITIONAL_ROW_COUNT = "conditional_row_count"
+
+FAN_TRAP_KINDS = (
+    KIND_MEASURE_ACROSS_FAN_OUT,
+    KIND_DISJOINT_FACTS,
+    KIND_MULTIPLE_FAN_OUT_JOINS,
+    KIND_CONDITIONAL_ROW_COUNT,
+)
+
 # Comparison operators that can relate two tables. A join condition is not
 # always an equality: "ON a.starts < b.ends" is an ordinary theta join.
 COMPARISON_TYPES = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
@@ -2481,7 +2496,7 @@ class OBQCValidator:
             disjoint_hits |= {pair for pair in self._disjoint_pairs if pair <= queried}
         if disjoint_hits:
             involved = sorted({t for pair in disjoint_hits for t in pair})
-            record({"kind": "disjoint_facts", "tables": involved})
+            record({"kind": KIND_DISJOINT_FACTS, "tables": involved})
             result.issues.append(
                 OBQCIssue(
                     issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
@@ -2545,7 +2560,7 @@ class OBQCValidator:
         # Ambiguous counts, reported but never blocking -- see _counted_tables
         # for why the same shape is both a bug and a common correct idiom.
         counts = self._inflated_measures(
-            result, key="counted_tables", kind="conditional_row_count"
+            result, key="counted_tables", kind=KIND_CONDITIONAL_ROW_COUNT
         )
         for finding in counts:
             result.fan_trap_risk = True
@@ -2577,7 +2592,7 @@ class OBQCValidator:
         if one_to_many_count >= 2:
             record(
                 {
-                    "kind": "multiple_fan_out_joins",
+                    "kind": KIND_MULTIPLE_FAN_OUT_JOINS,
                     "tables": sorted(set(involved_tables)),
                     "join_count": one_to_many_count,
                 }

@@ -201,11 +201,11 @@ SELECT name, COUNT(*) FROM customers;
 SELECT status, region, SUM(amount) FROM orders GROUP BY region;
 ```
 
-### Fan-trap detection (ERROR)
+### Fan-trap detection (ERROR / WARNING)
 
-A **provable** fan-trap blocks execution: a query that aggregates a measure across a one-to-many join returns a silently inflated number, and a wrong answer is worse than no answer -- particularly for a caller that keys off `success` and never reads the prose in `warnings`. One finding below (rule 1b) is reported without blocking, because the SQL does not say whether it is wrong; `blocking` on the verdict tells you which happened.
+A **provable** fan-trap blocks execution: a query that aggregates a measure across a one-to-many join returns a silently inflated number, and a wrong answer is worse than no answer -- particularly for a caller that keys off `success` and never reads the prose in `warnings`. One finding below (rule 4) is reported without blocking, because the SQL does not say whether it is wrong; `blocking` on the verdict tells you which happened.
 
-Three findings, strongest first.
+Four findings, strongest first. The first three block; the fourth is reported without blocking.
 
 **1. A measure multiplied by a fan-out join.** The ontology puts the joined table on the many side of the table a measure is taken from, so each measure row is repeated. **One join is enough** -- no second fact table required:
 
@@ -238,13 +238,17 @@ SELECT o.id, SUM(CASE WHEN oi.quantity > 1 THEN o.total ELSE 0 END)
 FROM orders o JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id;
 ```
 
-Aggregates that duplication cannot change are left alone entirely -- `MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so no join shape makes them wrong and none of the three rules fires on a query that uses only those.
+Aggregates that duplication cannot change are left alone entirely -- `MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so no join shape makes them wrong and none of the rules fires on a query that uses only those.
 
 `COUNT(*)` is a middle case. It names no table, so it never triggers this rule -- counting the joined rows is usually the intent. But it does count rows, so across *two* fan-out joins it returns the product of the two children and rules 2 and 3 below still apply.
 
 The comma form is judged identically: `FROM orders o, order_items i WHERE i.order_id = o.id` states the same join as the `ON` spelling and inflates the same way.
 
-**1b. A conditional row count over a repeated table (WARNING, never blocks).** A constant-valued conditional aggregate -- `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, or the same thing as `COUNT(*) FILTER (WHERE …)` -- has no measure column, but the join still repeats what it counts:
+**2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
+
+**3. Two or more fan-out joins** in one aggregating `SELECT` -- the heuristic fallback for ontologies carrying no disjointness axioms.
+
+**4. A conditional row count over a repeated table (WARNING, never blocks).** A constant-valued conditional aggregate -- `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, or the same thing as `COUNT(*) FILTER (WHERE …)` -- has no measure column, but the join still repeats what it counts:
 
 ```sql
 -- WARNING: counts order_items rows matching an orders condition, not orders rows
@@ -255,10 +259,6 @@ FROM orders o JOIN order_items i ON i.order_id = o.id;
 This one is **reported without blocking**, because the SQL does not say which count was meant. The identical shape is a ubiquitous correct idiom in a star join -- `SUM(CASE WHEN u.segment = 'SMB' THEN 1 ELSE 0 END)` over `orders JOIN users` counts orders, which is exactly right, and reads as an inflated count of users only if that is what you wanted. Blocking it would reject ordinary analytics SQL, so OBQC states the ambiguity and leaves the call to you.
 
 Only conditions naming a single table qualify. One that also names the child counts at the child's grain, which no join corrupts, and an unconditional `COUNT(*)` names nothing at all. Unqualified condition columns resolve the same way value columns do -- against the tables in scope, and only when exactly one of them declares the name.
-
-**2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
-
-**3. Two or more fan-out joins** in one aggregating `SELECT` -- the heuristic fallback for ontologies carrying no disjointness axioms.
 
 Fan-out is judged per join, against the table that join's `ON` condition attaches to -- not by asking whether a table sits on the many side of some relationship elsewhere in the schema. Walking a chain of many-to-one lookups (`sales` -> `clients` -> `countries`) duplicates nothing and is not flagged, however many foreign keys those dimensions carry.
 

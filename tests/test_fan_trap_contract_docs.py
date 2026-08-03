@@ -13,7 +13,7 @@ import re
 import unittest
 from pathlib import Path
 
-from src.obqc_validator import OBQCResult
+from src.obqc_validator import FAN_TRAP_KINDS, KIND_CONDITIONAL_ROW_COUNT, OBQCResult
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -94,6 +94,55 @@ class TestFanTrapContractIsDocumentedAccurately(unittest.TestCase):
             set(OBQCResult(is_valid=True).to_dict()["obqc_fan_trap"]),
             set(VERDICT_KEYS),
         )
+
+    def test_every_finding_kind_is_documented(self):
+        """A kind the code can emit but no page explains is undocumented.
+
+        Adding the fourth kind left the reference describing three.
+        """
+        reference = (ROOT / "docs" / "obqc.md").read_text()
+        for kind in FAN_TRAP_KINDS:
+            with self.subTest(kind=kind):
+                self.assertIn(kind, reference)
+
+    def test_stated_counts_match_the_number_of_kinds(self):
+        """Prose that counts the rules has to count them correctly.
+
+        "Three findings, strongest first" outlived the third revision of this
+        list, and a reader has no way to tell it is stale.
+        """
+        words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+        expected = words[len(FAN_TRAP_KINDS)]
+        # Plural only: "One finding below is reported without blocking" counts
+        # a single rule, not the set.
+        counted = re.compile(
+            r"\b(two|three|four|five|six)\s+(findings|rules)\b", re.IGNORECASE
+        )
+
+        for path in CONTRACT_DOCS:
+            with self.subTest(doc=path.relative_to(ROOT)):
+                for word, noun in counted.findall(path.read_text()):
+                    self.assertEqual(
+                        word.lower(),
+                        expected,
+                        f"{path.relative_to(ROOT)} says '{word} {noun}' but "
+                        f"there are {len(FAN_TRAP_KINDS)} fan-trap findings",
+                    )
+
+    def test_the_fan_trap_section_is_not_labelled_error_only(self):
+        """One kind never blocks, so a bare (ERROR) heading misdescribes it."""
+        heading = re.compile(r"^#+ Fan-trap detection \((.+)\)\s*$", re.MULTILINE)
+
+        for path in CONTRACT_DOCS:
+            for severities in heading.findall(path.read_text()):
+                with self.subTest(doc=path.relative_to(ROOT)):
+                    self.assertIn(
+                        "WARNING",
+                        severities,
+                        f"{path.relative_to(ROOT)} labels fan-trap detection "
+                        f"'({severities})', but {KIND_CONDITIONAL_ROW_COUNT} "
+                        "is warning-only",
+                    )
 
 
 if __name__ == "__main__":
