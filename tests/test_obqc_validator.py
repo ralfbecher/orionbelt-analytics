@@ -929,9 +929,13 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
         self.validator.load_ontology(self.graph, self.base_uri)
 
     def test_many_to_one_chain_is_not_a_fan_trap(self):
-        """order_items -> orders -> users: every hop is a lookup."""
+        """order_items -> orders -> users: every hop is a lookup.
+
+        The measure is taken at the finest grain in the query, so walking up to
+        the dimensions repeats nothing.
+        """
         result = self.validator.validate(
-            "SELECT users.name, SUM(orders.total) "
+            "SELECT users.name, SUM(order_items.quantity) "
             "FROM order_items "
             "JOIN orders ON order_items.order_id = orders.id "
             "JOIN users ON orders.user_id = users.id "
@@ -946,17 +950,79 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
     def test_many_to_one_chain_with_aliases_is_not_a_fan_trap(self):
         """ON conditions are qualified by alias, so aliases must resolve."""
         result = self.validator.validate(
-            "SELECT u.name, COUNT(*) AS n, SUM(o.total) AS lifetime_value "
+            "SELECT u.name, SUM(oi.quantity) AS units "
             "FROM public.order_items oi "
             "JOIN public.orders o ON oi.order_id = o.id "
             "JOIN public.users u ON o.user_id = u.id "
-            "GROUP BY u.name ORDER BY SUM(o.total) DESC"
+            "GROUP BY u.name ORDER BY SUM(oi.quantity) DESC"
         )
 
         self.assertFalse(
             result.fan_trap_risk,
             [i.message for i in result.issues],
         )
+
+    def test_parent_measure_at_child_grain_is_a_fan_trap(self):
+        """The same chain, but summing the parent's measure, does inflate.
+
+        ``FROM order_items JOIN orders`` yields one row per item, so each
+        order's total is added once per item it contains. Checked against
+        DuckDB: two orders totalling 150 come back as 250 when order 1 has two
+        items. Which table sits in FROM makes no difference to that.
+        """
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM order_items "
+            "JOIN orders ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [
+                (f["measure_table"], f["fan_out_table"])
+                for f in result.fan_trap_findings
+            ],
+            [("orders", "order_items")],
+        )
+
+    def test_duplication_proof_aggregates_survive_two_fan_outs(self):
+        """MAX reads the same answer however often its rows are repeated.
+
+        The count heuristic fired on any aggregate at all, so it blocked
+        queries the measure rule deliberately leaves alone -- and once
+        fan-traps became errors, that stopped them running.
+        """
+        for aggregate in (
+            "MAX(orders.total)",
+            "MIN(orders.total)",
+            "COUNT(DISTINCT orders.id)",
+        ):
+            with self.subTest(aggregate=aggregate):
+                result = self.validator.validate(
+                    f"SELECT orders.id, {aggregate} "
+                    "FROM orders "
+                    "JOIN order_items ON orders.id = order_items.order_id "
+                    "JOIN shipments ON orders.id = shipments.order_id "
+                    "GROUP BY orders.id"
+                )
+
+                self.assertFalse(
+                    result.fan_trap_risk, [i.message for i in result.issues]
+                )
+
+    def test_count_star_across_two_fan_outs_is_still_a_fan_trap(self):
+        """COUNT(*) names no table, but it counts rows -- here, their product."""
+        result = self.validator.validate(
+            "SELECT orders.id, COUNT(*) "
+            "FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
 
     def test_two_facts_on_one_dimension_is_still_a_fan_trap(self):
         """The true positive must survive: orders fans out twice."""
@@ -1069,19 +1135,21 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
 
         self.assertTrue(result.fan_trap_risk)
 
-    def test_unrelated_join_is_not_counted(self):
-        """Tables with no ontology relationship cannot be judged to fan out."""
+    def test_only_the_fanning_join_is_blamed(self):
+        """A lookup joined alongside a fan-out must not be named as the cause.
+
+        shipments multiplies orders; users is a many-to-one lookup and
+        multiplies nothing. The finding must say so.
+        """
         result = self.validator.validate(
             "SELECT SUM(orders.total) FROM orders "
             "JOIN users ON orders.user_id = users.id "
             "JOIN shipments ON shipments.order_id = orders.id"
         )
 
-        # shipments fans out from orders; users does not. One fan-out only.
-        self.assertFalse(
-            result.fan_trap_risk,
-            [i.message for i in result.issues],
-        )
+        self.assertTrue(result.fan_trap_risk)
+        blamed = {f["fan_out_table"] for f in result.fan_trap_findings}
+        self.assertEqual(blamed, {"shipments"})
 
 
 class TestOBQCFanTrapDimensionWithOwnKeys(unittest.TestCase):
@@ -1540,6 +1608,908 @@ class TestIncompatibleOntology(unittest.TestCase):
 
         self.assertIn("obqc_ontology_compatible", result_dict)
         self.assertTrue(result_dict["obqc_ontology_compatible"])
+
+
+class TestSingleFanOutMeasure(unittest.TestCase):
+    """One 1:many join is enough to inflate a measure taken from the one side.
+
+    The count heuristic needed two fan-out joins before it said anything, so
+    ``orders JOIN order_items`` summing ``orders.total`` -- which repeats each
+    order's total once per item -- passed in silence.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_measure_from_the_one_side_is_blocked(self):
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(
+            [
+                i.severity
+                for i in result.issues
+                if i.issue_type == OBQCIssueType.FAN_TRAP_DETECTED
+            ],
+            [OBQCSeverity.ERROR],
+        )
+
+    def test_measure_from_the_many_side_is_fine(self):
+        """The repeated rows *are* the measure's rows, so nothing is doubled."""
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_count_star_is_not_attributed_to_any_table(self):
+        """Counting the joined rows is usually the intent, so it is left alone."""
+        result = self.validator.validate(
+            "SELECT orders.id, COUNT(*) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_min_and_max_survive_duplication(self):
+        result = self.validator.validate(
+            "SELECT orders.id, MAX(orders.total) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_count_distinct_survives_duplication(self):
+        result = self.validator.validate(
+            "SELECT users.name, COUNT(DISTINCT orders.id) "
+            "FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_dimension_lookup_never_fans_out(self):
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM orders JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_comma_join_spelling_is_caught_too(self):
+        """The older syntax states the same join and inflates identically.
+
+        Anchors were read only from ON, so writing the join the pre-SQL-92 way
+        skipped fan-trap detection entirely.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(o.total) FROM orders o, order_items i "
+            "WHERE i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(
+            [
+                (f["measure_table"], f["fan_out_table"])
+                for f in result.fan_trap_findings
+            ],
+            [("orders", "order_items")],
+        )
+
+    def test_comma_join_measure_from_the_many_side_is_fine(self):
+        result = self.validator.validate(
+            "SELECT SUM(i.quantity) FROM orders o, order_items i "
+            "WHERE i.order_id = o.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_column_only_tested_in_a_condition_is_not_a_measure(self):
+        """A CASE test decides whether the value is taken, it is not the value.
+
+        Reading every column under the aggregate blamed the table named in the
+        WHEN clause, blocking a safe conditional aggregate -- the shape the
+        fan-trap guidance itself recommends.
+        """
+        result = self.validator.validate(
+            "SELECT orders.id, "
+            "SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_measure_inside_a_case_is_still_a_measure(self):
+        """Both branches produce the value, so both are read."""
+        for branch in (
+            "CASE WHEN order_items.quantity > 1 THEN orders.total ELSE 0 END",
+            "CASE WHEN order_items.quantity > 1 THEN 0 ELSE orders.total END",
+            "IF(order_items.quantity > 1, orders.total, 0)",
+        ):
+            with self.subTest(branch=branch):
+                result = self.validator.validate(
+                    f"SELECT orders.id, SUM({branch}) "
+                    "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+                    "GROUP BY orders.id"
+                )
+
+                self.assertTrue(result.fan_trap_risk)
+
+    def test_arithmetic_on_a_one_side_column_is_a_measure(self):
+        """Multiplying by a repeated column inflates just as summing it does."""
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity * orders.total) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+    def test_conditional_row_count_is_reported_but_not_blocked(self):
+        """A constant-valued conditional aggregate is a filtered row count.
+
+        It has no measure column, so the measure rule cannot see it, yet the
+        join repeats what it counts. Whether that is wrong is not decidable
+        from the SQL -- the same shape is a correct star-join idiom -- so it is
+        reported without blocking. Checked against DuckDB: 3 for a single
+        qualifying order.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertTrue(result.is_valid)
+        self.assertEqual(
+            [f["kind"] for f in result.fan_trap_findings], ["conditional_row_count"]
+        )
+        self.assertFalse(result.to_dict()["obqc_fan_trap"]["blocking"])
+
+    def test_count_star_filter_is_the_same_construct(self):
+        """FILTER (WHERE ...) is a CASE test written another way."""
+        result = self.validator.validate(
+            "SELECT COUNT(*) FILTER (WHERE o.total > 100) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertTrue(result.is_valid)
+
+    def test_a_count_conditioned_on_the_child_is_clean(self):
+        """Counting at the child's grain is what the join already produces."""
+        for aggregate in (
+            "SUM(CASE WHEN i.quantity > 1 THEN 1 ELSE 0 END)",
+            "COUNT(*) FILTER (WHERE i.quantity > 1)",
+            # Naming both sides counts child rows too.
+            "SUM(CASE WHEN o.total > 100 AND i.quantity > 1 THEN 1 ELSE 0 END)",
+            "COUNT(*)",
+        ):
+            with self.subTest(aggregate=aggregate):
+                result = self.validator.validate(
+                    f"SELECT {aggregate} "
+                    "FROM orders o JOIN order_items i ON i.order_id = o.id"
+                )
+
+                self.assertFalse(
+                    result.fan_trap_risk, [i.message for i in result.issues]
+                )
+
+    def test_unqualified_condition_column_is_attributed(self):
+        """The same risky count written without the table prefix.
+
+        Reading qualified names only missed it, while the qualified spelling
+        was reported -- the value side already resolved unqualified names this
+        way.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [f["measure_table"] for f in result.fan_trap_findings], ["orders"]
+        )
+
+    def test_an_ambiguous_unqualified_condition_is_left_alone(self):
+        """order_id is declared by both tables, so it names neither grain."""
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN order_id > 1 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_warning_only_finding_is_not_an_override(self):
+        """Nothing was downgraded, so the caller accepted nothing.
+
+        Keyed off fan_trap_risk, the response told a caller who passed no
+        allow_fan_out that they had accepted the risk with it.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.fan_trap_overridden)
+
+    def test_allow_fan_out_on_a_blocking_finding_is_an_override(self):
+        result = self.validator.validate(
+            "SELECT SUM(o.total) FROM orders o "
+            "JOIN order_items i ON i.order_id = o.id",
+            allow_fan_out=True,
+        )
+
+        self.assertTrue(result.fan_trap_overridden)
+
+    def test_star_join_conditional_count_is_not_blocked(self):
+        """The ubiquitous idiom: count facts matching a dimension predicate.
+
+        Structurally identical to the case above -- the dimension's rows are
+        repeated by the fact join -- but here the repeated reading is the one
+        nobody means. Blocking it would reject ordinary analytics SQL.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN u.name = 'x' THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN users u ON o.user_id = u.id"
+        )
+
+        self.assertTrue(result.is_valid)
+
+    def test_finding_is_structured_not_prose(self):
+        result = self.validator.validate(
+            "SELECT SUM(orders.total) FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id"
+        )
+
+        report = result.to_dict()["obqc_fan_trap"]
+        self.assertTrue(report["evaluated"])
+        self.assertTrue(report["detected"])
+        self.assertTrue(report["blocking"])
+        self.assertEqual(
+            report["findings"],
+            [
+                {
+                    "kind": "measure_across_fan_out",
+                    "measure_table": "orders",
+                    "fan_out_table": "order_items",
+                    "tables": ["order_items", "orders"],
+                }
+            ],
+        )
+
+    def test_allow_fan_out_downgrades_to_a_warning(self):
+        sql = (
+            "SELECT SUM(orders.total) FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id"
+        )
+
+        result = self.validator.validate(sql, allow_fan_out=True)
+
+        self.assertTrue(result.is_valid)
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [
+                i.severity
+                for i in result.issues
+                if i.issue_type == OBQCIssueType.FAN_TRAP_DETECTED
+            ],
+            [OBQCSeverity.WARNING],
+        )
+        self.assertFalse(result.to_dict()["obqc_fan_trap"]["blocking"])
+
+    def test_a_run_that_never_checked_did_not_block(self):
+        """blocking says the verdict stopped the query, so it starts false.
+
+        Initialising it from the caller's flag made an ontology without oba:
+        annotations -- where the rules never run -- report blocking: true on a
+        query that executed fine.
+        """
+        from rdflib import Graph
+
+        bare = OBQCValidator()
+        bare.load_ontology(Graph(), "http://example.com/")
+
+        for label, validator in (
+            ("no ontology", OBQCValidator()),
+            ("ontology without oba: annotations", bare),
+        ):
+            with self.subTest(case=label):
+                report = validator.validate("SELECT id FROM orders").to_dict()[
+                    "obqc_fan_trap"
+                ]
+
+                self.assertFalse(report["evaluated"])
+                self.assertFalse(report["blocking"])
+
+    def test_clean_query_reports_no_fan_trap(self):
+        """The verdict is a field even when the answer is no."""
+        report = self.validator.validate("SELECT users.name FROM users").to_dict()[
+            "obqc_fan_trap"
+        ]
+
+        self.assertEqual(
+            report,
+            {
+                "evaluated": True,
+                "detected": False,
+                "blocking": False,
+                "findings": [],
+            },
+        )
+
+
+class TestWindowFunctions(unittest.TestCase):
+    """A windowed aggregate collapses no rows, so it imposes no GROUP BY."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_window_aggregate_needs_no_group_by(self):
+        """The reported false positive: a window SUM demanded a GROUP BY."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.id, o.total, SUM(o.total) OVER (PARTITION BY o.user_id) "
+                "FROM orders o"
+            ),
+            [],
+        )
+
+    def test_running_total_over_order_by(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT o.order_date, SUM(o.total) OVER (ORDER BY o.order_date) "
+                "FROM orders o"
+            ),
+            [],
+        )
+
+    def test_rank_beside_a_real_aggregate(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, SUM(o.total), RANK() OVER (ORDER BY SUM(o.total) DESC) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY u.name"
+            ),
+            [],
+        )
+
+    def test_grouping_is_still_required_beside_a_window(self):
+        """A window does not excuse a bare column from a real GROUP BY."""
+        errors = self._errors(
+            "SELECT u.name, o.order_date, SUM(o.total), "
+            "AVG(o.total) OVER (PARTITION BY u.name) "
+            "FROM orders o JOIN users u ON o.user_id = u.id "
+            "GROUP BY u.name"
+        )
+
+        self.assertTrue(any("order_date" in e for e in errors), errors)
+
+
+class TestTemporalLiterals(unittest.TestCase):
+    """Dates are written as string literals in every dialect."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _messages(self, sql):
+        return [i.message for i in self.validator.validate(sql).issues]
+
+    def test_date_literal_is_not_a_type_mismatch(self):
+        self.assertEqual(
+            self._messages(
+                "SELECT o.id FROM orders o WHERE o.order_date >= '2024-01-01'"
+            ),
+            [],
+        )
+
+    def test_timestamp_literal_is_not_a_type_mismatch(self):
+        self.assertEqual(
+            self._messages(
+                "SELECT o.id FROM orders o WHERE o.order_date < '2024-01-01 12:30:00'"
+            ),
+            [],
+        )
+
+    def test_string_column_against_a_date_shaped_literal_is_fine(self):
+        """The literal is only temporal opposite a temporal column.
+
+        Typing every ISO-looking string as a date fixed date columns and broke
+        string ones: "email = '2024-01-01'" is an ordinary string comparison,
+        and was reported as "string vs dateTime".
+        """
+        self.assertEqual(
+            self._messages("SELECT u.id FROM users u WHERE u.email = '2024-01-01'"),
+            [],
+        )
+
+    def test_a_string_that_is_not_a_date_still_mismatches(self):
+        self.assertTrue(
+            any(
+                "mismatch" in m.lower()
+                for m in self._messages(
+                    "SELECT o.id FROM orders o WHERE o.order_date = 'hello'"
+                )
+            )
+        )
+
+    def test_alias_qualified_comparison_is_type_checked(self):
+        """Unresolved aliases meant most real SQL was never type-checked."""
+        self.assertTrue(
+            any(
+                "mismatch" in m.lower()
+                for m in self._messages(
+                    "SELECT o.id FROM orders o JOIN users u ON o.user_id = u.name"
+                )
+            )
+        )
+
+
+class TestCommonTableExpressions(unittest.TestCase):
+    """A WITH alias is a table the query defines, not one the ontology owns."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_cte_name_is_not_reported_missing(self):
+        """The reported bug: a WITH alias was rejected as an unknown table."""
+        self.assertEqual(
+            self._errors(
+                "WITH user_totals AS ("
+                "  SELECT user_id, SUM(total) AS revenue FROM orders GROUP BY user_id"
+                ") "
+                "SELECT u.name, ut.revenue "
+                "FROM user_totals ut JOIN users u ON u.id = ut.user_id"
+            ),
+            [],
+        )
+
+    def test_cte_output_column_is_not_reported_missing(self):
+        """A CTE's columns come from its select list, not from the ontology."""
+        self.assertEqual(
+            self._errors(
+                "WITH t AS (SELECT SUM(total) AS revenue FROM orders) "
+                "SELECT revenue FROM t"
+            ),
+            [],
+        )
+
+    def test_join_to_cte_is_not_warned_about_foreign_keys(self):
+        """A CTE has no declared FK, so the FK check can only cry wolf."""
+        result = self.validator.validate(
+            "WITH t AS (SELECT user_id FROM orders) "
+            "SELECT u.name FROM t JOIN users u ON t.user_id = u.id"
+        )
+
+        self.assertEqual(
+            [
+                i.message
+                for i in result.issues
+                if i.issue_type == OBQCIssueType.INVALID_JOIN
+            ],
+            [],
+        )
+
+    def test_cte_body_is_still_validated(self):
+        """Exempting the WITH alias must not exempt the query behind it."""
+        errors = self._errors(
+            "WITH t AS (SELECT bogus_column FROM orders) SELECT user_id FROM t"
+        )
+
+        self.assertTrue(any("bogus_column" in e for e in errors), errors)
+
+    def test_cte_body_cannot_see_the_declaring_query(self):
+        """A CTE body is not a nested scope, so outer tables cannot excuse it."""
+        errors = self._errors(
+            "WITH t AS (SELECT o.nonexistent FROM orders o) SELECT user_id FROM t"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_inner_cte_does_not_excuse_an_outer_real_table(self):
+        """A CTE is only a table where its WITH clause is in scope.
+
+        Collecting names across the whole query let a CTE declared inside a
+        subquery hide a real table of the same name in the outer one.
+        """
+        errors = self._errors(
+            "SELECT users.nonexistent FROM users "
+            "WHERE EXISTS (WITH users AS (SELECT 1 AS x FROM orders) "
+            "SELECT 1 FROM users)"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_both_readings_of_one_name_coexist(self):
+        """A name can be a CTE in one scope and a real table in another.
+
+        The exemption is per reference. Tracking it by name broke one half or
+        the other: globally, the inner CTE excused the outer real table;
+        by-name-minus-conflicts, the outer real table stopped the inner CTE's
+        own columns from being exempt, and a valid query was blocked.
+        """
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM users u WHERE u.id IN ("
+                "WITH users AS (SELECT id AS uid FROM orders) SELECT uid FROM users)"
+            ),
+            [],
+        )
+
+    def test_cte_named_after_a_real_table_still_shadows_it(self):
+        """Where the WITH *is* in scope, the CTE wins."""
+        self.assertEqual(
+            self._errors(
+                "WITH users AS (SELECT id AS uid FROM orders) SELECT uid FROM users"
+            ),
+            [],
+        )
+
+    def test_cte_declared_inside_a_subquery_is_exempt_there(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM users u WHERE u.id IN ("
+                "WITH t AS (SELECT user_id FROM orders) SELECT user_id FROM t)"
+            ),
+            [],
+        )
+
+    def test_a_cte_body_reads_the_real_table_of_the_same_name(self):
+        """A non-recursive CTE cannot see itself, so its body reads the table.
+
+        Exposing every name in the WITH to every reference under it skipped
+        validation of the body. Checked against DuckDB, which resolves the
+        inner FROM to the real table and rejects the unknown column.
+        """
+        errors = self._errors(
+            "WITH orders AS (SELECT nonexistent FROM orders) SELECT id FROM orders"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_forward_reference_to_a_later_sibling_is_not_a_cte(self):
+        """CTEs see the siblings declared before them, not after."""
+        errors = self._errors(
+            "WITH a AS (SELECT id FROM b), b AS (SELECT id FROM orders) "
+            "SELECT id FROM a"
+        )
+
+        self.assertTrue(any("'b'" in e for e in errors), errors)
+
+    def test_earlier_sibling_is_visible(self):
+        self.assertEqual(
+            self._errors(
+                "WITH a AS (SELECT user_id FROM orders), "
+                "b AS (SELECT user_id FROM a) SELECT user_id FROM b"
+            ),
+            [],
+        )
+
+    def test_non_recursive_self_reference_is_not_a_cte(self):
+        """Without RECURSIVE this is a circular reference, not a CTE use."""
+        errors = self._errors(
+            "WITH chain AS (SELECT id FROM chain) SELECT id FROM chain"
+        )
+
+        self.assertTrue(any("chain" in e for e in errors), errors)
+
+    def test_recursive_cte_self_reference(self):
+        """A recursive CTE names itself; that reference is not a missing table."""
+        self.assertEqual(
+            self._errors(
+                "WITH RECURSIVE chain AS ("
+                "  SELECT id, user_id FROM orders WHERE user_id = 1"
+                "  UNION ALL"
+                "  SELECT o.id, o.user_id FROM orders o JOIN chain c ON o.id = c.id"
+                ") SELECT id FROM chain"
+            ),
+            [],
+        )
+
+
+class TestGroupingSetConstructs(unittest.TestCase):
+    """ROLLUP, CUBE and GROUPING SETS declare grouping keys like GROUP BY does."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_rollup_columns_count_as_grouped(self):
+        """The reported bug: ROLLUP keys read as grouping by nothing at all."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, o.order_date, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY ROLLUP(u.name, o.order_date)"
+            ),
+            [],
+        )
+
+    def test_cube_columns_count_as_grouped(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY CUBE(u.name)"
+            ),
+            [],
+        )
+
+    def test_grouping_sets_columns_count_as_grouped(self):
+        """Members nest inside Paren/Tuple wrappers; "()" contributes none."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY GROUPING SETS ((u.name), ())"
+            ),
+            [],
+        )
+
+    def test_plain_and_rollup_keys_combine(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, o.order_date, SUM(o.total) "
+                "FROM orders o JOIN users u ON o.user_id = u.id "
+                "GROUP BY u.name, ROLLUP(o.order_date)"
+            ),
+            [],
+        )
+
+    def test_column_missing_from_rollup_is_still_flagged(self):
+        """Recognising ROLLUP must not stop the rule doing its job."""
+        errors = self._errors(
+            "SELECT u.name, o.order_date, SUM(o.total) "
+            "FROM orders o JOIN users u ON o.user_id = u.id "
+            "GROUP BY ROLLUP(u.name)"
+        )
+
+        self.assertTrue(any("order_date" in e for e in errors), errors)
+
+
+class TestJoinsWithoutOnClause(unittest.TestCase):
+    """USING, NATURAL and the comma form are joins, not cross products."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_comma_join_with_where_condition(self):
+        """The pre-SQL-92 form states its join in WHERE."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, o.total FROM orders o, users u WHERE o.user_id = u.id"
+            ),
+            [],
+        )
+
+    def test_comma_join_across_three_tables(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name, i.quantity "
+                "FROM orders o, users u, order_items i "
+                "WHERE o.user_id = u.id AND i.order_id = o.id"
+            ),
+            [],
+        )
+
+    def test_using_join(self):
+        result = self.validator.validate(
+            "SELECT quantity FROM orders JOIN order_items USING (id)"
+        )
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_natural_join(self):
+        result = self.validator.validate("SELECT total FROM orders NATURAL JOIN users")
+
+        self.assertTrue(result.is_valid, [i.message for i in result.issues])
+
+    def test_genuine_cross_product_is_still_flagged(self):
+        errors = self._errors("SELECT u.name, o.total FROM orders o, users u")
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+    def test_partially_joined_scope_is_flagged(self):
+        """Every table must be tied in, not just some pair.
+
+        One qualified equality used to excuse the whole FROM clause, so a
+        third table joined to nothing rode along as a cross product.
+        """
+        errors = self._errors(
+            "SELECT o.total FROM orders o, users u, shipments s "
+            "WHERE o.user_id = u.id"
+        )
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+        self.assertTrue(any("shipments" in e for e in errors), errors)
+
+    def test_the_unjoined_table_is_named(self):
+        """The joined pair is not the problem, so it is not reported."""
+        errors = self._errors(
+            "SELECT o.total FROM orders o JOIN users u ON o.user_id = u.id, "
+            "shipments s"
+        )
+
+        self.assertTrue(any("shipments" in e for e in errors), errors)
+        self.assertFalse(any("users" in e for e in errors), errors)
+
+    def test_theta_join_is_not_a_cross_product(self):
+        """An ON clause need not be an equality to be a join.
+
+        Reading connectivity as pairs of qualified equalities rejected
+        ordinary SQL and, because this is an ERROR, blocked it.
+        """
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o JOIN shipments s ON s.cost > o.total"
+            ),
+            [],
+        )
+
+    def test_on_clause_with_an_unqualified_side_is_a_join(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT users.id FROM users JOIN orders ON users.id = user_id"
+            ),
+            [],
+        )
+
+    def test_on_clause_naming_no_other_table_is_still_a_join(self):
+        """An explicit ON is a stated join whatever the predicate says."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o JOIN shipments s ON s.cost > 10"
+            ),
+            [],
+        )
+
+    def test_cross_table_where_comparison_connects(self):
+        """The comma form's condition need not be an equality either."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o, shipments s WHERE s.cost > o.total"
+            ),
+            [],
+        )
+
+    def test_unconditioned_self_join_is_flagged(self):
+        """Two aliases of one table are two nodes, not one."""
+        errors = self._errors("SELECT a.id FROM orders a, orders b")
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+    def test_conditioned_self_join_is_not_flagged(self):
+        self.assertEqual(
+            self._errors("SELECT a.id FROM orders a, orders b WHERE a.id = b.id"),
+            [],
+        )
+
+    def test_chain_of_conditions_connects_every_table(self):
+        """Connectivity is transitive: c reaches a through b."""
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM orders o, users u, order_items i "
+                "WHERE o.user_id = u.id AND i.order_id = o.id"
+            ),
+            [],
+        )
+
+    def test_using_join_connects_to_what_precedes_it(self):
+        """USING names no qualifiers, so it joins to the preceding items."""
+        self.assertEqual(
+            self._errors(
+                "SELECT o.total FROM orders o JOIN users u ON o.user_id = u.id "
+                "JOIN order_items USING (id)"
+            ),
+            [],
+        )
+
+    def test_where_filter_on_one_table_is_not_a_join(self):
+        """A predicate must relate two tables to stand in for a join."""
+        errors = self._errors(
+            "SELECT u.name, o.total FROM orders o, users u WHERE o.total > 100"
+        )
+
+        self.assertTrue(any("Cartesian" in e for e in errors), errors)
+
+
+class TestAliasQualifiedColumns(unittest.TestCase):
+    """A column qualified by a table alias resolves to that table."""
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def _errors(self, sql):
+        result = self.validator.validate(sql)
+        return [i.message for i in result.issues if i.severity == OBQCSeverity.ERROR]
+
+    def test_bogus_column_behind_an_alias_is_caught(self):
+        """Unresolved qualifiers made the aliased spelling escape the check."""
+        errors = self._errors("SELECT o.nonexistent FROM orders o")
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+        self.assertTrue(any("orders" in e for e in errors), errors)
+
+    def test_real_column_behind_an_alias_passes(self):
+        self.assertEqual(self._errors("SELECT o.total FROM orders o"), [])
+
+    def test_alias_resolves_through_a_subquery(self):
+        errors = self._errors(
+            "SELECT u.name FROM users u "
+            "WHERE u.id IN (SELECT o.nonexistent FROM orders o)"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_outer_alias_is_visible_to_a_correlated_subquery(self):
+        self.assertEqual(
+            self._errors(
+                "SELECT u.name FROM users u "
+                "WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)"
+            ),
+            [],
+        )
+
+    def test_derived_table_alias_is_not_resolved_against_the_ontology(self):
+        """A subquery's output columns are not any table's columns."""
+        self.assertEqual(
+            self._errors(
+                "SELECT x.revenue FROM (SELECT SUM(total) AS revenue FROM orders) x"
+            ),
+            [],
+        )
+
+    def test_reported_column_keeps_the_alias_the_query_wrote(self):
+        result = self.validator.validate("SELECT o.total FROM orders o")
+
+        self.assertIn("o.total", result.parsed_columns)
 
 
 if __name__ == "__main__":
