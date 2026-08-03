@@ -468,6 +468,7 @@ async def execute_sql_query(
     limit: int = 1000,
     checklist_completed: bool = False,
     query_intent: _ShortText | None = None,
+    allow_fan_out: bool = False,
 ) -> dict[str, Any]:
     """Execute SQL query with built-in syntax validation, security checks, OBQC
     validation, and fan-trap protection.
@@ -481,6 +482,19 @@ async def execute_sql_query(
     is loaded, OBQC checks (fan-trap detection, semantic validation) run too — errors
     block execution, warnings are included in the result.
 
+    Aggregating across a 1:many join returns a silently inflated number, so a
+    provable fan-trap blocks execution rather than answering wrongly. Fix it by
+    pre-aggregating in a CTE or using the UNION ALL Composite Fact Layer; pass
+    allow_fan_out=True only to run it anyway.
+
+    Every response carries `obqc_fan_trap`: {evaluated, detected, blocking,
+    findings}. Read `evaluated` first -- false means the rules never ran (no
+    ontology loaded, or the request failed before validation), which is "unknown",
+    not "clean". `blocking` says whether the verdict actually stopped this query.
+    Not every finding blocks: a `conditional_row_count` (SUM(CASE WHEN ... THEN 1
+    END) over a join that repeats what it counts) is reported as a warning,
+    because the same shape is a correct star-join idiom.
+
     REQUIRES: connect_database must be called first.
 
     Args:
@@ -488,6 +502,11 @@ async def execute_sql_query(
         limit: Maximum rows to return (default: 1000, max: 5,000)
         checklist_completed: Confirmation that pre-execution checklist is complete
         query_intent: Optional natural language description of query intent
+        allow_fan_out: Execute even when OBQC finds a fan-trap. Aggregates read
+            across a 1:many join are inflated, so only set this when the
+            multiplied rows are what you want (or you have verified the join is
+            1:1 in practice). The finding is still reported, as a warning
+            instead of a blocking error, and `obqc_fan_trap` names the tables.
     """
     return await _h_query.execute_sql_query(
         ctx,
@@ -496,6 +515,7 @@ async def execute_sql_query(
         checklist_completed,
         query_intent,
         services=_services(),
+        allow_fan_out=allow_fan_out,
     )
 
 

@@ -929,9 +929,13 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
         self.validator.load_ontology(self.graph, self.base_uri)
 
     def test_many_to_one_chain_is_not_a_fan_trap(self):
-        """order_items -> orders -> users: every hop is a lookup."""
+        """order_items -> orders -> users: every hop is a lookup.
+
+        The measure is taken at the finest grain in the query, so walking up to
+        the dimensions repeats nothing.
+        """
         result = self.validator.validate(
-            "SELECT users.name, SUM(orders.total) "
+            "SELECT users.name, SUM(order_items.quantity) "
             "FROM order_items "
             "JOIN orders ON order_items.order_id = orders.id "
             "JOIN users ON orders.user_id = users.id "
@@ -946,17 +950,79 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
     def test_many_to_one_chain_with_aliases_is_not_a_fan_trap(self):
         """ON conditions are qualified by alias, so aliases must resolve."""
         result = self.validator.validate(
-            "SELECT u.name, COUNT(*) AS n, SUM(o.total) AS lifetime_value "
+            "SELECT u.name, SUM(oi.quantity) AS units "
             "FROM public.order_items oi "
             "JOIN public.orders o ON oi.order_id = o.id "
             "JOIN public.users u ON o.user_id = u.id "
-            "GROUP BY u.name ORDER BY SUM(o.total) DESC"
+            "GROUP BY u.name ORDER BY SUM(oi.quantity) DESC"
         )
 
         self.assertFalse(
             result.fan_trap_risk,
             [i.message for i in result.issues],
         )
+
+    def test_parent_measure_at_child_grain_is_a_fan_trap(self):
+        """The same chain, but summing the parent's measure, does inflate.
+
+        ``FROM order_items JOIN orders`` yields one row per item, so each
+        order's total is added once per item it contains. Checked against
+        DuckDB: two orders totalling 150 come back as 250 when order 1 has two
+        items. Which table sits in FROM makes no difference to that.
+        """
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM order_items "
+            "JOIN orders ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [
+                (f["measure_table"], f["fan_out_table"])
+                for f in result.fan_trap_findings
+            ],
+            [("orders", "order_items")],
+        )
+
+    def test_duplication_proof_aggregates_survive_two_fan_outs(self):
+        """MAX reads the same answer however often its rows are repeated.
+
+        The count heuristic fired on any aggregate at all, so it blocked
+        queries the measure rule deliberately leaves alone -- and once
+        fan-traps became errors, that stopped them running.
+        """
+        for aggregate in (
+            "MAX(orders.total)",
+            "MIN(orders.total)",
+            "COUNT(DISTINCT orders.id)",
+        ):
+            with self.subTest(aggregate=aggregate):
+                result = self.validator.validate(
+                    f"SELECT orders.id, {aggregate} "
+                    "FROM orders "
+                    "JOIN order_items ON orders.id = order_items.order_id "
+                    "JOIN shipments ON orders.id = shipments.order_id "
+                    "GROUP BY orders.id"
+                )
+
+                self.assertFalse(
+                    result.fan_trap_risk, [i.message for i in result.issues]
+                )
+
+    def test_count_star_across_two_fan_outs_is_still_a_fan_trap(self):
+        """COUNT(*) names no table, but it counts rows -- here, their product."""
+        result = self.validator.validate(
+            "SELECT orders.id, COUNT(*) "
+            "FROM orders "
+            "JOIN order_items ON orders.id = order_items.order_id "
+            "JOIN shipments ON orders.id = shipments.order_id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
 
     def test_two_facts_on_one_dimension_is_still_a_fan_trap(self):
         """The true positive must survive: orders fans out twice."""
@@ -1069,19 +1135,21 @@ class TestOBQCFanTrapDirection(unittest.TestCase):
 
         self.assertTrue(result.fan_trap_risk)
 
-    def test_unrelated_join_is_not_counted(self):
-        """Tables with no ontology relationship cannot be judged to fan out."""
+    def test_only_the_fanning_join_is_blamed(self):
+        """A lookup joined alongside a fan-out must not be named as the cause.
+
+        shipments multiplies orders; users is a many-to-one lookup and
+        multiplies nothing. The finding must say so.
+        """
         result = self.validator.validate(
             "SELECT SUM(orders.total) FROM orders "
             "JOIN users ON orders.user_id = users.id "
             "JOIN shipments ON shipments.order_id = orders.id"
         )
 
-        # shipments fans out from orders; users does not. One fan-out only.
-        self.assertFalse(
-            result.fan_trap_risk,
-            [i.message for i in result.issues],
-        )
+        self.assertTrue(result.fan_trap_risk)
+        blamed = {f["fan_out_table"] for f in result.fan_trap_findings}
+        self.assertEqual(blamed, {"shipments"})
 
 
 class TestOBQCFanTrapDimensionWithOwnKeys(unittest.TestCase):
@@ -1540,6 +1608,355 @@ class TestIncompatibleOntology(unittest.TestCase):
 
         self.assertIn("obqc_ontology_compatible", result_dict)
         self.assertTrue(result_dict["obqc_ontology_compatible"])
+
+
+class TestSingleFanOutMeasure(unittest.TestCase):
+    """One 1:many join is enough to inflate a measure taken from the one side.
+
+    The count heuristic needed two fan-out joins before it said anything, so
+    ``orders JOIN order_items`` summing ``orders.total`` -- which repeats each
+    order's total once per item -- passed in silence.
+    """
+
+    def setUp(self):
+        self.graph, self.base_uri = create_sample_ontology_graph()
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(self.graph, self.base_uri)
+
+    def test_measure_from_the_one_side_is_blocked(self):
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(
+            [
+                i.severity
+                for i in result.issues
+                if i.issue_type == OBQCIssueType.FAN_TRAP_DETECTED
+            ],
+            [OBQCSeverity.ERROR],
+        )
+
+    def test_measure_from_the_many_side_is_fine(self):
+        """The repeated rows *are* the measure's rows, so nothing is doubled."""
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_count_star_is_not_attributed_to_any_table(self):
+        """Counting the joined rows is usually the intent, so it is left alone."""
+        result = self.validator.validate(
+            "SELECT orders.id, COUNT(*) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_min_and_max_survive_duplication(self):
+        result = self.validator.validate(
+            "SELECT orders.id, MAX(orders.total) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_count_distinct_survives_duplication(self):
+        result = self.validator.validate(
+            "SELECT users.name, COUNT(DISTINCT orders.id) "
+            "FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id "
+            "JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_dimension_lookup_never_fans_out(self):
+        result = self.validator.validate(
+            "SELECT users.name, SUM(orders.total) "
+            "FROM orders JOIN users ON orders.user_id = users.id "
+            "GROUP BY users.name"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_comma_join_spelling_is_caught_too(self):
+        """The older syntax states the same join and inflates identically.
+
+        Anchors were read only from ON, so writing the join the pre-SQL-92 way
+        skipped fan-trap detection entirely.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(o.total) FROM orders o, order_items i "
+            "WHERE i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.is_valid)
+        self.assertEqual(
+            [
+                (f["measure_table"], f["fan_out_table"])
+                for f in result.fan_trap_findings
+            ],
+            [("orders", "order_items")],
+        )
+
+    def test_comma_join_measure_from_the_many_side_is_fine(self):
+        result = self.validator.validate(
+            "SELECT SUM(i.quantity) FROM orders o, order_items i "
+            "WHERE i.order_id = o.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_column_only_tested_in_a_condition_is_not_a_measure(self):
+        """A CASE test decides whether the value is taken, it is not the value.
+
+        Reading every column under the aggregate blamed the table named in the
+        WHEN clause, blocking a safe conditional aggregate -- the shape the
+        fan-trap guidance itself recommends.
+        """
+        result = self.validator.validate(
+            "SELECT orders.id, "
+            "SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_measure_inside_a_case_is_still_a_measure(self):
+        """Both branches produce the value, so both are read."""
+        for branch in (
+            "CASE WHEN order_items.quantity > 1 THEN orders.total ELSE 0 END",
+            "CASE WHEN order_items.quantity > 1 THEN 0 ELSE orders.total END",
+            "IF(order_items.quantity > 1, orders.total, 0)",
+        ):
+            with self.subTest(branch=branch):
+                result = self.validator.validate(
+                    f"SELECT orders.id, SUM({branch}) "
+                    "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+                    "GROUP BY orders.id"
+                )
+
+                self.assertTrue(result.fan_trap_risk)
+
+    def test_arithmetic_on_a_one_side_column_is_a_measure(self):
+        """Multiplying by a repeated column inflates just as summing it does."""
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity * orders.total) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
+    def test_conditional_row_count_is_reported_but_not_blocked(self):
+        """A constant-valued conditional aggregate is a filtered row count.
+
+        It has no measure column, so the measure rule cannot see it, yet the
+        join repeats what it counts. Whether that is wrong is not decidable
+        from the SQL -- the same shape is a correct star-join idiom -- so it is
+        reported without blocking. Checked against DuckDB: 3 for a single
+        qualifying order.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertTrue(result.is_valid)
+        self.assertEqual(
+            [f["kind"] for f in result.fan_trap_findings], ["conditional_row_count"]
+        )
+        self.assertFalse(result.to_dict()["obqc_fan_trap"]["blocking"])
+
+    def test_count_star_filter_is_the_same_construct(self):
+        """FILTER (WHERE ...) is a CASE test written another way."""
+        result = self.validator.validate(
+            "SELECT COUNT(*) FILTER (WHERE o.total > 100) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertTrue(result.is_valid)
+
+    def test_a_count_conditioned_on_the_child_is_clean(self):
+        """Counting at the child's grain is what the join already produces."""
+        for aggregate in (
+            "SUM(CASE WHEN i.quantity > 1 THEN 1 ELSE 0 END)",
+            "COUNT(*) FILTER (WHERE i.quantity > 1)",
+            # Naming both sides counts child rows too.
+            "SUM(CASE WHEN o.total > 100 AND i.quantity > 1 THEN 1 ELSE 0 END)",
+            "COUNT(*)",
+        ):
+            with self.subTest(aggregate=aggregate):
+                result = self.validator.validate(
+                    f"SELECT {aggregate} "
+                    "FROM orders o JOIN order_items i ON i.order_id = o.id"
+                )
+
+                self.assertFalse(
+                    result.fan_trap_risk, [i.message for i in result.issues]
+                )
+
+    def test_unqualified_condition_column_is_attributed(self):
+        """The same risky count written without the table prefix.
+
+        Reading qualified names only missed it, while the qualified spelling
+        was reported -- the value side already resolved unqualified names this
+        way.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [f["measure_table"] for f in result.fan_trap_findings], ["orders"]
+        )
+
+    def test_an_ambiguous_unqualified_condition_is_left_alone(self):
+        """order_id is declared by both tables, so it names neither grain."""
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN order_id > 1 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_warning_only_finding_is_not_an_override(self):
+        """Nothing was downgraded, so the caller accepted nothing.
+
+        Keyed off fan_trap_risk, the response told a caller who passed no
+        allow_fan_out that they had accepted the risk with it.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.fan_trap_overridden)
+
+    def test_allow_fan_out_on_a_blocking_finding_is_an_override(self):
+        result = self.validator.validate(
+            "SELECT SUM(o.total) FROM orders o "
+            "JOIN order_items i ON i.order_id = o.id",
+            allow_fan_out=True,
+        )
+
+        self.assertTrue(result.fan_trap_overridden)
+
+    def test_star_join_conditional_count_is_not_blocked(self):
+        """The ubiquitous idiom: count facts matching a dimension predicate.
+
+        Structurally identical to the case above -- the dimension's rows are
+        repeated by the fact join -- but here the repeated reading is the one
+        nobody means. Blocking it would reject ordinary analytics SQL.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN u.name = 'x' THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN users u ON o.user_id = u.id"
+        )
+
+        self.assertTrue(result.is_valid)
+
+    def test_finding_is_structured_not_prose(self):
+        result = self.validator.validate(
+            "SELECT SUM(orders.total) FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id"
+        )
+
+        report = result.to_dict()["obqc_fan_trap"]
+        self.assertTrue(report["evaluated"])
+        self.assertTrue(report["detected"])
+        self.assertTrue(report["blocking"])
+        self.assertEqual(
+            report["findings"],
+            [
+                {
+                    "kind": "measure_across_fan_out",
+                    "measure_table": "orders",
+                    "fan_out_table": "order_items",
+                    "tables": ["order_items", "orders"],
+                }
+            ],
+        )
+
+    def test_allow_fan_out_downgrades_to_a_warning(self):
+        sql = (
+            "SELECT SUM(orders.total) FROM orders "
+            "JOIN order_items ON order_items.order_id = orders.id"
+        )
+
+        result = self.validator.validate(sql, allow_fan_out=True)
+
+        self.assertTrue(result.is_valid)
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [
+                i.severity
+                for i in result.issues
+                if i.issue_type == OBQCIssueType.FAN_TRAP_DETECTED
+            ],
+            [OBQCSeverity.WARNING],
+        )
+        self.assertFalse(result.to_dict()["obqc_fan_trap"]["blocking"])
+
+    def test_a_run_that_never_checked_did_not_block(self):
+        """blocking says the verdict stopped the query, so it starts false.
+
+        Initialising it from the caller's flag made an ontology without oba:
+        annotations -- where the rules never run -- report blocking: true on a
+        query that executed fine.
+        """
+        from rdflib import Graph
+
+        bare = OBQCValidator()
+        bare.load_ontology(Graph(), "http://example.com/")
+
+        for label, validator in (
+            ("no ontology", OBQCValidator()),
+            ("ontology without oba: annotations", bare),
+        ):
+            with self.subTest(case=label):
+                report = validator.validate("SELECT id FROM orders").to_dict()[
+                    "obqc_fan_trap"
+                ]
+
+                self.assertFalse(report["evaluated"])
+                self.assertFalse(report["blocking"])
+
+    def test_clean_query_reports_no_fan_trap(self):
+        """The verdict is a field even when the answer is no."""
+        report = self.validator.validate("SELECT users.name FROM users").to_dict()[
+            "obqc_fan_trap"
+        ]
+
+        self.assertEqual(
+            report,
+            {
+                "evaluated": True,
+                "detected": False,
+                "blocking": False,
+                "findings": [],
+            },
+        )
 
 
 class TestWindowFunctions(unittest.TestCase):
