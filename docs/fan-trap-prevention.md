@@ -92,13 +92,13 @@ for measure_table, other in ((anchor, join_table), (join_table, anchor)):
 
 Both ends of every join are checked, so `FROM order_items JOIN orders` summing `orders.total` is caught exactly like `FROM orders JOIN order_items`, and the comma form (`FROM orders o, order_items i WHERE i.order_id = o.id`) is judged the same as the `ON` spelling.
 
-A measure taken from the many side is left alone, as are aggregates duplication cannot change: `MIN`, `MAX` and `COUNT(DISTINCT ...)` are exempt from all three rules. `COUNT(*)` never triggers the measure rule, since it names no table, but it still counts rows -- across two fan-out joins that is the product of the two children, so the weaker rules below still apply to it.
+Only the columns producing an aggregate's value count as measures, so `SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END)` measures `order_items` and merely filters on `orders`. A measure taken from the many side is left alone, as are aggregates duplication cannot change: `MIN`, `MAX` and `COUNT(DISTINCT ...)` are exempt from all three rules. `COUNT(*)` never triggers the measure rule, since it names no table, but it still counts rows -- across two fan-out joins that is the product of the two children, so the weaker rules below still apply to it.
 
 Two weaker findings follow: sibling facts the ontology declares `owl:disjointWith`, and the older heuristic of two or more one-to-many joins in one aggregating `SELECT`.
 
 The validator knows which relationships are one-to-many because the ontology stores `oba:relationshipType` annotations on every OWL ObjectProperty.
 
-Every response carries an `obqc_fan_trap` object (`{detected, blocking, findings}`) so a caller can read the verdict as data instead of parsing `warnings`. To run a flagged query anyway, pass `allow_fan_out=True` -- the finding is still reported, as a warning.
+Every response carries an `obqc_fan_trap` object (`{evaluated, detected, blocking, findings}`, where `evaluated: false` means the rules never ran and the verdict is unknown rather than clean) so a caller can read the verdict as data instead of parsing `warnings`. To run a flagged query anyway, pass `allow_fan_out=True` -- the finding is still reported, as a warning.
 
 ### Layer 3: GraphRAG Context Retrieval
 

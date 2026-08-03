@@ -192,6 +192,11 @@ class OBQCResult:
     # Whether a fan-trap finding blocks execution. False when the caller opted
     # in with allow_fan_out.
     fan_trap_blocking: bool = True
+    # Whether the fan-trap rules actually ran. False means "not checked", which
+    # is not the same answer as "nothing found" -- without it, a query validated
+    # with no ontology loaded reported detected=false and read as a clean bill
+    # of health.
+    fan_trap_evaluated: bool = False
     ontology_compatible: bool = True  # Whether ontology has oba: annotations
 
     # Keys of parsed_joins that belong in a response. Everything else the
@@ -231,6 +236,7 @@ class OBQCResult:
             "has_group_by": self.has_group_by,
             "fan_trap_risk": self.fan_trap_risk,
             "obqc_fan_trap": {
+                "evaluated": self.fan_trap_evaluated,
                 "detected": self.fan_trap_risk,
                 "blocking": self.fan_trap_blocking,
                 "findings": self.fan_trap_findings,
@@ -567,6 +573,10 @@ class OBQCValidator:
                 )
             )
             return result
+
+        # Past the guards: the rules below really run, so a "not detected"
+        # verdict from here on means the query was checked and came back clean.
+        result.fan_trap_evaluated = True
 
         # Extract query components. CTE names first: the rules below need to
         # know which references name a WITH alias rather than a real table.
@@ -1149,6 +1159,47 @@ class OBQCValidator:
             and not isinstance(agg.this, exp.Distinct)
         ]
 
+    @classmethod
+    def _value_columns(cls, expr: exp.Expr | None) -> list[exp.Column]:
+        """Columns that contribute to *expr*'s value, not to a condition in it.
+
+        A conditional aggregate reads its measure from the branches, never from
+        the test: in ``CASE WHEN a.flag THEN b.amount ELSE 0 END`` the value is
+        ``b.amount`` and ``a.flag`` only decides whether it is taken. Treating
+        both alike attributed the measure to the wrong table.
+
+        Args:
+            expr: Expression to walk, or None.
+
+        Returns:
+            The value-producing column references, in source order.
+        """
+        if expr is None:
+            return []
+
+        if isinstance(expr, exp.Column):
+            return [expr]
+
+        if isinstance(expr, exp.Case):
+            # CASE <operand> WHEN ... : the operand is half of a comparison,
+            # so it is a condition like the WHEN tests are.
+            columns: list[exp.Column] = []
+            for branch in expr.args.get("ifs") or []:
+                columns += cls._value_columns(branch.args.get("true"))
+            return columns + cls._value_columns(expr.args.get("default"))
+
+        if isinstance(expr, exp.If):
+            return cls._value_columns(expr.args.get("true")) + cls._value_columns(
+                expr.args.get("false")
+            )
+
+        columns = []
+        for value in expr.args.values():
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, exp.Expression):
+                    columns += cls._value_columns(item)
+        return columns
+
     def _measure_tables(
         self, select: exp.Select, alias_map: dict[str, str]
     ) -> set[str]:
@@ -1164,6 +1215,14 @@ class OBQCValidator:
         and a plain COUNT of a column are not. ``COUNT(*)`` names no table and
         so attributes to none -- counting joined rows is usually the intent.
 
+        Within an aggregate, only the columns that produce its *value* count.
+        A column tested in a condition contributes nothing to the total, so
+        ``SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0
+        END)`` measures order_items and merely filters on orders -- reading
+        every column under the aggregate blamed orders and blocked a safe
+        conditional aggregate, which is the shape the fan-trap guidance itself
+        recommends.
+
         Args:
             select: The SELECT to inspect.
             alias_map: This scope's alias -> table name map.
@@ -1174,7 +1233,7 @@ class OBQCValidator:
         tables: set[str] = set()
 
         for agg in self._duplication_sensitive_aggregates(select):
-            for column in agg.find_all(exp.Column):
+            for column in self._value_columns(agg):
                 if column.table:
                     resolved = alias_map.get(column.table.lower())
                     if resolved:

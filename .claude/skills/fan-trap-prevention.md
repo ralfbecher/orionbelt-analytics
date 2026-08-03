@@ -52,9 +52,10 @@ Before writing multi-table queries with aggregation:
    - Safe: measure taken from the **many** side (`SUM(order_items.qty)` across orders → order_items)
    - Fan-trap: measure taken from the **one** side across a 1:many join (`SUM(orders.total)` with order_items joined)
    - Fan-trap: multiple 1:many from the same parent
-3. **Let `execute_sql_query()` validate** — OBQC runs before execution and a fan-trap is a **blocking error**, not a warning. Read the `obqc_fan_trap` field on the response: `{detected, blocking, findings}`, where each finding names the `measure_table` being inflated and the `fan_out_table` doing it.
-4. **Fix the query, don't force it.** Pre-aggregate the fanning table in a CTE, or use UNION ALL. `allow_fan_out=True` exists for the rare case where the multiplied rows are genuinely wanted — it does not make the numbers right.
-5. **Validate results** against source tables
+3. **Conditional aggregates measure the branch, not the test.** `SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END)` measures `order_items`; the `orders` column only filters. Putting the parent's measure in the branch does still inflate.
+4. **Let `execute_sql_query()` validate** — OBQC runs before execution and a fan-trap is a **blocking error**, not a warning. Read the `obqc_fan_trap` field on the response: `{detected, blocking, findings}`, where each finding names the `measure_table` being inflated and the `fan_out_table` doing it. `evaluated: false` means OBQC never ran (no ontology loaded) — treat that as unknown, not as safe.
+5. **Fix the query, don't force it.** Pre-aggregate the fanning table in a CTE, or use UNION ALL. `allow_fan_out=True` exists for the rare case where the multiplied rows are genuinely wanted — it does not make the numbers right.
+6. **Validate results** against source tables
 
 ### Aggregates that survive a fan-out
 

@@ -226,6 +226,18 @@ A measure taken from the *many* side is fine, because the repeated rows are that
 SELECT s.id, SUM(sh.cost) FROM sales s JOIN shipments sh ON sh.sale_id = s.id GROUP BY s.id;
 ```
 
+Within an aggregate, only the columns producing its *value* are read as measures. A column tested in a condition contributes nothing to the total, so a conditional aggregate measures the branch, not the test:
+
+```sql
+-- OK: measures order_items, merely filters on orders
+SELECT o.id, SUM(CASE WHEN o.total > 100 THEN oi.quantity ELSE 0 END)
+FROM orders o JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id;
+
+-- ERROR: the branch itself is the parent's measure, so it still inflates
+SELECT o.id, SUM(CASE WHEN oi.quantity > 1 THEN o.total ELSE 0 END)
+FROM orders o JOIN order_items oi ON oi.order_id = o.id GROUP BY o.id;
+```
+
 Aggregates that duplication cannot change are left alone entirely -- `MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so no join shape makes them wrong and none of the three rules fires on a query that uses only those.
 
 `COUNT(*)` is a middle case. It names no table, so it never triggers this rule -- counting the joined rows is usually the intent. But it does count rows, so across *two* fan-out joins it returns the product of the two children and rules 2 and 3 below still apply.
@@ -244,6 +256,7 @@ Every `execute_sql_query` response carries `obqc_fan_trap`, whatever the outcome
 
 ```json
 {
+  "evaluated": true,
   "detected": true,
   "blocking": true,
   "findings": [
@@ -257,7 +270,11 @@ Every `execute_sql_query` response carries `obqc_fan_trap`, whatever the outcome
 }
 ```
 
-`kind` is one of `measure_across_fan_out`, `disjoint_facts`, or `multiple_fan_out_joins`. A clean query reports `{"detected": false, "blocking": true, "findings": []}` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
+`kind` is one of `measure_across_fan_out`, `disjoint_facts`, or `multiple_fan_out_joins`. A clean query reports `detected: false` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
+
+`evaluated` separates *checked and clean* from *never checked*, which are not the same answer. It is `false` when the rules never ran: no ontology loaded, an ontology without `oba:` annotations, or a request that failed before validation (no connection, bad limit, empty SQL, checklist not confirmed). **A caller must treat `evaluated: false` as "unknown", not as a clean bill of health** -- a query can run and return inflated numbers with `detected: false` when no ontology was loaded to check it against.
+
+The field is present on every `execute_sql_query` response, including those early failures, so reading it needs no special case.
 
 #### Running one anyway
 
@@ -272,7 +289,7 @@ OBQC results are returned as structured data in the tool response, not displayed
 - `obqc_valid`: overall pass/fail
 - `obqc_issues`: list of issues with type, severity, message, location, and suggestion
 - `fan_trap_risk`: boolean flag
-- `obqc_fan_trap`: `{detected, blocking, findings}` -- the fan-trap verdict as data, present on every response
+- `obqc_fan_trap`: `{evaluated, detected, blocking, findings}` -- the fan-trap verdict as data, present on every response
 - `obqc_error_count` / `obqc_warning_count`: summary counts
 
 When `execute_sql_query` blocks a query, the LLM sees the error details and suggestions, and can revise the SQL and retry -- often without the user ever seeing the failed attempt.

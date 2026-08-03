@@ -93,8 +93,68 @@ class TestFanTrapResponseField(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(
             result["obqc_fan_trap"],
-            {"detected": False, "blocking": True, "findings": []},
+            {
+                "evaluated": True,
+                "detected": False,
+                "blocking": True,
+                "findings": [],
+            },
         )
+
+    async def test_early_failures_still_carry_the_verdict(self):
+        """Every response has the field, so a caller needs no special case.
+
+        These paths returned before it was attached, so a client reading
+        `obqc_fan_trap` had to guard against its absence.
+        """
+        no_connection = MagicMock()
+        no_connection.has_engine.return_value = False
+        services = HandlerContext(get_session_db_manager=lambda ctx: no_connection)
+
+        cases = {
+            "no connection": (CLEAN_SQL, 100, True),
+            "bad limit": (CLEAN_SQL, 0, True),
+            "empty sql": ("   ", 100, True),
+            "checklist not completed": (CLEAN_SQL, 100, False),
+        }
+        for label, (sql, limit, checklist) in cases.items():
+            with self.subTest(case=label):
+                connected = MagicMock()
+                connected.has_engine.return_value = label != "no connection"
+                result = await execute_sql_query(
+                    self.ctx,
+                    sql,
+                    limit,
+                    checklist,
+                    None,
+                    (
+                        HandlerContext(get_session_db_manager=lambda ctx: connected)
+                        if label != "no connection"
+                        else services
+                    ),
+                )
+
+                self.assertFalse(result["success"])
+                self.assertIn("obqc_fan_trap", result)
+                self.assertFalse(result["obqc_fan_trap"]["evaluated"])
+
+    async def test_no_ontology_reports_not_evaluated(self):
+        """ "Not checked" must not read as "checked and clean".
+
+        Without an ontology OBQC never runs, but the query still executes and
+        succeeds -- exactly the case where a caller keying off the field would
+        otherwise be told there is no fan-trap.
+        """
+        services, db_manager = _services(None)
+
+        result = await execute_sql_query(
+            self.ctx, FAN_TRAP_SQL, 100, True, None, services
+        )
+
+        self.assertTrue(result["success"])
+        db_manager.execute_sql_query.assert_called_once()
+        self.assertFalse(result["obqc_fan_trap"]["evaluated"])
+        self.assertFalse(result["obqc_fan_trap"]["detected"])
 
     async def test_string_allow_fan_out_is_coerced(self):
         """MCP clients sometimes send booleans as strings."""

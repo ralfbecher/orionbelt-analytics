@@ -1721,6 +1721,48 @@ class TestSingleFanOutMeasure(unittest.TestCase):
 
         self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
 
+    def test_a_column_only_tested_in_a_condition_is_not_a_measure(self):
+        """A CASE test decides whether the value is taken, it is not the value.
+
+        Reading every column under the aggregate blamed the table named in the
+        WHEN clause, blocking a safe conditional aggregate -- the shape the
+        fan-trap guidance itself recommends.
+        """
+        result = self.validator.validate(
+            "SELECT orders.id, "
+            "SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_measure_inside_a_case_is_still_a_measure(self):
+        """Both branches produce the value, so both are read."""
+        for branch in (
+            "CASE WHEN order_items.quantity > 1 THEN orders.total ELSE 0 END",
+            "CASE WHEN order_items.quantity > 1 THEN 0 ELSE orders.total END",
+            "IF(order_items.quantity > 1, orders.total, 0)",
+        ):
+            with self.subTest(branch=branch):
+                result = self.validator.validate(
+                    f"SELECT orders.id, SUM({branch}) "
+                    "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+                    "GROUP BY orders.id"
+                )
+
+                self.assertTrue(result.fan_trap_risk)
+
+    def test_arithmetic_on_a_one_side_column_is_a_measure(self):
+        """Multiplying by a repeated column inflates just as summing it does."""
+        result = self.validator.validate(
+            "SELECT orders.id, SUM(order_items.quantity * orders.total) "
+            "FROM orders JOIN order_items ON order_items.order_id = orders.id "
+            "GROUP BY orders.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+
     def test_finding_is_structured_not_prose(self):
         result = self.validator.validate(
             "SELECT SUM(orders.total) FROM orders "
@@ -1728,6 +1770,7 @@ class TestSingleFanOutMeasure(unittest.TestCase):
         )
 
         report = result.to_dict()["obqc_fan_trap"]
+        self.assertTrue(report["evaluated"])
         self.assertTrue(report["detected"])
         self.assertTrue(report["blocking"])
         self.assertEqual(
@@ -1768,7 +1811,15 @@ class TestSingleFanOutMeasure(unittest.TestCase):
             "obqc_fan_trap"
         ]
 
-        self.assertEqual(report, {"detected": False, "blocking": True, "findings": []})
+        self.assertEqual(
+            report,
+            {
+                "evaluated": True,
+                "detected": False,
+                "blocking": True,
+                "findings": [],
+            },
+        )
 
 
 class TestWindowFunctions(unittest.TestCase):

@@ -231,43 +231,59 @@ async def execute_sql_query(
         if isinstance(allow_fan_out, str):
             allow_fan_out = allow_fan_out.lower() in ("true", "1", "yes")
 
-        db_manager = services.get_session_db_manager(ctx)
-
-        if not db_manager.has_engine():
-            return ConnectionError(
-                "No database connection established. Please use connect_database tool first to establish a connection to PostgreSQL, Snowflake, or Dremio.",
-                details="Available connection methods: connect_database('postgresql'), connect_database('snowflake'), connect_database('dremio')",
-            ).to_response()
-
-        if limit <= 0 or limit > 5000:
-            return ParameterError(
-                f"Invalid limit value '{limit}'. Must be between 1 and 5000.",
-                details="Use a reasonable limit to prevent memory exhaustion while allowing comprehensive analysis.",
-            ).to_response()
-
-        if not sql_query or not sql_query.strip():
-            return ParameterError(
-                "SQL query cannot be empty.",
-                details="Provide a valid SELECT statement or schema introspection query.",
-            ).to_response()
-
-        if not checklist_completed:
-            return ValidationError(
-                "ERROR: PRE-EXECUTION CHECKLIST NOT COMPLETED.\nSee tool description for required steps.",
-                details="You must complete the pre-execution checklist before executing SQL queries. Review the tool documentation for required steps.",
-            ).to_response()
-
-        # OBQC validation (fan-trap detection, ontology-aware checks)
-        obqc_warnings = []
-        # Structured fan-trap verdict, carried onto the response whatever the
-        # outcome. A consumer that keys off fields rather than reading prose
-        # must be able to see a corrupted aggregate, and the success path used
-        # to say nothing at all.
+        # Structured fan-trap verdict, carried onto every response this tool
+        # returns, so a caller reading fields never needs a special case for
+        # the paths that bail out early. "evaluated" separates "checked and
+        # clean" from "never checked" -- without it, a query run with no
+        # ontology loaded reported detected=false and read as a clean bill of
+        # health.
         fan_trap_report: dict[str, Any] = {
+            "evaluated": False,
             "detected": False,
             "blocking": not allow_fan_out,
             "findings": [],
         }
+
+        def _with_verdict(response: dict[str, Any]) -> dict[str, Any]:
+            response["obqc_fan_trap"] = fan_trap_report
+            return response
+
+        db_manager = services.get_session_db_manager(ctx)
+
+        if not db_manager.has_engine():
+            return _with_verdict(
+                ConnectionError(
+                    "No database connection established. Please use connect_database tool first to establish a connection to PostgreSQL, Snowflake, or Dremio.",
+                    details="Available connection methods: connect_database('postgresql'), connect_database('snowflake'), connect_database('dremio')",
+                ).to_response()
+            )
+
+        if limit <= 0 or limit > 5000:
+            return _with_verdict(
+                ParameterError(
+                    f"Invalid limit value '{limit}'. Must be between 1 and 5000.",
+                    details="Use a reasonable limit to prevent memory exhaustion while allowing comprehensive analysis.",
+                ).to_response()
+            )
+
+        if not sql_query or not sql_query.strip():
+            return _with_verdict(
+                ParameterError(
+                    "SQL query cannot be empty.",
+                    details="Provide a valid SELECT statement or schema introspection query.",
+                ).to_response()
+            )
+
+        if not checklist_completed:
+            return _with_verdict(
+                ValidationError(
+                    "ERROR: PRE-EXECUTION CHECKLIST NOT COMPLETED.\nSee tool description for required steps.",
+                    details="You must complete the pre-execution checklist before executing SQL queries. Review the tool documentation for required steps.",
+                ).to_response()
+            )
+
+        # OBQC validation (fan-trap detection, ontology-aware checks)
+        obqc_warnings = []
         obqc_validator = services.get_session_obqc_validator(ctx)
         if obqc_validator:
             db_type = db_manager.connection_info.get("type", "postgresql")
@@ -381,4 +397,12 @@ async def execute_sql_query(
             "internal_error",
             "This may indicate a system-level issue. Please check server logs and try again.",
         )
+        # The failure may have happened before, during or after validation, so
+        # the honest verdict here is "not evaluated".
+        err["obqc_fan_trap"] = {
+            "evaluated": False,
+            "detected": False,
+            "blocking": not allow_fan_out,
+            "findings": [],
+        }
         return err
