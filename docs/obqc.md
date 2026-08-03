@@ -254,7 +254,7 @@ FROM orders o JOIN order_items i ON i.order_id = o.id;
 
 This one is **reported without blocking**, because the SQL does not say which count was meant. The identical shape is a ubiquitous correct idiom in a star join -- `SUM(CASE WHEN u.segment = 'SMB' THEN 1 ELSE 0 END)` over `orders JOIN users` counts orders, which is exactly right, and reads as an inflated count of users only if that is what you wanted. Blocking it would reject ordinary analytics SQL, so OBQC states the ambiguity and leaves the call to you.
 
-Only conditions naming a single table qualify. One that also names the child counts at the child's grain, which no join corrupts, and an unconditional `COUNT(*)` names nothing at all.
+Only conditions naming a single table qualify. One that also names the child counts at the child's grain, which no join corrupts, and an unconditional `COUNT(*)` names nothing at all. Unqualified condition columns resolve the same way value columns do -- against the tables in scope, and only when exactly one of them declares the name.
 
 **2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
 

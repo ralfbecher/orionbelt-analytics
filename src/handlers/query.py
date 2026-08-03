@@ -323,9 +323,11 @@ async def execute_sql_query(
                         msg += f" — {issue.suggestion}"
                     obqc_warnings.append(msg)
 
-            if obqc_result.fan_trap_risk:
-                # Only reachable with allow_fan_out: otherwise a fan-trap is an
-                # error and the query never got here.
+            if obqc_result.fan_trap_overridden:
+                # Only when allow_fan_out actually downgraded a blocking
+                # finding. Keyed off fan_trap_risk, this also fired for
+                # findings that never block, telling a caller who passed
+                # nothing that they had accepted a risk.
                 obqc_warnings.append(
                     "[OBQC] FAN-TRAP RISK accepted via allow_fan_out: aggregates "
                     "read across a 1:many join and are inflated. See "

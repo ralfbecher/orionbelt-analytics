@@ -156,6 +156,35 @@ class TestFanTrapResponseField(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["obqc_fan_trap"]["evaluated"])
         self.assertFalse(result["obqc_fan_trap"]["detected"])
 
+    async def test_warning_only_finding_claims_no_override(self):
+        """The response must not say a risk was accepted via allow_fan_out.
+
+        A conditional row count warns without blocking and without the caller
+        passing anything, so the generic acceptance line does not belong.
+        """
+        services, _ = _services(self.validator)
+
+        result = await execute_sql_query(
+            self.ctx,
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id",
+            100,
+            True,
+            None,
+            services,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["obqc_fan_trap"]["detected"])
+        self.assertFalse(result["obqc_fan_trap"]["blocking"])
+        self.assertFalse(
+            any("allow_fan_out" in w for w in result["warnings"]), result["warnings"]
+        )
+        self.assertTrue(
+            any("Conditional count" in w for w in result["warnings"]),
+            result["warnings"],
+        )
+
     async def test_string_allow_fan_out_is_coerced(self):
         """MCP clients sometimes send booleans as strings."""
         services, db_manager = _services(self.validator)

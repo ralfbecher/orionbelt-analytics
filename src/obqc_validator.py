@@ -197,6 +197,11 @@ class OBQCResult:
     # with no ontology loaded reported detected=false and read as a clean bill
     # of health.
     fan_trap_evaluated: bool = False
+    # Whether allow_fan_out actually downgraded a finding that would otherwise
+    # have blocked. Distinct from fan_trap_risk, which is also true for
+    # findings that never block, so a caller who passed nothing is not told
+    # they accepted a risk.
+    fan_trap_overridden: bool = False
     ontology_compatible: bool = True  # Whether ontology has oba: annotations
 
     # Keys of parsed_joins that belong in a response. Everything else the
@@ -1271,15 +1276,24 @@ class OBQCValidator:
         for agg in self._duplication_sensitive_aggregates(select):
             if self._value_columns(agg):
                 continue
-            condition_tables = {
-                resolved
-                for column in self._condition_columns(agg)
-                if column.table
-                for resolved in [alias_map.get(column.table.lower())]
-                if resolved
-            }
+            condition_tables: set[str] = set()
+            for column in self._condition_columns(agg):
+                if column.table:
+                    resolved = alias_map.get(column.table.lower())
+                    if resolved:
+                        condition_tables.add(resolved.lower())
+                    continue
+
+                # Unqualified, exactly as the value side handles it: attribute
+                # only when a single table in scope declares the name. Reading
+                # qualified names alone missed the same risky query written
+                # without the prefix.
+                owners = self._tables_declaring(column.name, alias_map)
+                if len(owners) == 1:
+                    condition_tables.add(owners[0])
+
             if len(condition_tables) == 1:
-                counted.add(next(iter(condition_tables)).lower())
+                counted.add(next(iter(condition_tables)))
 
         return counted
 
@@ -2393,6 +2407,14 @@ class OBQCValidator:
                 annotates it (WARNING).
         """
         severity = OBQCSeverity.ERROR if blocking else OBQCSeverity.WARNING
+
+        def record(finding: dict[str, Any]) -> None:
+            """Note a finding of a kind that blocks unless allow_fan_out was set."""
+            result.fan_trap_risk = True
+            result.fan_trap_findings.append(finding)
+            if not blocking:
+                result.fan_trap_overridden = True
+
         # Only joins whose own SELECT aggregates can inflate a total. The
         # query-wide flag is true if an aggregate appears anywhere, so an
         # unrelated subquery's COUNT(*) used to raise a fan-trap warning about
@@ -2418,9 +2440,8 @@ class OBQCValidator:
         # the same SELECT repeats its rows. One such join is enough.
         inflated = self._inflated_measures(result)
         if inflated:
-            result.fan_trap_risk = True
-            result.fan_trap_findings.extend(inflated)
             for finding in inflated:
+                record(finding)
                 measure = anchor = finding["measure_table"]
                 fanning = finding["fan_out_table"]
                 result.issues.append(
@@ -2457,14 +2478,8 @@ class OBQCValidator:
             queried = {t.lower() for t in scope}
             disjoint_hits |= {pair for pair in self._disjoint_pairs if pair <= queried}
         if disjoint_hits:
-            result.fan_trap_risk = True
             involved = sorted({t for pair in disjoint_hits for t in pair})
-            result.fan_trap_findings.append(
-                {
-                    "kind": "disjoint_facts",
-                    "tables": involved,
-                }
-            )
+            record({"kind": "disjoint_facts", "tables": involved})
             result.issues.append(
                 OBQCIssue(
                     issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
@@ -2558,8 +2573,7 @@ class OBQCValidator:
         involved_tables = worst_scope
 
         if one_to_many_count >= 2:
-            result.fan_trap_risk = True
-            result.fan_trap_findings.append(
+            record(
                 {
                     "kind": "multiple_fan_out_joins",
                     "tables": sorted(set(involved_tables)),

@@ -1813,6 +1813,55 @@ class TestSingleFanOutMeasure(unittest.TestCase):
                     result.fan_trap_risk, [i.message for i in result.issues]
                 )
 
+    def test_unqualified_condition_column_is_attributed(self):
+        """The same risky count written without the table prefix.
+
+        Reading qualified names only missed it, while the qualified spelling
+        was reported -- the value side already resolved unqualified names this
+        way.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertEqual(
+            [f["measure_table"] for f in result.fan_trap_findings], ["orders"]
+        )
+
+    def test_an_ambiguous_unqualified_condition_is_left_alone(self):
+        """order_id is declared by both tables, so it names neither grain."""
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN order_id > 1 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertFalse(result.fan_trap_risk, [i.message for i in result.issues])
+
+    def test_a_warning_only_finding_is_not_an_override(self):
+        """Nothing was downgraded, so the caller accepted nothing.
+
+        Keyed off fan_trap_risk, the response told a caller who passed no
+        allow_fan_out that they had accepted the risk with it.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertFalse(result.fan_trap_overridden)
+
+    def test_allow_fan_out_on_a_blocking_finding_is_an_override(self):
+        result = self.validator.validate(
+            "SELECT SUM(o.total) FROM orders o "
+            "JOIN order_items i ON i.order_id = o.id",
+            allow_fan_out=True,
+        )
+
+        self.assertTrue(result.fan_trap_overridden)
+
     def test_star_join_conditional_count_is_not_blocked(self):
         """The ubiquitous idiom: count facts matching a dimension predicate.
 
