@@ -57,6 +57,12 @@ Before writing multi-table queries with aggregation:
 5. **Fix the query, don't force it.** Pre-aggregate the fanning table in a CTE, or use UNION ALL. `allow_fan_out=True` exists for the rare case where the multiplied rows are genuinely wanted — it does not make the numbers right.
 6. **Validate results** against source tables
 
+### Conditional row counts
+
+`SUM(CASE WHEN <table> … THEN 1 ELSE 0 END)` and `COUNT(*) FILTER (WHERE <table> …)` count *rows*, and a join repeats the rows of whatever the condition names. OBQC **warns without blocking** here, because the SQL cannot say which count you meant — over `orders JOIN order_items` a condition on `orders` counts items, not orders; over `orders JOIN users` a condition on `users` counts orders, which is usually exactly right.
+
+If you meant the coarser count, use `COUNT(DISTINCT <table>.<key>)` or filter with `EXISTS` instead of joining.
+
 ### Aggregates that survive a fan-out
 
 `MIN`, `MAX` and `COUNT(DISTINCT ...)` read the same answer off repeated rows, so OBQC never blocks a query that aggregates only with those — no join shape makes them wrong.

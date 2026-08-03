@@ -599,6 +599,15 @@ class OBQCValidator:
             issue.severity == OBQCSeverity.ERROR for issue in result.issues
         )
 
+        # Whether the fan-trap verdict actually stopped the query, rather than
+        # just what the caller asked for: an ambiguous conditional count is
+        # reported without blocking even when blocking is on.
+        result.fan_trap_blocking = any(
+            issue.issue_type == OBQCIssueType.FAN_TRAP_DETECTED
+            and issue.severity == OBQCSeverity.ERROR
+            for issue in result.issues
+        )
+
         return result
 
     def _extract_ctes(self, parsed: exp.Expr, result: OBQCResult) -> None:
@@ -999,6 +1008,9 @@ class OBQCValidator:
             # Tables whose columns this SELECT adds up. A join can only report
             # a wrong number if it multiplies rows a measure is taken from.
             measure_tables = self._measure_tables(select, alias_map)
+            # Tables a constant-valued conditional aggregate counts by. Judged
+            # separately: those are ambiguous rather than provably wrong.
+            counted_tables = self._counted_tables(select, alias_map)
 
             for join in select.args.get("joins") or []:
                 join_info: dict[str, Any] = {
@@ -1019,6 +1031,7 @@ class OBQCValidator:
                     "on_tables": [],
                     # Tables this SELECT sums or averages over, lower-cased.
                     "measure_tables": measure_tables,
+                    "counted_tables": counted_tables,
                 }
 
                 # How to name this join in a message. A joined subquery has
@@ -1199,6 +1212,76 @@ class OBQCValidator:
                 if isinstance(item, exp.Expression):
                     columns += cls._value_columns(item)
         return columns
+
+    @classmethod
+    def _condition_columns(cls, agg: exp.Expr) -> list[exp.Column]:
+        """Columns an aggregate only tests, rather than reads a value from.
+
+        Includes a trailing ``FILTER (WHERE ...)``, which lives on the parent
+        node and is the same construct as a CASE test written another way.
+
+        Args:
+            agg: The aggregate call.
+
+        Returns:
+            Its condition-only column references.
+        """
+        value_ids = {id(column) for column in cls._value_columns(agg)}
+        columns = [c for c in agg.find_all(exp.Column) if id(c) not in value_ids]
+
+        parent = agg.parent
+        if isinstance(parent, exp.Filter):
+            where = parent.args.get("expression")
+            if isinstance(where, exp.Expression):
+                columns += list(where.find_all(exp.Column))
+
+        return columns
+
+    def _counted_tables(
+        self, select: exp.Select, alias_map: dict[str, str]
+    ) -> set[str]:
+        """Tables a constant-valued conditional aggregate counts rows by.
+
+        ``SUM(CASE WHEN orders.total > 100 THEN 1 ELSE 0 END)`` is COUNT(*)
+        over the rows where that holds. It has no measure column, so the
+        measure rule cannot see it, yet a join that repeats orders repeats the
+        count too -- three for a single qualifying order.
+
+        What it *should* count is not decidable from the SQL. The same shape is
+        a ubiquitous correct idiom in a star join: over ``orders JOIN users``,
+        ``SUM(CASE WHEN users.segment = 'SMB' THEN 1 ELSE 0 END)`` counts
+        orders, which is exactly right, and reads as an inflated count of users
+        only if that is what you meant. Both are "count the fine-grained rows
+        matching a coarse predicate", so callers get a warning rather than a
+        block.
+
+        Only conditions naming a single table qualify. One that also names the
+        child counts at the child's grain, which no join corrupts, and an
+        unconditional COUNT(*) names nothing at all.
+
+        Args:
+            select: The SELECT to inspect.
+            alias_map: This scope's alias -> table name map.
+
+        Returns:
+            Lower-cased table names such counts are conditioned on.
+        """
+        counted: set[str] = set()
+
+        for agg in self._duplication_sensitive_aggregates(select):
+            if self._value_columns(agg):
+                continue
+            condition_tables = {
+                resolved
+                for column in self._condition_columns(agg)
+                if column.table
+                for resolved in [alias_map.get(column.table.lower())]
+                if resolved
+            }
+            if len(condition_tables) == 1:
+                counted.add(next(iter(condition_tables)).lower())
+
+        return counted
 
     def _measure_tables(
         self, select: exp.Select, alias_map: dict[str, str]
@@ -2209,7 +2292,12 @@ class OBQCValidator:
 
         return False
 
-    def _inflated_measures(self, result: OBQCResult) -> list[dict[str, Any]]:
+    def _inflated_measures(
+        self,
+        result: OBQCResult,
+        key: str = "measure_tables",
+        kind: str = "measure_across_fan_out",
+    ) -> list[dict[str, Any]]:
         """Joins that repeat rows a measure in the same SELECT is taken from.
 
         The single-child fan trap: ``FROM sales JOIN shipments ON
@@ -2228,6 +2316,10 @@ class OBQCValidator:
 
         Args:
             result: Result carrying the extracted joins.
+            key: Which per-scope table set to read -- the measures an
+                aggregate takes its value from, or the tables a constant-valued
+                conditional aggregate counts by.
+            kind: Value for the finding's ``kind`` field.
 
         Returns:
             One finding per (measure table, fan-out table) pair, deduplicated.
@@ -2240,7 +2332,7 @@ class OBQCValidator:
                 continue
 
             join_table = join_info.get("table")
-            measures = join_info.get("measure_tables") or set()
+            measures = join_info.get(key) or set()
             if not join_table or not measures:
                 continue
 
@@ -2263,13 +2355,13 @@ class OBQCValidator:
                     if not self._join_fans_out(other, measure_table):
                         continue
 
-                    key = (measure_table.lower(), other.lower())
-                    if key in seen:
+                    pair = (measure_table.lower(), other.lower())
+                    if pair in seen:
                         continue
-                    seen.add(key)
+                    seen.add(pair)
                     findings.append(
                         {
-                            "kind": "measure_across_fan_out",
+                            "kind": kind,
                             "measure_table": measure_table,
                             "fan_out_table": other,
                             "tables": sorted({measure_table, other}),
@@ -2432,6 +2524,34 @@ class OBQCValidator:
             if any(self._join_fans_out(join_table, anchor) for anchor in anchors):
                 scope_id = join_info.get("scope_id")
                 fan_outs_by_scope.setdefault(scope_id, []).append(join_table)
+
+        # Ambiguous counts, reported but never blocking -- see _counted_tables
+        # for why the same shape is both a bug and a common correct idiom.
+        counts = self._inflated_measures(
+            result, key="counted_tables", kind="conditional_row_count"
+        )
+        for finding in counts:
+            result.fan_trap_risk = True
+            result.fan_trap_findings.append(finding)
+            counted, fanning = finding["measure_table"], finding["fan_out_table"]
+            result.issues.append(
+                OBQCIssue(
+                    issue_type=OBQCIssueType.FAN_TRAP_DETECTED,
+                    severity=OBQCSeverity.WARNING,
+                    message=(
+                        f"Conditional count over '{counted}', whose rows the join to "
+                        f"'{fanning}' repeats. This counts {fanning} rows matching a "
+                        f"{counted} condition, not {counted} rows -- correct if that "
+                        "is what you meant, inflated if it is not."
+                    ),
+                    location="Query structure",
+                    suggestion=(
+                        f"To count {counted} rows, use COUNT(DISTINCT {counted}.<key>) "
+                        f"or filter with EXISTS instead of joining {fanning}."
+                    ),
+                    related_entities=sorted({counted, fanning}),
+                )
+            )
 
         worst_scope = max(fan_outs_by_scope.values(), key=len, default=[])
         one_to_many_count = len(worst_scope)

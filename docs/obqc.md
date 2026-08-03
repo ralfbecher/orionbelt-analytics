@@ -244,6 +244,18 @@ Aggregates that duplication cannot change are left alone entirely -- `MIN`, `MAX
 
 The comma form is judged identically: `FROM orders o, order_items i WHERE i.order_id = o.id` states the same join as the `ON` spelling and inflates the same way.
 
+**1b. A conditional row count over a repeated table (WARNING, never blocks).** A constant-valued conditional aggregate -- `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, or the same thing as `COUNT(*) FILTER (WHERE …)` -- has no measure column, but the join still repeats what it counts:
+
+```sql
+-- WARNING: counts order_items rows matching an orders condition, not orders rows
+SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END)
+FROM orders o JOIN order_items i ON i.order_id = o.id;
+```
+
+This one is **reported without blocking**, because the SQL does not say which count was meant. The identical shape is a ubiquitous correct idiom in a star join -- `SUM(CASE WHEN u.segment = 'SMB' THEN 1 ELSE 0 END)` over `orders JOIN users` counts orders, which is exactly right, and reads as an inflated count of users only if that is what you wanted. Blocking it would reject ordinary analytics SQL, so OBQC states the ambiguity and leaves the call to you.
+
+Only conditions naming a single table qualify. One that also names the child counts at the child's grain, which no join corrupts, and an unconditional `COUNT(*)` names nothing at all.
+
 **2. Disjoint sibling facts**, read from the ontology's own `owl:disjointWith` axioms: two facts at different grains sharing a dimension.
 
 **3. Two or more fan-out joins** in one aggregating `SELECT` -- the heuristic fallback for ontologies carrying no disjointness axioms.
@@ -270,7 +282,9 @@ Every `execute_sql_query` response carries `obqc_fan_trap`, whatever the outcome
 }
 ```
 
-`kind` is one of `measure_across_fan_out`, `disjoint_facts`, or `multiple_fan_out_joins`. A clean query reports `detected: false` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
+`kind` is one of `measure_across_fan_out`, `conditional_row_count`, `disjoint_facts`, or `multiple_fan_out_joins`.
+
+`blocking` says whether this verdict actually stopped the query, not what the caller asked for: it is `false` for a clean query, `false` when `allow_fan_out` was passed, and `false` for a `conditional_row_count`, which reports without blocking even under the default policy. A clean query reports `detected: false` -- so "no fan-trap" is an answer to read rather than the absence of a sentence.
 
 `evaluated` separates *checked and clean* from *never checked*, which are not the same answer. It is `false` when the rules never ran: no ontology loaded, an ontology without `oba:` annotations, or a request that failed before validation (no connection, bad limit, empty SQL, checklist not confirmed). **A caller must treat `evaluated: false` as "unknown", not as a clean bill of health** -- a query can run and return inflated numbers with `detected: false` when no ontology was loaded to check it against.
 

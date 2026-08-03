@@ -240,7 +240,8 @@ async def execute_sql_query(
         fan_trap_report: dict[str, Any] = {
             "evaluated": False,
             "detected": False,
-            "blocking": not allow_fan_out,
+            # Nothing was checked, so nothing blocked on this account.
+            "blocking": False,
             "findings": [],
         }
 
@@ -402,7 +403,7 @@ async def execute_sql_query(
         err["obqc_fan_trap"] = {
             "evaluated": False,
             "detected": False,
-            "blocking": not allow_fan_out,
+            "blocking": False,
             "findings": [],
         }
         return err

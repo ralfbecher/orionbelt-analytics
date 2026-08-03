@@ -1763,6 +1763,70 @@ class TestSingleFanOutMeasure(unittest.TestCase):
 
         self.assertTrue(result.fan_trap_risk)
 
+    def test_conditional_row_count_is_reported_but_not_blocked(self):
+        """A constant-valued conditional aggregate is a filtered row count.
+
+        It has no measure column, so the measure rule cannot see it, yet the
+        join repeats what it counts. Whether that is wrong is not decidable
+        from the SQL -- the same shape is a correct star-join idiom -- so it is
+        reported without blocking. Checked against DuckDB: 3 for a single
+        qualifying order.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN o.total > 100 THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertTrue(result.is_valid)
+        self.assertEqual(
+            [f["kind"] for f in result.fan_trap_findings], ["conditional_row_count"]
+        )
+        self.assertFalse(result.to_dict()["obqc_fan_trap"]["blocking"])
+
+    def test_count_star_filter_is_the_same_construct(self):
+        """FILTER (WHERE ...) is a CASE test written another way."""
+        result = self.validator.validate(
+            "SELECT COUNT(*) FILTER (WHERE o.total > 100) "
+            "FROM orders o JOIN order_items i ON i.order_id = o.id"
+        )
+
+        self.assertTrue(result.fan_trap_risk)
+        self.assertTrue(result.is_valid)
+
+    def test_a_count_conditioned_on_the_child_is_clean(self):
+        """Counting at the child's grain is what the join already produces."""
+        for aggregate in (
+            "SUM(CASE WHEN i.quantity > 1 THEN 1 ELSE 0 END)",
+            "COUNT(*) FILTER (WHERE i.quantity > 1)",
+            # Naming both sides counts child rows too.
+            "SUM(CASE WHEN o.total > 100 AND i.quantity > 1 THEN 1 ELSE 0 END)",
+            "COUNT(*)",
+        ):
+            with self.subTest(aggregate=aggregate):
+                result = self.validator.validate(
+                    f"SELECT {aggregate} "
+                    "FROM orders o JOIN order_items i ON i.order_id = o.id"
+                )
+
+                self.assertFalse(
+                    result.fan_trap_risk, [i.message for i in result.issues]
+                )
+
+    def test_star_join_conditional_count_is_not_blocked(self):
+        """The ubiquitous idiom: count facts matching a dimension predicate.
+
+        Structurally identical to the case above -- the dimension's rows are
+        repeated by the fact join -- but here the repeated reading is the one
+        nobody means. Blocking it would reject ordinary analytics SQL.
+        """
+        result = self.validator.validate(
+            "SELECT SUM(CASE WHEN u.name = 'x' THEN 1 ELSE 0 END) "
+            "FROM orders o JOIN users u ON o.user_id = u.id"
+        )
+
+        self.assertTrue(result.is_valid)
+
     def test_finding_is_structured_not_prose(self):
         result = self.validator.validate(
             "SELECT SUM(orders.total) FROM orders "
@@ -1816,7 +1880,7 @@ class TestSingleFanOutMeasure(unittest.TestCase):
             {
                 "evaluated": True,
                 "detected": False,
-                "blocking": True,
+                "blocking": False,
                 "findings": [],
             },
         )

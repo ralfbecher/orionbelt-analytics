@@ -96,7 +96,7 @@ class TestFanTrapResponseField(unittest.IsolatedAsyncioTestCase):
             {
                 "evaluated": True,
                 "detected": False,
-                "blocking": True,
+                "blocking": False,
                 "findings": [],
             },
         )
