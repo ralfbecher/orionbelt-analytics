@@ -208,6 +208,7 @@ async def execute_sql_query(
     checklist_completed: bool | str,
     query_intent: str | None,
     services: "HandlerContext",
+    allow_fan_out: bool | str = False,
 ) -> dict[str, Any]:
     """Execute SQL query with built-in validation and fan-trap protection.
 
@@ -217,6 +218,8 @@ async def execute_sql_query(
         limit: Maximum rows to return
         checklist_completed: Pre-execution checklist confirmation
         query_intent: Natural language query description
+        allow_fan_out: Run the query even if OBQC finds a fan-trap. The finding
+            is still reported, as a warning rather than a blocking error.
         get_session_data: Function to get session data
         get_session_db_manager: Function to get session db manager
         get_session_obqc_validator: Function to get OBQC validator
@@ -225,39 +228,70 @@ async def execute_sql_query(
     try:
         if isinstance(checklist_completed, str):
             checklist_completed = checklist_completed.lower() in ("true", "1", "yes")
+        if isinstance(allow_fan_out, str):
+            allow_fan_out = allow_fan_out.lower() in ("true", "1", "yes")
+
+        # Structured fan-trap verdict, carried onto every response this tool
+        # returns, so a caller reading fields never needs a special case for
+        # the paths that bail out early. "evaluated" separates "checked and
+        # clean" from "never checked" -- without it, a query run with no
+        # ontology loaded reported detected=false and read as a clean bill of
+        # health.
+        fan_trap_report: dict[str, Any] = {
+            "evaluated": False,
+            "detected": False,
+            # Nothing was checked, so nothing blocked on this account.
+            "blocking": False,
+            "findings": [],
+        }
+
+        def _with_verdict(response: dict[str, Any]) -> dict[str, Any]:
+            response["obqc_fan_trap"] = fan_trap_report
+            return response
 
         db_manager = services.get_session_db_manager(ctx)
 
         if not db_manager.has_engine():
-            return ConnectionError(
-                "No database connection established. Please use connect_database tool first to establish a connection to PostgreSQL, Snowflake, or Dremio.",
-                details="Available connection methods: connect_database('postgresql'), connect_database('snowflake'), connect_database('dremio')",
-            ).to_response()
+            return _with_verdict(
+                ConnectionError(
+                    "No database connection established. Please use connect_database tool first to establish a connection to PostgreSQL, Snowflake, or Dremio.",
+                    details="Available connection methods: connect_database('postgresql'), connect_database('snowflake'), connect_database('dremio')",
+                ).to_response()
+            )
 
         if limit <= 0 or limit > 5000:
-            return ParameterError(
-                f"Invalid limit value '{limit}'. Must be between 1 and 5000.",
-                details="Use a reasonable limit to prevent memory exhaustion while allowing comprehensive analysis.",
-            ).to_response()
+            return _with_verdict(
+                ParameterError(
+                    f"Invalid limit value '{limit}'. Must be between 1 and 5000.",
+                    details="Use a reasonable limit to prevent memory exhaustion while allowing comprehensive analysis.",
+                ).to_response()
+            )
 
         if not sql_query or not sql_query.strip():
-            return ParameterError(
-                "SQL query cannot be empty.",
-                details="Provide a valid SELECT statement or schema introspection query.",
-            ).to_response()
+            return _with_verdict(
+                ParameterError(
+                    "SQL query cannot be empty.",
+                    details="Provide a valid SELECT statement or schema introspection query.",
+                ).to_response()
+            )
 
         if not checklist_completed:
-            return ValidationError(
-                "ERROR: PRE-EXECUTION CHECKLIST NOT COMPLETED.\nSee tool description for required steps.",
-                details="You must complete the pre-execution checklist before executing SQL queries. Review the tool documentation for required steps.",
-            ).to_response()
+            return _with_verdict(
+                ValidationError(
+                    "ERROR: PRE-EXECUTION CHECKLIST NOT COMPLETED.\nSee tool description for required steps.",
+                    details="You must complete the pre-execution checklist before executing SQL queries. Review the tool documentation for required steps.",
+                ).to_response()
+            )
 
         # OBQC validation (fan-trap detection, ontology-aware checks)
         obqc_warnings = []
         obqc_validator = services.get_session_obqc_validator(ctx)
         if obqc_validator:
             db_type = db_manager.connection_info.get("type", "postgresql")
-            obqc_result = obqc_validator.validate(sql_query.strip(), dialect=db_type)
+            obqc_result = obqc_validator.validate(
+                sql_query.strip(), dialect=db_type, allow_fan_out=allow_fan_out
+            )
+            fan_trap_report = obqc_result.to_dict()["obqc_fan_trap"]
 
             if not obqc_result.is_valid:
                 error_details = []
@@ -276,6 +310,7 @@ async def execute_sql_query(
                     "error_type": "obqc_error",
                     "obqc_issues": error_details,
                     "fan_trap_risk": obqc_result.fan_trap_risk,
+                    "obqc_fan_trap": fan_trap_report,
                     "warnings": [],
                     "query_plan": None,
                     "limit_applied": False,
@@ -288,10 +323,15 @@ async def execute_sql_query(
                         msg += f" — {issue.suggestion}"
                     obqc_warnings.append(msg)
 
-            if obqc_result.fan_trap_risk:
+            if obqc_result.fan_trap_overridden:
+                # Only when allow_fan_out actually downgraded a blocking
+                # finding. Keyed off fan_trap_risk, this also fired for
+                # findings that never block, telling a caller who passed
+                # nothing that they had accepted a risk.
                 obqc_warnings.append(
-                    "[OBQC] FAN-TRAP RISK: Query aggregates across multiple "
-                    "1:many relationships. Consider UNION ALL pattern."
+                    "[OBQC] FAN-TRAP RISK accepted via allow_fan_out: aggregates "
+                    "read across a 1:many join and are inflated. See "
+                    "obqc_fan_trap for the tables involved."
                 )
 
             logger.debug(
@@ -329,6 +369,10 @@ async def execute_sql_query(
             existing_warnings = result.get("warnings", [])
             result["warnings"] = existing_warnings + obqc_warnings
 
+        # Always present, so "no fan-trap" is an answer the caller can read
+        # rather than the absence of a sentence in warnings.
+        result["obqc_fan_trap"] = fan_trap_report
+
         if result.get("success"):
             logger.info(
                 f"SQL query executed successfully: {result.get('row_count', 0)} rows returned in {result.get('execution_time_ms', 0)}ms"
@@ -356,4 +400,12 @@ async def execute_sql_query(
             "internal_error",
             "This may indicate a system-level issue. Please check server logs and try again.",
         )
+        # The failure may have happened before, during or after validation, so
+        # the honest verdict here is "not evaluated".
+        err["obqc_fan_trap"] = {
+            "evaluated": False,
+            "detected": False,
+            "blocking": False,
+            "findings": [],
+        }
         return err
