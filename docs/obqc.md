@@ -65,6 +65,16 @@ WHERE EXISTS (WITH users AS (SELECT 1 AS x FROM orders) SELECT 1 FROM users);
 
 And the reverse holds in the same query: the inner `users` is the CTE, so its own output columns are exempt there even though the outer `users` is a real table being checked.
 
+Position inside the `WITH` counts as well. A CTE sees the siblings declared *before* it, and itself only when the `WITH` is `RECURSIVE`; the query body sees all of them. So a CTE's own body reads the real table of that name, and a forward reference to a later sibling is not a CTE at all -- matching what the database does:
+
+```sql
+-- ERROR: 'nonexistent' -- inside the body, `orders` is the real table
+WITH orders AS (SELECT nonexistent FROM orders) SELECT id FROM orders;
+
+-- ERROR: Table 'b' not found -- `b` is declared after `a`, so `a` cannot see it
+WITH a AS (SELECT id FROM b), b AS (SELECT id FROM orders) SELECT id FROM a;
+```
+
 ### Column existence (ERROR)
 
 Checks that every column reference resolves to an actual column in its table.

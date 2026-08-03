@@ -1771,6 +1771,45 @@ class TestCommonTableExpressions(unittest.TestCase):
             [],
         )
 
+    def test_a_cte_body_reads_the_real_table_of_the_same_name(self):
+        """A non-recursive CTE cannot see itself, so its body reads the table.
+
+        Exposing every name in the WITH to every reference under it skipped
+        validation of the body. Checked against DuckDB, which resolves the
+        inner FROM to the real table and rejects the unknown column.
+        """
+        errors = self._errors(
+            "WITH orders AS (SELECT nonexistent FROM orders) SELECT id FROM orders"
+        )
+
+        self.assertTrue(any("nonexistent" in e for e in errors), errors)
+
+    def test_forward_reference_to_a_later_sibling_is_not_a_cte(self):
+        """CTEs see the siblings declared before them, not after."""
+        errors = self._errors(
+            "WITH a AS (SELECT id FROM b), b AS (SELECT id FROM orders) "
+            "SELECT id FROM a"
+        )
+
+        self.assertTrue(any("'b'" in e for e in errors), errors)
+
+    def test_earlier_sibling_is_visible(self):
+        self.assertEqual(
+            self._errors(
+                "WITH a AS (SELECT user_id FROM orders), "
+                "b AS (SELECT user_id FROM a) SELECT user_id FROM b"
+            ),
+            [],
+        )
+
+    def test_non_recursive_self_reference_is_not_a_cte(self):
+        """Without RECURSIVE this is a circular reference, not a CTE use."""
+        errors = self._errors(
+            "WITH chain AS (SELECT id FROM chain) SELECT id FROM chain"
+        )
+
+        self.assertTrue(any("chain" in e for e in errors), errors)
+
     def test_recursive_cte_self_reference(self):
         """A recursive CTE names itself; that reference is not a missing table."""
         self.assertEqual(

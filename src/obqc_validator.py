@@ -621,27 +621,55 @@ class OBQCValidator:
         subquery is not in scope here, which is exactly what makes a name
         usable as a CTE in one place and a real table in another.
 
+        Position within a WITH matters too. A CTE sees the siblings declared
+        *before* it and, only when the WITH is RECURSIVE, itself; the query
+        body sees all of them. Exposing every name to every reference below
+        the WITH skipped validation that should have happened, and matched no
+        database: ``WITH orders AS (SELECT nonexistent FROM orders) ...`` reads
+        the real table inside the body, and a forward reference to a later
+        sibling is an error rather than a CTE.
+
         Args:
             node: The table reference to resolve from.
 
         Returns:
             CTE names visible at that position.
         """
+
+        def names_of(ctes: list[exp.Expression]) -> set[str]:
+            return {cte.alias_or_name.lower() for cte in ctes if cte.alias_or_name}
+
         names: set[str] = set()
+        previous: exp.Expr | None = None
         current: exp.Expr | None = node
+
         while current is not None:
-            # Found by node type rather than by arg name: sqlglot spells the
-            # key "with" in some versions and "with_" in others, and a lookup
-            # by the wrong name silently finds no CTEs at all.
-            for value in current.args.values():
-                for item in value if isinstance(value, list) else [value]:
-                    if isinstance(item, exp.With):
-                        names |= {
-                            cte.alias_or_name.lower()
-                            for cte in item.expressions
-                            if cte.alias_or_name
-                        }
+            if isinstance(current, exp.With):
+                # Reached from inside one of its own CTE definitions: only the
+                # ones declared earlier are in scope, plus this one if the
+                # WITH is recursive.
+                siblings = list(current.expressions)
+                if previous is not None and any(cte is previous for cte in siblings):
+                    index = next(i for i, cte in enumerate(siblings) if cte is previous)
+                    end = index + 1 if current.args.get("recursive") else index
+                    names |= names_of(siblings[:end])
+                else:
+                    names |= names_of(siblings)
+            else:
+                # A node owning a WITH: its aliases are visible in the body.
+                # Found by node type rather than by arg name, since sqlglot
+                # spells the key "with" in some versions and "with_" in
+                # others, and a lookup by the wrong name silently finds none.
+                # A WITH we arrived *through* is skipped -- it was judged
+                # above, by position.
+                for value in current.args.values():
+                    for item in value if isinstance(value, list) else [value]:
+                        if isinstance(item, exp.With) and item is not previous:
+                            names |= names_of(list(item.expressions))
+
+            previous = current
             current = current.parent
+
         return names
 
     def _extract_tables(self, parsed: exp.Expr, result: OBQCResult) -> None:
