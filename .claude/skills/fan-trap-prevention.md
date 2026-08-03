@@ -53,7 +53,10 @@ Before writing multi-table queries with aggregation:
    - Fan-trap: measure taken from the **one** side across a 1:many join (`SUM(orders.total)` with order_items joined)
    - Fan-trap: multiple 1:many from the same parent
 3. **Conditional aggregates measure the branch, not the test.** `SUM(CASE WHEN orders.total > 100 THEN order_items.quantity ELSE 0 END)` measures `order_items`; the `orders` column only filters. Putting the parent's measure in the branch does still inflate.
-4. **Let `execute_sql_query()` validate** — OBQC runs before execution and a fan-trap is a **blocking error**, not a warning. Read the `obqc_fan_trap` field on the response: `{detected, blocking, findings}`, where each finding names the `measure_table` being inflated and the `fan_out_table` doing it. `evaluated: false` means OBQC never ran (no ontology loaded) — treat that as unknown, not as safe.
+4. **Let `execute_sql_query()` validate** — OBQC runs before execution. Read the `obqc_fan_trap` field on the response: `{evaluated, detected, blocking, findings}`, where each finding names its `kind`, the `measure_table` being inflated and the `fan_out_table` doing it.
+   - `evaluated: false` — OBQC never ran (no ontology loaded, or the request failed before validation). Treat as **unknown**, not safe.
+   - `blocking: true` — this query was refused. A provable fan-trap (a measure read across a 1:many join) blocks.
+   - `blocking: false` with `detected: true` — reported but executed. A `conditional_row_count` warns instead of blocking, because the same shape is a correct star-join idiom; decide from the finding whether your count meant the coarser table.
 5. **Fix the query, don't force it.** Pre-aggregate the fanning table in a CTE, or use UNION ALL. `allow_fan_out=True` exists for the rare case where the multiplied rows are genuinely wanted — it does not make the numbers right.
 6. **Validate results** against source tables
 

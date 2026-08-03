@@ -203,7 +203,7 @@ SELECT status, region, SUM(amount) FROM orders GROUP BY region;
 
 ### Fan-trap detection (ERROR)
 
-A fan-trap **blocks execution**. A query that aggregates across a one-to-many join returns a silently inflated number, and a wrong answer is worse than no answer -- particularly for a caller that keys off `success` and never reads the prose in `warnings`.
+A **provable** fan-trap blocks execution: a query that aggregates a measure across a one-to-many join returns a silently inflated number, and a wrong answer is worse than no answer -- particularly for a caller that keys off `success` and never reads the prose in `warnings`. One finding below (rule 1b) is reported without blocking, because the SQL does not say whether it is wrong; `blocking` on the verdict tells you which happened.
 
 Three findings, strongest first.
 
