@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.ralforion/orionbelt-analytics",
   "description": "Ontology-based MCP server for database schema analysis and RDF/OWL ontology generation",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "repository": {
     "url": "https://github.com/ralforion/orionbelt-analytics",
     "source": "github"
@@ -11,7 +11,7 @@
     {
       "registryType": "pypi",
       "identifier": "orionbelt-analytics",
-      "version": "1.7.2",
+      "version": "1.8.0",
       "transport": {
         "type": "stdio"
       }
