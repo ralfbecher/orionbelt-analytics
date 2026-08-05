@@ -5,6 +5,109 @@ All notable changes to OrionBelt Analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-05
+
+Feature release centred on OBQC correctness and GraphRAG schema search. **OBQC
+now blocks fan-traps instead of warning about them** — see Breaking Changes.
+Six OBQC false positives that blocked valid SQL are fixed, schema search moved
+from TF-IDF to semantic embeddings, and the per-version retention mechanism
+records the data it was always meant to clean up. Tool surface grows from 28 to
+30 tools (`add_semantic_context`, `cleanup_old_versions`).
+
+### Breaking Changes
+- **A detected fan-trap now fails the query.** `execute_sql_query` returns
+  `success: false` with structured fan-trap data instead of executing and
+  attaching a warning. Pass `allow_fan_out=true` to run one anyway. The single-
+  child case was previously invisible entirely: the rule counted fan-out joins
+  and said nothing below two, so `SUM(sales.amount)` across one 1:many join
+  returned a silently multiplied total with zero warnings. (#88)
+
+### Added
+- **Semantic embeddings for GraphRAG schema search.** Schema elements were
+  embedded with TF-IDF, which matches literal terms only — a query like "which
+  products are most profitable and get returned the most" produced an all-zero
+  vector (no stemming, `profitable` in no schema text), collapsing the ranking to
+  index insertion order. Search now uses semantic embeddings, so questions match
+  meaning rather than exact tokens. (#79)
+- **`add_semantic_context(target, context)`** — clients can write business
+  vocabulary into the semantic index for a table or column, so questions about
+  "profit", "margin" or "churn" have something to land on when the real column is
+  named `unitcost`. On a sales schema, the profit-margin query's top hit moved
+  from `sales.unitcost` (0.261) to the annotated `sales.salesamount` (0.567).
+  (#82)
+- **Applied semantic names are indexed into GraphRAG.** `apply_semantic_names`
+  wrote business vocabulary into the ontology and nowhere else, so the enrichment
+  was invisible to search; each applied suggestion is now mirrored into the
+  semantic index tagged `source="ontology"`. (#81)
+- **Per-version retention now records versions.** `DataCleanupManager` had the
+  cleanup half only — every reference to the version list was a read, so
+  `get_versions_to_cleanup()` returned `[]` unconditionally and the mechanism
+  provably did nothing. `discover_schema`, `generate_ontology` and GraphRAG init
+  now open and fill in version records, opening a version archives its
+  predecessor, and pre-existing workspaces are seeded rather than orphaned. Adds
+  the `cleanup_old_versions` tool. (#73, closes #68)
+- `docs/obqc-overview.md`, indexed from the README. (#86)
+
+### Fixed
+- **OBQC blocked database catalog queries.** Every referenced table had to be in
+  the ontology, which describes user data only, so
+  `SELECT table_name FROM information_schema.tables` failed with "Table 'tables'
+  not found in ontology". The qualifier was being discarded by `_extract_tables`,
+  so a catalog reference was indistinguishable from a user table even in
+  principle; qualifiers are now kept and known catalog schemas exempted. (#83)
+- **Six OBQC false positives that blocked valid SQL**: CTE names reported as
+  missing tables; `ROLLUP`/`CUBE`/`GROUPING SETS` flagging every selected column
+  as absent from the GROUP BY; `USING`/`NATURAL`/comma-joins reported as
+  Cartesian products; window functions counted as grouping aggregates; and date
+  literals warned as `date vs string` type mismatches. Alias-qualified columns
+  were never resolved (a false *negative*). (#87)
+- **SELECT aliases referenced from ORDER BY.** `SELECT SUM(total) AS revenue FROM
+  orders ORDER BY revenue DESC` was rejected with "Column 'revenue' not found in
+  any referenced table" — the most common analytical query shape could not run at
+  all. Aliases used from `ORDER BY`, `GROUP BY`, `HAVING` and `QUALIFY` now
+  resolve. (#84)
+- **Validation rules now apply per SELECT, not query-wide.** `parsed_tables`,
+  `parsed_columns` and `has_aggregation` were flat query-wide state gathered with
+  `find_all` over the whole tree, so a subquery poisoned the outer scope:
+  `SELECT id FROM users WHERE id IN (SELECT user_id FROM orders)` was rejected as
+  a Cartesian product (two tables, zero joins in total). Present since the
+  initial commit. (#86)
+- **Fan-out judged per join direction.** The heuristic asked whether the joined
+  table was on the "many" side of *any* relationship anywhere in the schema
+  rather than of the join at hand, and counted relationships instead of joins —
+  so a correct `sales → clients → countries` chain drew "2 one-to-many joins with
+  aggregation". (#85)
+- **SPARQL queries the union of named graphs by default.** Ontologies always load
+  into a named graph, but all three pyoxigraph call sites left
+  `use_default_graph_as_union` at `False`, so an unwrapped pattern matched the
+  empty default graph — zero rows, no error, and the tool description and
+  docstring both taught the failing shape. SELECT, ASK and CONSTRUCT now span
+  every loaded schema. (#77)
+- Tier B audit: error handling, async correctness and timestamp handling. (#67)
+
+### Changed
+- `fastmcp` bumped to 3.4.5 (lockfile only; the existing
+  `fastmcp[apps]>=3.3.1,<3.5` constraint already permitted it). (#76)
+- Dependency refresh across the `python-minor-patch` group. (#57, #59, #89)
+- Removed the dead `MCP_SHUTDOWN_TIMEOUT` setting. `server.py` wrote it into the
+  environment and nothing — not fastmcp, mcp, uvicorn or starlette — ever read it
+  back; the comment's "default 5" did not exist either (fastmcp hardcodes
+  `timeout_graceful_shutdown=2`). Both `.env.template` and the docs presented it
+  as a working knob. (#78)
+
+### Internal
+- Cleanup computes its survivor set once per run instead of per deletion
+  candidate, dropping an O(candidates × schemas × versions) scan and removing an
+  order dependency in the ChromaDB ownership guard. (#75)
+- `test_evict_idle_sessions` had never executed — `TestServerState` was a plain
+  `unittest.TestCase` holding an `async def`, so unittest discarded the coroutine
+  and reported a pass. Switched to `IsolatedAsyncioTestCase`. (#74)
+- Ruff modernization rules adopted with an explicit lint select; all findings
+  fixed. (#65, #70)
+- Dev dependencies migrated to PEP 735 dependency groups; black 26.5, pytest 9.x,
+  isort 8.0.1, mypy 2.3.0, pre-commit 4.6.1; unused `testcontainers` dropped.
+  (#58, #60, #61, #64, #71, #72, #90, #91)
+
 ## [1.7.2] - 2026-07-15
 
 Bug-fix release. Charting broke for anyone installing on pandas 3, which a fresh
