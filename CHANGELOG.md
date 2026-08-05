@@ -11,8 +11,8 @@ Feature release centred on OBQC correctness and GraphRAG schema search. **OBQC
 now blocks fan-traps instead of warning about them** — see Breaking Changes.
 Six OBQC false positives that blocked valid SQL are fixed, schema search moved
 from TF-IDF to semantic embeddings, and the per-version retention mechanism
-records the data it was always meant to clean up. Tool surface grows from 28 to
-30 tools (`add_semantic_context`, `cleanup_old_versions`).
+records the data it was always meant to clean up. Tool surface grows from 26 to
+28 tools (`add_semantic_context`, `cleanup_old_versions`).
 
 ### Breaking Changes
 - **A detected fan-trap now fails the query.** `execute_sql_query` returns
