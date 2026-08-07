@@ -374,22 +374,82 @@ class SchemaEmbedder:
         logger.info(f"Created embeddings for {len(elements)} tables")
         return elements
 
+    def create_view_embedding(
+        self,
+        view_name: str,
+        definition: str | None = None,
+        comment: str | None = None,
+        referenced_tables: list[str] | None = None,
+    ) -> SchemaElement:
+        """Create an embedding for a database view.
+
+        The definition carries most of the signal. A view name states the
+        business concept (``v_revenue_by_client``) and its body names the base
+        tables, the measures and the join conditions an analyst already
+        validated -- vocabulary that raw column names such as ``amount`` or
+        ``unitcost`` do not carry on their own.
+
+        Args:
+            view_name: Name of the view.
+            definition: The view's SQL body, if the backend exposed it.
+            comment: Optional view comment.
+            referenced_tables: Base tables the view reads, when known.
+
+        Returns:
+            SchemaElement of type "view".
+        """
+        text_parts = [view_name.replace("_", " ")]
+
+        if comment:
+            text_parts.append(comment)
+
+        if referenced_tables:
+            text_parts.append("derived from " + " ".join(referenced_tables))
+
+        if definition:
+            # Underscores split so identifiers contribute their words:
+            # "total_revenue" should match a query asking about revenue.
+            text_parts.append(definition.replace("_", " "))
+
+        description = " ".join(text_parts)
+        embedding = self._embed_text(description)
+
+        return SchemaElement(
+            element_type="view",
+            element_id=view_name,
+            name=view_name,
+            description=description,
+            metadata={
+                "definition": definition,
+                "referenced_tables": referenced_tables or [],
+                "comment": comment,
+                "is_view": True,
+            },
+            embedding=embedding,
+        )
+
     def batch_embed_schema(
-        self, tables_info: list[dict[str, Any]]
+        self,
+        tables_info: list[dict[str, Any]],
+        views_info: list[dict[str, Any]] | None = None,
     ) -> dict[str, list[SchemaElement]]:
         """
         Create embeddings for entire schema (tables, columns, relationships).
 
         Args:
             tables_info: List of table metadata
+            views_info: Optional list of view metadata (name, definition,
+                comment, referenced_tables). Views are indexed for search only;
+                they are not part of the ontology.
 
         Returns:
-            Dictionary with 'tables', 'columns', 'relationships' lists
+            Dictionary with 'tables', 'columns', 'relationships', 'views' lists
         """
         result: dict[str, list[SchemaElement]] = {
             "tables": [],
             "columns": [],
             "relationships": [],
+            "views": [],
         }
 
         # Collect all text for TF-IDF fitting if needed
@@ -404,6 +464,20 @@ class SchemaEmbedder:
                     for col in table.get("columns", [])
                 )
                 all_texts.append(" ".join(text_parts))
+
+            # View bodies must be in the fitted vocabulary too, or TF-IDF
+            # cannot match the very terms views were indexed to contribute.
+            # The underscore splitting must match create_view_embedding
+            # exactly: fitting on "profit_margin" while embedding
+            # "profit margin" puts the element text outside the vocabulary it
+            # was fitted against, and the term stays unmatchable either way.
+            for view in views_info or []:
+                view_texts = [view["name"].replace("_", " ")]
+                if view.get("comment"):
+                    view_texts.append(view["comment"])
+                if view.get("definition"):
+                    view_texts.append(view["definition"].replace("_", " "))
+                all_texts.append(" ".join(view_texts))
 
             if all_texts:
                 self.vectorizer.fit(all_texts)
@@ -443,11 +517,22 @@ class SchemaEmbedder:
                 )
                 result["relationships"].append(rel_element)
 
+        # View embeddings
+        for view in views_info or []:
+            view_element = self.create_view_embedding(
+                view_name=view["name"],
+                definition=view.get("definition"),
+                comment=view.get("comment"),
+                referenced_tables=view.get("referenced_tables"),
+            )
+            result["views"].append(view_element)
+
         logger.info(
             f"Created embeddings for schema: "
             f"{len(result['tables'])} tables, "
             f"{len(result['columns'])} columns, "
-            f"{len(result['relationships'])} relationships"
+            f"{len(result['relationships'])} relationships, "
+            f"{len(result['views'])} views"
         )
 
         return result

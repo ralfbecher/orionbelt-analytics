@@ -314,6 +314,31 @@ class SnowflakeDriver(DatabaseDriver):
         except SQLAlchemyError as e:
             logger.error(f"Failed to prefetch schema metadata: {e}")
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        try:
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                if schema_name:
+                    query = text("""
+                        SELECT table_name, view_definition
+                        FROM information_schema.views
+                        WHERE table_schema = :schema_name
+                        ORDER BY table_name
+                    """)
+                    result = conn.execute(query, {"schema_name": schema_name})
+                else:
+                    query = text("""
+                        SELECT table_name, view_definition
+                        FROM information_schema.views
+                        WHERE table_schema != 'INFORMATION_SCHEMA'
+                        ORDER BY table_name
+                    """)
+                    result = conn.execute(query)
+                return {row[0]: row[1] for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get views: {e}")
+            return {}
+
     def analyze_table(
         self,
         table_name: str,

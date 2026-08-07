@@ -9,7 +9,6 @@ from sqlalchemy.exc import DatabaseError, OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool, Pool, StaticPool
 
 from ..constants import (
-    CONNECTION_TIMEOUT,
     DEFAULT_SAMPLE_LIMIT,
     DUCKDB_SYSTEM_SCHEMAS,
     MAX_SAMPLE_LIMIT,
@@ -105,13 +104,16 @@ class DuckDBDriver(DatabaseDriver):
             poolclass: type[Pool]
             poolclass = StaticPool if database_path == ":memory:" else NullPool
 
+            # No connect_args: duckdb.connect() accepts only (database,
+            # read_only, config), so anything else here is a TypeError at the
+            # first connection. A "timeout" was passed until it was found to
+            # make every DuckDB connection fail. There is nothing to time out
+            # anyway -- DuckDB is in-process, so a connection is a file open,
+            # not a network round trip.
             self.engine = create_engine(
                 connection_string,
                 poolclass=poolclass,
                 echo=False,
-                connect_args={
-                    "timeout": CONNECTION_TIMEOUT,
-                },
             )
             self.metadata = MetaData()
 
@@ -198,6 +200,29 @@ class DuckDBDriver(DatabaseDriver):
         except SQLAlchemyError as e:
             logger.error(f"Failed to get DuckDB tables: {e}")
             return []
+
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        """Get views in a schema, with their SQL definitions."""
+        # duckdb_views() rather than information_schema.views: it exposes the
+        # full CREATE statement in `sql`, where information_schema carries only
+        # the SELECT body.
+        try:
+            schema = schema_name or "main"
+
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                query = text("""
+                    SELECT view_name, sql
+                    FROM duckdb_views()
+                    WHERE schema_name = :schema_name
+                      AND NOT internal
+                    ORDER BY view_name
+                """)
+                result = conn.execute(query, {"schema_name": schema})
+                return {row[0]: row[1] for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get DuckDB views: {e}")
+            return {}
 
     def analyze_table(
         self, table_name: str, schema_name: str | None = None

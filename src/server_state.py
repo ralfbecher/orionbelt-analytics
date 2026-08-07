@@ -365,6 +365,19 @@ def get_session_obqc_validator(ctx: Context) -> OBQCValidator | None:
         session.obqc_validator.load_ontology(ontology_generator.graph, base_uri)
         logger.debug(f"Initialized OBQC validator for session: {get_session_id(ctx)}")
 
+    # Registered outside the creation branch, and on every call: views may be
+    # discovered after the validator was built, and without them every query
+    # against a view is rejected for a table the ontology was never meant to
+    # describe. load_views_from_definitions() re-parses only on change.
+    views = session.get_all_cached_views()
+    if views:
+        db_type = "postgresql"
+        if session.db_manager is not None:
+            db_type = session.db_manager.connection_info.get("type", "postgresql")
+        session.obqc_validator.load_views_from_definitions(
+            {view.name: view.definition for view in views}, dialect=db_type
+        )
+
     return cast(OBQCValidator | None, session.obqc_validator)
 
 

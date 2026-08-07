@@ -51,6 +51,42 @@ class ColumnInfo:
 
 
 @dataclass
+class ViewInfo:
+    """A database view and the SQL that defines it.
+
+    Deliberately not a :class:`TableInfo`. Views are excluded from the
+    ontology -- a view pre-joins its sources, so an OWL class for it would
+    restate concepts the base tables already model and leave the FK/fan-trap
+    reasoning an isolated node. They are indexed into GraphRAG instead, where
+    the definition is the point: it is analyst-authored SQL carrying business
+    vocabulary the raw column names never do (``v_revenue_by_client`` explains
+    what ``amount`` means) alongside join conditions someone already validated.
+    """
+
+    name: str
+    schema: str
+    definition: str | None = None
+    comment: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ViewInfo":
+        """Deserialize a ViewInfo from a dict (e.g. saved schema JSON).
+
+        Args:
+            data: Dict with keys matching ViewInfo fields.
+
+        Returns:
+            ViewInfo instance
+        """
+        return cls(
+            name=data["name"],
+            schema=data.get("schema", ""),
+            definition=data.get("definition"),
+            comment=data.get("comment"),
+        )
+
+
+@dataclass
 class TableInfo:
     """Information about a database table."""
 
@@ -917,6 +953,42 @@ class DatabaseManager:
             return tables
 
         raise RuntimeError("No driver available")
+
+    def get_views(self, schema_name: str | None = None) -> list[ViewInfo]:
+        """Get views in a schema, with their SQL definitions.
+
+        Mirrors :meth:`get_tables` (same caching, same connection handling).
+        A driver that cannot enumerate views inherits the empty base default,
+        so this returns an empty list rather than raising.
+
+        Args:
+            schema_name: Schema to inspect, or None for the default schema.
+
+        Returns:
+            List of ViewInfo, sorted by the driver's own ordering.
+        """
+        cache_key = self._get_cache_key("get_views", schema_name or "default")
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result is not None:
+            return cast(list[ViewInfo], cached_result)
+
+        if not self._dremio_rest_connection:
+            try:
+                self._ensure_connection()
+            except RuntimeError as e:
+                logger.error(f"get_views: Connection check failed: {e}")
+                raise
+
+        if not self._driver:
+            raise RuntimeError("No driver available")
+
+        raw: dict[str, str | None] = self._driver.get_views(schema_name)
+        views = [
+            ViewInfo(name=name, schema=schema_name or "", definition=definition)
+            for name, definition in raw.items()
+        ]
+        self._store_in_cache(cache_key, views)
+        return views
 
     def prefetch_schema_constraints(self, schema_name: str) -> None:
         """Prefetch all PKs and FKs for a schema at once (Snowflake optimization).

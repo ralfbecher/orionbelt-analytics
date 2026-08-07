@@ -167,6 +167,26 @@ class ClickHouseDriver(DatabaseDriver):
         # This is set by the manager after connect
         return getattr(self, "_database_name", "default")
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        # The inverse of the engine filter in get_tables. `as_select` holds the
+        # view body; ClickHouse leaves it empty rather than NULL when absent.
+        try:
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                db_name = schema_name or self._current_database or "default"
+                query = text("""
+                    SELECT name, as_select
+                    FROM system.tables
+                    WHERE database = :db_name
+                      AND engine IN ('View', 'MaterializedView')
+                    ORDER BY name
+                """)
+                result = conn.execute(query, {"db_name": db_name})
+                return {row[0]: (row[1] or None) for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get views: {e}")
+            return {}
+
     def analyze_table(
         self,
         table_name: str,

@@ -218,12 +218,24 @@ async def _auto_generate_ontology_background(
         logger.debug("Ontology auto-gen traceback:", exc_info=True)
 
 
+def _view_info_to_dict(view_info: Any) -> dict[str, Any]:
+    """Convert a ViewInfo (or already-dict) into the embedder's input shape."""
+    if isinstance(view_info, dict):
+        return view_info
+    return {
+        "name": view_info.name,
+        "definition": view_info.definition,
+        "comment": getattr(view_info, "comment", None),
+    }
+
+
 async def _auto_initialize_graphrag_background(
     schema_name: str,
     tables_info: list[Any],
     session: Any,
     ctx: Context,
     version: int | None = None,
+    views_info: list[Any] | None = None,
 ) -> None:
     """Background task: Auto-initialize or accumulate GraphRAG after schema analysis.
 
@@ -237,6 +249,7 @@ async def _auto_initialize_graphrag_background(
     try:
         start_time = time.time()
         tables_dict = [_table_info_to_dict(t) for t in tables_info]
+        views_dict = [_view_info_to_dict(v) for v in views_info or []]
 
         if session.graphrag_manager is None:
             # First schema — initialize from scratch
@@ -246,7 +259,9 @@ async def _auto_initialize_graphrag_background(
                 schema_name=schema_name,
             )
             session.graphrag_manager.initialize_from_schema(
-                tables_info=tables_dict, schema_name=schema_name
+                tables_info=tables_dict,
+                schema_name=schema_name,
+                views_info=views_dict,
             )
         else:
             # Additional schema — accumulate into existing graph
@@ -254,7 +269,9 @@ async def _auto_initialize_graphrag_background(
                 f"Accumulating schema '{schema_name}' into existing GraphRAG..."
             )
             session.graphrag_manager.accumulate_schema(
-                tables_info=tables_dict, schema_name=schema_name
+                tables_info=tables_dict,
+                schema_name=schema_name,
+                views_info=views_dict,
             )
 
         await _save_graphrag_state(session, schema_name, version)

@@ -176,6 +176,32 @@ class MySQLDriver(DatabaseDriver):
             logger.error(f"Failed to get tables: {e}")
             return []
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        try:
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                if schema_name:
+                    query = text("""
+                        SELECT TABLE_NAME, VIEW_DEFINITION
+                        FROM information_schema.VIEWS
+                        WHERE TABLE_SCHEMA = :schema_name
+                        ORDER BY TABLE_NAME
+                    """)
+                    result = conn.execute(query, {"schema_name": schema_name})
+                else:
+                    query = text("""
+                        SELECT TABLE_NAME, VIEW_DEFINITION
+                        FROM information_schema.VIEWS
+                        WHERE TABLE_SCHEMA NOT IN
+                              ('mysql', 'sys', 'performance_schema', 'information_schema')
+                        ORDER BY TABLE_NAME
+                    """)
+                    result = conn.execute(query)
+                return {row[0]: row[1] for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get views: {e}")
+            return {}
+
     def analyze_table(
         self, table_name: str, schema_name: str | None = None
     ) -> TableInfo | None:
