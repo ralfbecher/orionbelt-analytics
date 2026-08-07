@@ -106,14 +106,21 @@ class SchemaCache:
             schema_name: If provided, clear only that schema's cache.
                          If None, clear all cached schemas.
         """
-        if schema_name is not None and self._cached_schema is not None:
+        # Views clear with their schema. Leaving them behind outlives the
+        # tables they came from, and OBQC would keep accepting objects from a
+        # connection or schema that is no longer loaded.
+        if schema_name is not None:
             cache_key = schema_name or "_default_"
-            self._cached_schema.pop(cache_key, None)
+            if self._cached_schema is not None:
+                self._cached_schema.pop(cache_key, None)
+            if self._cached_views is not None:
+                self._cached_views.pop(cache_key, None)
             if self._last_analyzed_schema == schema_name:
                 self._last_analyzed_schema = None
             logger.debug(f"Cleared schema cache for '{cache_key}'")
         else:
             self._cached_schema = None
+            self._cached_views = None
             self._last_analyzed_schema = None
             logger.debug("Cleared all schema caches")
 

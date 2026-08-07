@@ -183,6 +183,17 @@ def derive_view_columns(definition: str | None, dialect: str = "postgres") -> se
         logger.debug(f"Could not parse view definition ({e}); columns unchecked.")
         return set()
 
+    # An explicit column header renames the whole output:
+    # "CREATE VIEW v (user_id, user_name) AS SELECT id, name ..." exposes
+    # user_id/user_name, not id/name. The header wins over the select list, and
+    # it is authoritative even when the body selects * -- so this is checked
+    # before anything reads the projections. DuckDB returns the full CREATE
+    # statement from duckdb_views(), which is how this shape reaches us.
+    if isinstance(parsed, exp.Create) and isinstance(parsed.this, exp.Schema):
+        declared = [ident.name for ident in parsed.this.expressions if ident.name]
+        if declared:
+            return {name.lower() for name in declared}
+
     select = parsed.find(exp.Select)
     if select is None:
         return set()

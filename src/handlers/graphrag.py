@@ -395,6 +395,21 @@ async def initialize_graphrag(
     # Convert TableInfo objects to dictionaries
     tables_dict = [_table_info_to_dict(t) for t in tables_info]
 
+    # Views come from the discovery cache, or straight from the database when
+    # this tool is the entry point -- which it is whenever AUTO_GRAPHRAG is
+    # false or a client calls it directly. Without this the manual path
+    # indexes tables only, and views reach GraphRAG on the auto path alone.
+    views_info = session.get_cached_views(effective_schema or "")
+    if not views_info:
+        try:
+            views_info = db_manager.get_views(effective_schema)
+            if views_info:
+                session.cache_views(effective_schema or "", views_info)
+        except Exception as e:
+            logger.warning(f"Could not fetch views for GraphRAG: {e}")
+            views_info = []
+    views_dict = [_view_info_to_dict(v) for v in views_info]
+
     eff_schema = effective_schema or "default"
 
     # Bound to the generation current when this call started; embedding a large
@@ -417,12 +432,16 @@ async def initialize_graphrag(
                 schema_name=eff_schema,
             )
             session.graphrag_manager.initialize_from_schema(
-                tables_info=tables_dict, schema_name=eff_schema
+                tables_info=tables_dict,
+                schema_name=eff_schema,
+                views_info=views_dict,
             )
         else:
             # Accumulate into existing graph
             session.graphrag_manager.accumulate_schema(
-                tables_info=tables_dict, schema_name=eff_schema
+                tables_info=tables_dict,
+                schema_name=eff_schema,
+                views_info=views_dict,
             )
 
         session.graphrag_initialized = True

@@ -245,6 +245,29 @@ class TestSchemaCacheViews(unittest.TestCase):
         cache.cache_views("public", [ViewInfo(name="v", schema="public")])
         self.assertIsNone(cache.get_cached_schema("public"))
 
+    def test_clear_all_drops_views(self):
+        """Views must not outlive the tables they were discovered with."""
+        cache = SchemaCache()
+        cache.cache_views("public", [ViewInfo(name="v", schema="public")])
+        cache.clear()
+        self.assertEqual(cache.get_all_cached_views(), [])
+
+    def test_clear_one_schema_drops_only_its_views(self):
+        cache = SchemaCache()
+        cache.cache_views("public", [ViewInfo(name="pub_v", schema="public")])
+        cache.cache_views("other", [ViewInfo(name="other_v", schema="other")])
+        cache.clear("public")
+        remaining = [v.name for v in cache.get_all_cached_views()]
+        self.assertEqual(remaining, ["other_v"])
+
+    def test_get_all_spans_schemas(self):
+        cache = SchemaCache()
+        cache.cache_views("a", [ViewInfo(name="va", schema="a")])
+        cache.cache_views("b", [ViewInfo(name="vb", schema="b")])
+        self.assertEqual(
+            sorted(v.name for v in cache.get_all_cached_views()), ["va", "vb"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

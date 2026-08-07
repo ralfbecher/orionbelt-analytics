@@ -353,6 +353,59 @@ class DremioDriver(DatabaseDriver):
 
         return run_async(fetch_tables(), timeout=CONNECTION_TIMEOUT)
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        """Get Dremio views (virtual datasets) with their SQL definitions.
+
+        Views matter more here than on other backends: a Dremio virtual
+        dataset *is* a view, so the semantic layer users build lives entirely
+        in objects that get_tables() filters out with TABLE_TYPE = 'TABLE'.
+        """
+
+        async def fetch_views() -> dict[str, str | None]:
+            try:
+                async with await self._create_dremio_client() as client:
+                    if not schema_name:
+                        query = (
+                            "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION "
+                            'FROM INFORMATION_SCHEMA."VIEWS" '
+                            "WHERE TABLE_SCHEMA <> 'INFORMATION_SCHEMA'"
+                        )
+                    else:
+                        safe_schema = self._escape_sql_literal(schema_name)
+                        query = (
+                            "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION "
+                            'FROM INFORMATION_SCHEMA."VIEWS" '
+                            f"WHERE TABLE_SCHEMA = '{safe_schema}'"
+                        )
+
+                    result = await client.execute_query(query)
+
+                    if not result.get("success"):
+                        logger.error(
+                            f"Failed to get Dremio views: {result.get('error')}"
+                        )
+                        return {}
+
+                    views: dict[str, str | None] = {}
+                    for row in result.get("data", []):
+                        view_name = row.get("TABLE_NAME", "")
+                        if not view_name:
+                            continue
+                        # Unqualified lookups get the schema-qualified name,
+                        # matching how get_tables() reports them.
+                        if not schema_name:
+                            schema = row.get("TABLE_SCHEMA", "")
+                            if schema:
+                                view_name = f"{schema}.{view_name}"
+                        views[view_name] = row.get("VIEW_DEFINITION") or None
+                    return views
+
+            except Exception as e:
+                logger.error(f"Failed to get Dremio views via REST: {e}")
+                return {}
+
+        return run_async(fetch_views(), timeout=CONNECTION_TIMEOUT)
+
     def analyze_table(
         self, table_name: str, schema_name: str | None = None
     ) -> TableInfo | None:

@@ -32,6 +32,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Every element_type the store can hold. Keep in step with the embedder's
+# create_*_embedding methods -- get_statistics() reports a per-type breakdown
+# and anything missing here is silently absent from it.
+ELEMENT_TYPES = ("table", "column", "relationship", "view", "semantic_context")
+
 
 @dataclass
 class StoredElement:
@@ -656,10 +661,13 @@ class ChromaDBVectorStore:
         """
         count = self.collection.count()
 
-        # Get type distribution
+        # Get type distribution. Sourced from ELEMENT_TYPES rather than a
+        # literal list here: this breakdown silently dropped semantic_context
+        # from the moment it was added, and then views, because a new element
+        # type has no reason to lead anyone back to this function.
         type_counts = {}
         try:
-            for element_type in ["table", "column", "relationship"]:
+            for element_type in ELEMENT_TYPES:
                 results = self.collection.get(
                     where={"element_type": element_type}, include=[]
                 )
@@ -672,7 +680,7 @@ class ChromaDBVectorStore:
                 type(exc).__name__,
                 exc,
             )
-            type_counts = {"table": 0, "column": 0, "relationship": 0}
+            type_counts = dict.fromkeys(ELEMENT_TYPES, 0)
 
         return {
             "total_elements": count,

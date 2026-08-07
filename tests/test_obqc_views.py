@@ -65,6 +65,34 @@ class TestDeriveViewColumns(unittest.TestCase):
             derive_view_columns("SELECT ID, NaMe FROM users"), {"id", "name"}
         )
 
+    def test_explicit_column_header_wins(self):
+        """CREATE VIEW v (a, b) AS SELECT x, y renames the whole output.
+
+        DuckDB returns the full CREATE statement from duckdb_views(), so this
+        shape reaches us for real. Reading the select list instead derived
+        x/y, and OBQC then blocked the valid "SELECT a FROM v".
+        """
+        self.assertEqual(
+            derive_view_columns(
+                "CREATE VIEW v_alias (user_id, user_name) AS "
+                'SELECT id, "name" FROM users'
+            ),
+            {"user_id", "user_name"},
+        )
+
+    def test_explicit_column_header_wins_over_star(self):
+        """The header is authoritative even when the body is not derivable."""
+        self.assertEqual(
+            derive_view_columns("CREATE VIEW v (a, b, c) AS SELECT * FROM users"),
+            {"a", "b", "c"},
+        )
+
+    def test_create_view_without_header_reads_the_select_list(self):
+        self.assertEqual(
+            derive_view_columns("CREATE VIEW v AS SELECT id, name FROM users"),
+            {"id", "name"},
+        )
+
 
 class OBQCViewTestCase(unittest.TestCase):
     def setUp(self):
@@ -228,6 +256,18 @@ class TestViewRegistration(unittest.TestCase):
         self.assertTrue(_errors(self.validator.validate("SELECT id FROM v_late")))
         self.validator.load_views_from_definitions({"v_late": "SELECT id FROM users"})
         self.assertEqual(_errors(self.validator.validate("SELECT id FROM v_late")), [])
+
+    def test_an_empty_set_deregisters_previous_views(self):
+        """A reconnect or a rediscovery finding no views must clear them.
+
+        Otherwise OBQC keeps accepting objects from a schema or connection
+        that is no longer loaded.
+        """
+        self.validator.load_views_from_definitions({"v_gone": "SELECT id FROM users"})
+        self.assertEqual(_errors(self.validator.validate("SELECT id FROM v_gone")), [])
+
+        self.validator.load_views_from_definitions({})
+        self.assertTrue(_errors(self.validator.validate("SELECT id FROM v_gone")))
 
 
 if __name__ == "__main__":
