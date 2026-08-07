@@ -13,7 +13,12 @@ a missed error; guessing wrong the other way blocks a correct query.
 
 import unittest
 
-from src.obqc_validator import OBQCSeverity, OBQCValidator, derive_view_columns
+from src.obqc_validator import (
+    OBQCIssueType,
+    OBQCSeverity,
+    OBQCValidator,
+    derive_view_columns,
+)
 from tests.test_obqc_validator import create_sample_ontology_graph
 
 VIEWS = {
@@ -76,18 +81,78 @@ class TestViewsAreNotBlocked(OBQCViewTestCase):
         self.assertEqual(_errors(result), [])
         self.assertTrue(result.is_valid)
 
-    def test_view_joined_to_a_base_table_is_allowed(self):
-        result = self.validator.validate(
-            "SELECT v.name, o.id FROM v_active_users v "
-            "JOIN orders o ON o.user_id = v.id"
-        )
-        self.assertEqual(_errors(result), [])
-
     def test_unknown_table_is_still_an_error(self):
         """Registering views must not turn the existence rule off."""
         result = self.validator.validate("SELECT * FROM totally_unknown_thing")
         messages = [i.message for i in _errors(result)]
         self.assertTrue(any("totally_unknown_thing" in m for m in messages), messages)
+
+
+class TestViewsAreNotJoinable(OBQCViewTestCase):
+    """A view is a single entity: its joins and grain are already fixed, and
+    the ontology describes neither, so any join to one is unvalidatable."""
+
+    def _view_errors(self, sql):
+        return [
+            i
+            for i in _errors(self.validator.validate(sql))
+            if i.issue_type is OBQCIssueType.VIEW_NOT_JOINABLE
+        ]
+
+    def test_view_joined_to_a_base_table_is_blocked(self):
+        found = self._view_errors(
+            "SELECT v.name, o.id FROM v_active_users v "
+            "JOIN orders o ON o.user_id = v.id"
+        )
+        self.assertTrue(found)
+        self.assertIn("v_active_users", found[0].message)
+
+    def test_comma_join_to_a_view_is_blocked(self):
+        self.assertTrue(self._view_errors("SELECT * FROM v_active_users, orders"))
+
+    def test_view_joined_to_another_view_is_blocked(self):
+        self.assertTrue(
+            self._view_errors(
+                "SELECT * FROM v_active_users v JOIN v_star s ON s.id = v.id"
+            )
+        )
+
+    def test_view_alone_is_fine(self):
+        self.assertEqual(self._view_errors("SELECT id, name FROM v_active_users"), [])
+
+    def test_base_tables_joined_together_are_unaffected(self):
+        self.assertEqual(
+            self._view_errors(
+                "SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id"
+            ),
+            [],
+        )
+
+    def test_judged_per_select_not_query_wide(self):
+        """A view in one scope must not condemn a join in another."""
+        self.assertEqual(
+            self._view_errors(
+                "SELECT u.name FROM users u JOIN orders o ON o.user_id = u.id "
+                "WHERE u.id IN (SELECT id FROM v_active_users)"
+            ),
+            [],
+        )
+
+    def test_no_views_registered_leaves_joins_alone(self):
+        graph, base_uri = create_sample_ontology_graph()
+        validator = OBQCValidator()
+        validator.load_ontology(graph, base_uri)
+        result = validator.validate(
+            "SELECT u.name, o.id FROM users u JOIN orders o ON o.user_id = u.id"
+        )
+        self.assertEqual(
+            [
+                i
+                for i in _errors(result)
+                if i.issue_type is OBQCIssueType.VIEW_NOT_JOINABLE
+            ],
+            [],
+        )
 
 
 class TestViewColumnChecking(OBQCViewTestCase):

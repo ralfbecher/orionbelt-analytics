@@ -34,6 +34,7 @@ class OBQCIssueType(Enum):
     FAN_TRAP_DETECTED = "fan_trap_detected"
     NON_AGGREGATED_COLUMN = "non_aggregated_column"
     AMBIGUOUS_COLUMN = "ambiguous_column"
+    VIEW_NOT_JOINABLE = "view_not_joinable"
 
 
 class OBQCSeverity(Enum):
@@ -1805,6 +1806,73 @@ class OBQCValidator:
 
         return found
 
+    def _flag_view_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
+        """Report SELECTs that join a view to anything else.
+
+        A view is a single entity: it has already applied its own joins and
+        grain, and the ontology describes none of that. So none of the
+        machinery that makes a join checkable is available for one -- no
+        primary key, no foreign keys, no declared cardinality, no place in the
+        fan-trap topology. A join to a view is therefore unvalidatable, and an
+        unvalidatable join between an aggregate view and a fact table is
+        exactly the shape that silently multiplies rows.
+
+        Blocking is the same judgement OBQC already makes for fan-traps:
+        refuse the query rather than return numbers nobody can check. Query
+        the view on its own, or join the base tables it derives from.
+
+        Judged per SELECT, following the rule in _flag_cartesian_products: a
+        view used in one scope must not condemn a join in another.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to append issues to.
+        """
+        if not self._known_views:
+            return
+
+        for select in parsed.find_all(exp.Select):
+            tables = [
+                t
+                for t in select.find_all(exp.Table)
+                if t.name
+                and t.find_ancestor(exp.Select) is select
+                and id(t) not in self._cte_references
+            ]
+            if len(tables) < 2:
+                continue
+
+            views_used = sorted(
+                {t.name for t in tables if t.name.lower() in self._known_views}
+            )
+            if not views_used:
+                continue
+
+            others = sorted(
+                {t.name for t in tables if t.name.lower() not in self._known_views}
+            )
+            # A view joined only to other views is equally unvalidatable.
+            joined_to = others or views_used[1:]
+
+            result.issues.append(
+                OBQCIssue(
+                    issue_type=OBQCIssueType.VIEW_NOT_JOINABLE,
+                    severity=OBQCSeverity.ERROR,
+                    message=(
+                        f"View '{views_used[0]}' cannot be joined: a view is a "
+                        f"single entity whose joins and grain are already fixed, "
+                        f"and the ontology does not describe them "
+                        f"(joined with: {', '.join(joined_to)})"
+                    ),
+                    location="FROM clause",
+                    suggestion=(
+                        f"Query '{views_used[0]}' on its own, or join the base "
+                        "tables it derives from so the join can be validated."
+                    ),
+                    related_entities=views_used,
+                )
+            )
+
     def _unjoined_tables(
         self, select: exp.Select, tables: list[exp.Table]
     ) -> list[str]:
@@ -1980,6 +2048,11 @@ class OBQCValidator:
 
     def _validate_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Rule: Validate joins use declared FK relationships."""
+        # Runs before the cross-product check returns: a view joined without
+        # an ON condition is both, and the view finding is the one that
+        # explains why no ON condition could have made it valid.
+        self._flag_view_joins(parsed, result)
+
         if self._flag_cartesian_products(parsed, result):
             # A cross product is reported once per query; the per-join checks
             # below would restate it as a missing ON condition.
