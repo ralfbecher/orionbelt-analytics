@@ -5,6 +5,115 @@ All notable changes to OrionBelt Analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-08
+
+Database views become first-class, and the ontology learns which columns can
+actually be aggregated. Both change what `execute_sql_query` accepts, hence the
+major version — though the practical break is narrow, and one of the two
+changes only ever *unblocks* queries. Tool surface unchanged at 28 tools.
+
+Also fixes the **DuckDB driver, which could not connect at all** in 1.8.0.
+
+### Breaking Changes
+- **`SUM()` of a key or a non-numeric column is now rejected.** `SUM(order_id)`
+  returns a number with no meaning, and OBQC previously allowed it. Queries
+  that ran before and depended on this will now fail. Blocking is limited to
+  classifications the ontology records as `structural` — certain by
+  construction. Name-pattern classifications (e.g. `SUM(unit_price)`) attach as
+  warnings and never block. (#96)
+- **A view cannot be joined.** A view has already applied its own joins and
+  grain and carries no key, no foreign keys and no declared cardinality, so a
+  join to one cannot be validated — and an unvalidatable join between an
+  aggregate view and a fact table is what silently multiplies rows. Note this
+  breaks nothing that previously worked: before this release *every* view query
+  was rejected outright, so the net effect is strictly more queries succeed.
+  (#94)
+
+### Added
+- **Database views are discovered and indexed.** Every `information_schema`
+  driver filtered discovery to `table_type = 'BASE TABLE'`, so views never
+  reached the ontology — and OBQC blocks any table the ontology does not
+  describe. Every query against a view failed with "Table 'v_x' not found in
+  ontology", the same false-positive class fixed for catalog tables (#83) and
+  CTEs (#87). Implemented for all eight drivers. (#94)
+- **Views are searchable in GraphRAG** as their own element type, carrying the
+  view body — analyst-authored SQL naming the measures and joins someone
+  already validated. Measured on a sales schema, "which clients have the best
+  profit margin" moved from an irrelevant top hit (`clients.name`, on a query
+  vector with one non-zero dimension) to `v_profit_margin` at 0.605.
+  `graphrag_search(element_type="view")` filters to them. (#94)
+- **Views are modelled in the ontology as `oba:View`**, typed apart from
+  `owl:Class`, with columns as `oba:ViewColumn` and provenance as
+  `oba:derivedFrom`. The typing is load-bearing: every consumer that reads
+  tables looks for `owl:Class` carrying `oba:tableName`, so a view modelled as
+  an ordinary class would be picked up as a base table by each of them and
+  would have to be excluded again, rule by rule. Distinct types make the
+  separation structural. (#95)
+- **View columns come from the database catalog**, not from parsing the view
+  body. `information_schema` knows the output of `SELECT *` and of an explicit
+  `CREATE VIEW v (a, b)` header; parsing gets the second wrong and abandons the
+  first. OBQC can therefore column-check a `SELECT *` view, which it previously
+  had to leave unchecked. (#95)
+- **Per-column measure semantics** — `oba:measureType`
+  (`additive`/`semi_additive`/`non_additive`/`attribute`), `oba:measureBasis`
+  and `oba:measureReason`. Additivity is a property of a column, not of a
+  table: a denormalized table holds additive measures beside dimension
+  attributes, which no table-level role can express. Classified
+  deterministically with **no LLM call** — structural facts first (a key is an
+  identifier; a non-numeric column cannot be summed), then column-name
+  patterns. A column matching neither is left unannotated rather than assumed
+  additive. (#96)
+- **`oba:tableType` accepts `"mixed"`** so a denormalized table can be labelled
+  honestly. It remains advisory; what may be aggregated is decided per column.
+  (#96)
+
+### Fixed
+- **The DuckDB driver could not connect at all.** `connect_args={"timeout":
+  ...}` is a `TypeError` inside `duckdb.connect()`, which accepts only
+  `(database, read_only, config)`, so `connect()` returned `False` for every
+  path including `:memory:`. There were no DuckDB tests, which is why CI never
+  saw it; this release adds eight running against a real in-process database.
+  (#94)
+- **The metadata cache served a previous connection's answers.** Cache keys are
+  `operation:schema` with nothing identifying the connection, and while
+  `disconnect()` cleared the cache, the eight `connect_*` paths did not.
+  Connecting to a second database answered `get_tables("public")` from the
+  first for the full 5-minute TTL. Not a views bug — `get_tables()` had the
+  same hole since long before views existed. Driver assignment now routes
+  through one place that invalidates. (#94)
+- **A view listed itself among its own sources.** DuckDB returns the whole
+  `CREATE VIEW` statement, whose target parses as an ordinary table. (#95)
+- **View lineage ignored the SQL dialect.** sqlglot handles Snowflake
+  semi-structured access, BigQuery structs and ClickHouse aggregates without
+  complaint, and fails on a Snowflake body read as PostgreSQL — so the dialect,
+  not the SQL, was the difference between lineage and silence. (#95)
+- **ChromaDB statistics omitted element types.** The per-type breakdown
+  hard-coded three types, silently dropping views and — since 1.8.0 —
+  `semantic_context`. Now sourced from a single `ELEMENT_TYPES` tuple. (#94)
+- OBQC no longer misreads a CTE that shadows a base table as that table when
+  judging aggregation. (#96)
+- Inferred foreign keys are recognised as identifiers. ClickHouse has no
+  foreign keys at all and BigQuery and Dremio rarely declare them, so without
+  this every key on those engines read as an unclassified numeric. (#96)
+- Numeric SQL types are matched by token, not substring or word boundary. Both
+  of those fail on real dialect spellings in opposite directions: `int` is a
+  substring of `POINT`, while `INT64`, `UInt64` and `HUGEINT` contain no
+  numeric word at all — the latter misreading every measure on four supported
+  engines as an attribute. (#96)
+- An **unrecognised** SQL type is now left unclassified rather than assumed
+  non-numeric. Assuming made an unfamiliar type name a blocking error on a
+  valid `SUM`, which no amount of further enumeration would have fixed. (#96)
+
+### Internal
+- Verified end-to-end against a real PostgreSQL 17 — view discovery through
+  `pg_catalog.pg_views`, catalog columns through both `SELECT *` and an
+  explicit column header, lineage, OBQC isolation and query execution.
+  Previously only DuckDB had been exercised.
+- `ontology/spec.md` documents the view and measure vocabularies (§6.7, §7.4–7.6),
+  including that a column carrying no `oba:measureType` MUST NOT be read as
+  additive.
+- 907 tests, up from 795.
+
 ## [1.8.0] - 2026-08-05
 
 Feature release centred on OBQC correctness and GraphRAG schema search. **OBQC
