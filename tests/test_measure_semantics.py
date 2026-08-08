@@ -18,7 +18,7 @@ from rdflib import Graph, Namespace
 from src.constants import OBA_NAMESPACE
 from src.database_manager import ColumnInfo, TableInfo
 from src.obqc_validator import OBQCIssueType, OBQCSeverity, OBQCValidator
-from src.ontology_generator import OntologyGenerator
+from src.ontology_generator import OntologyGenerator, is_numeric_sql_type
 
 BASE_URI = "http://test.com/ontology/"
 OBA = Namespace(OBA_NAMESPACE)
@@ -300,32 +300,98 @@ class TestInferredForeignKeys(unittest.TestCase):
         self.assertIn("Inferred foreign key", found[0].suggestion)
 
 
-class TestNumericTypeMatchingIsWholeWord(unittest.TestCase):
-    """ "int" is a substring of POINT, INTERVAL and GEOPOINT."""
+class TestNumericTypeDetection(unittest.TestCase):
+    """Substring and word-boundary matching both fail on real dialect
+    spellings, in opposite directions: "int" is a substring of POINT, while
+    INT64, UInt64 and HUGEINT contain no numeric word at all. The second is
+    the worse failure -- it misreads every measure on an engine as an
+    attribute and blocks valid SUMs."""
 
-    def setUp(self):
-        self.gen = OntologyGenerator(BASE_URI)
-
-    def test_geometry_types_are_attributes(self):
-        for sql_type in ("POINT", "GEOPOINT", "POLYGON", "GEOGRAPHY"):
-            result = self.gen.classify_measure(_col("location", sql_type))
-            self.assertIsNotNone(result, sql_type)
-            self.assertEqual((result[0], result[1]), ("attribute", "structural"))
-
-    def test_interval_is_an_attribute(self):
-        result = self.gen.classify_measure(_col("duration", "INTERVAL"))
-        self.assertEqual(result[0], "attribute")
-
-    def test_real_numeric_types_still_match(self):
+    def test_ansi_spellings(self):
         for sql_type in (
             "INTEGER",
             "BIGINT",
+            "SMALLINT",
             "DECIMAL(18,2)",
-            "DOUBLE PRECISION",
             "NUMERIC",
+            "DOUBLE PRECISION",
+            "REAL",
+            "smallserial",
+            "money",
         ):
-            result = self.gen.classify_measure(_col("amount", sql_type))
+            self.assertTrue(is_numeric_sql_type(sql_type), sql_type)
+
+    def test_bigquery_spellings(self):
+        for sql_type in ("INT64", "FLOAT64", "NUMERIC", "BIGNUMERIC"):
+            self.assertTrue(is_numeric_sql_type(sql_type), sql_type)
+
+    def test_clickhouse_spellings(self):
+        for sql_type in (
+            "Int8",
+            "Int256",
+            "UInt64",
+            "Float32",
+            "Float64",
+            "Decimal128",
+            "Nullable(Float64)",
+            "LowCardinality(UInt32)",
+        ):
+            self.assertTrue(is_numeric_sql_type(sql_type), sql_type)
+
+    def test_duckdb_and_snowflake_spellings(self):
+        for sql_type in (
+            "HUGEINT",
+            "UTINYINT",
+            "UBIGINT",
+            "UINTEGER",
+            "BYTEINT",
+            "FLOAT4",
+            "FLOAT8",
+            "NUMBER(38,0)",
+        ):
+            self.assertTrue(is_numeric_sql_type(sql_type), sql_type)
+
+    def test_geometry_and_temporal_types_are_not_numeric(self):
+        for sql_type in (
+            "POINT",
+            "GEOPOINT",
+            "POLYGON",
+            "GEOGRAPHY",
+            "GEOMETRY",
+            "INTERVAL",
+            "DATE",
+            "TIMESTAMP",
+            "BOOLEAN",
+            "VARCHAR(50)",
+            "UUID",
+        ):
+            self.assertFalse(is_numeric_sql_type(sql_type), sql_type)
+
+    def test_composites_are_not_numeric_whatever_they_contain(self):
+        """SUM(Array(Float64)) is not a question about additivity."""
+        for sql_type in (
+            "ARRAY<INT64>",
+            "Array(Float64)",
+            "STRUCT<a INT64>",
+            "MAP<STRING,INT64>",
+            "Tuple(Int64, String)",
+            "JSON",
+        ):
+            self.assertFalse(is_numeric_sql_type(sql_type), sql_type)
+
+    def test_measures_classify_on_every_dialect_spelling(self):
+        """Regression: a measure misread as an attribute makes OBQC block
+        SUM(amount) -- a valid query -- across that whole engine."""
+        gen = OntologyGenerator(BASE_URI)
+        for sql_type in ("INT64", "Float64", "UInt64", "HUGEINT", "NUMBER(38,2)"):
+            result = gen.classify_measure(_col("amount", sql_type))
             self.assertEqual(result[0], "additive", sql_type)
+
+    def test_geometry_columns_are_attributes(self):
+        gen = OntologyGenerator(BASE_URI)
+        for sql_type in ("POINT", "GEOPOINT", "POLYGON", "GEOGRAPHY"):
+            result = gen.classify_measure(_col("location", sql_type))
+            self.assertEqual((result[0], result[1]), ("attribute", "structural"))
 
 
 class TestTableTypeAllowsMixed(unittest.TestCase):

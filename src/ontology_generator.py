@@ -26,19 +26,99 @@ _WORD_FREQ_THRESHOLD = 1e-6
 # These should NOT be flagged as cryptic on their own.
 _KNOWN_DB_SUFFIXES = {"id", "pk", "fk", "idx", "seq"}
 
-# Whole-word matcher for numeric SQL types, built from
-# OntologyGenerator.NUMERIC_SQL_TYPES below. Word boundaries matter: "int" is
-# a substring of POINT, INTERVAL and GEOPOINT, so substring matching reads a
-# geometry column as numeric.
-NUMERIC_TYPE_RE = re.compile(
-    r"\b(?:"
-    r"int|integer|bigint|smallint|tinyint|mediumint"
-    r"|serial|bigserial|smallserial"
-    r"|decimal|numeric|dec|fixed"
-    r"|float|double|real"
-    r"|money|smallmoney|number"
-    r")\b"
+# Alphabetic runs of a SQL type name. Splitting on everything else does the
+# normalization on its own: the width suffixes fall away (INT64 -> int,
+# Float64 -> float, Decimal128 -> decimal) and wrappers surrender their inner
+# type (Nullable(Float64) -> nullable, float; ARRAY<INT64> -> array, int).
+_TYPE_TOKEN_RE = re.compile(r"[a-z]+")
+
+# Numeric type names across every supported dialect, as tokens. Membership
+# rather than substring: "int" is contained in POINT, INTERVAL and GEOPOINT,
+# and matching those as numeric leaves SUM(location) unreported. Membership
+# rather than word-boundary regex: BigQuery writes INT64 and BIGNUMERIC,
+# ClickHouse UInt64 and Float32, DuckDB HUGEINT and UTINYINT -- none of which
+# contain a numeric *word*, so a \b matcher rejects them and every measure on
+# those engines is misread as an attribute.
+_NUMERIC_TYPE_TOKENS = frozenset(
+    {
+        # integers
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "mediumint",
+        "byteint",
+        "hugeint",
+        "int2",
+        "int4",
+        "int8",
+        # auto-increment integers
+        "serial",
+        "bigserial",
+        "smallserial",
+        # exact decimals
+        "decimal",
+        "numeric",
+        "bignumeric",
+        "dec",
+        "fixed",
+        "number",
+        # floating point
+        "float",
+        "double",
+        "real",
+        "float4",
+        "float8",
+        # currency
+        "money",
+        "smallmoney",
+    }
 )
+
+# Composite types. Scalar aggregation does not apply to them, whatever they
+# contain: SUM(Array(Float64)) is not a question about additivity.
+_COMPOSITE_TYPE_TOKENS = frozenset(
+    {
+        "array",
+        "map",
+        "tuple",
+        "struct",
+        "nested",
+        "json",
+        "jsonb",
+        "variant",
+        "object",
+        "list",
+        "row",
+        "set",
+        "geometry",
+        "geography",
+    }
+)
+
+
+def is_numeric_sql_type(sql_type: str) -> bool:
+    """True when *sql_type* holds a scalar number in any supported dialect.
+
+    Args:
+        sql_type: The SQL type as the catalog reports it.
+
+    Returns:
+        True for a scalar numeric type, False for anything else --
+        composites included, since they cannot be summed at all.
+    """
+    tokens = set(_TYPE_TOKEN_RE.findall((sql_type or "").lower()))
+    if tokens & _COMPOSITE_TYPE_TOKENS:
+        return False
+    # The unsigned prefix generically: ClickHouse UInt64 and DuckDB
+    # UTINYINT/UBIGINT are the signed name with a "u" in front.
+    return any(
+        token in _NUMERIC_TYPE_TOKENS
+        or (token.startswith("u") and token[1:] in _NUMERIC_TYPE_TOKENS)
+        for token in tokens
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -493,11 +573,11 @@ class OntologyGenerator:
                 "structural",
                 "Inferred foreign key: an identifier, not a measure",
             )
-        # Whole-word match, not substring. "int" is contained in POINT,
-        # INTERVAL and GEOPOINT, all of which would otherwise be read as
-        # numeric and then fall through unclassified -- leaving SUM(location)
-        # on a POINT column entirely unreported.
-        if not NUMERIC_TYPE_RE.search(sql_type):
+        # Token membership, not substring and not word boundaries. Both of
+        # those fail on real dialect spellings in opposite directions: "int"
+        # is a substring of POINT, and INT64 / UInt64 / HUGEINT contain no
+        # numeric word at all.
+        if not is_numeric_sql_type(sql_type):
             return (
                 "attribute",
                 "structural",
