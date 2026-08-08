@@ -210,6 +210,7 @@ async def discover_schema(
                     session=session,
                     ctx=ctx,
                     version=cached_version,
+                    views_info=session.get_cached_views(effective_schema or ""),
                 )
             )
             session.graphrag.track_init_task(task)
@@ -254,6 +255,19 @@ async def discover_schema(
 
     db_manager = services.get_session_db_manager(ctx)
     tables = db_manager.get_tables(schema_name)
+
+    # Views are discovered alongside tables but kept apart from them: they are
+    # indexed into GraphRAG for search and never enter the ontology, so they
+    # are cached separately rather than appended to the table list.
+    try:
+        views = db_manager.get_views(schema_name)
+        if views:
+            logger.info(f"Discovered {len(views)} views in schema {schema_name}")
+    except Exception as e:
+        # A backend that cannot enumerate views must not fail discovery.
+        logger.warning(f"Could not discover views for schema {schema_name}: {e}")
+        views = []
+    session.cache_views(schema_name or "", views)
 
     # Prefetch PKs and FKs at schema level (Snowflake optimization)
     if schema_name:
@@ -339,6 +353,7 @@ async def discover_schema(
                     session=session,
                     ctx=ctx,
                     version=schema_version,
+                    views_info=views,
                 )
             )
             session.graphrag.track_init_task(task)
@@ -575,6 +590,7 @@ async def discover_schema(
                     session=services.get_session_data(ctx),
                     ctx=ctx,
                     version=schema_version,
+                    views_info=views,
                 )
             )
             session = services.get_session_data(ctx)

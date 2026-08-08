@@ -241,6 +241,31 @@ class DatabricksDriver(DatabaseDriver):
                 logger.error(f"Fallback table query also failed: {fallback_error}")
                 return []
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        """Get views in a schema, with their SQL definitions."""
+        try:
+            schema = schema_name or self._schema
+            if not schema:
+                logger.error("No schema specified and no default schema set")
+                return {}
+
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                query = text("""
+                    SELECT table_name, view_definition
+                    FROM information_schema.views
+                    WHERE table_catalog = :catalog
+                    AND table_schema = :schema
+                    ORDER BY table_name
+                """)
+                result = conn.execute(
+                    query, {"catalog": self._catalog, "schema": schema}
+                )
+                return {row[0]: row[1] for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get Databricks views: {e}")
+            return {}
+
     def analyze_table(
         self, table_name: str, schema_name: str | None = None
     ) -> TableInfo | None:

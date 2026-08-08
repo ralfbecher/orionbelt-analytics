@@ -191,6 +191,26 @@ class BigQueryDriver(DatabaseDriver):
             logger.error(f"Failed to get BigQuery tables: {e}")
             return []
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        try:
+            dataset = schema_name or self._dataset
+            if not dataset:
+                logger.error("No dataset specified and no default dataset set")
+                return {}
+
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                query = text(f"""
+                    SELECT table_name, view_definition
+                    FROM `{self._project_id}.{dataset}`.INFORMATION_SCHEMA.VIEWS
+                    ORDER BY table_name
+                """)
+                result = conn.execute(query)
+                return {row[0]: row[1] for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get BigQuery views: {e}")
+            return {}
+
     def analyze_table(
         self, table_name: str, schema_name: str | None = None
     ) -> TableInfo | None:

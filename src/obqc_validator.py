@@ -34,6 +34,7 @@ class OBQCIssueType(Enum):
     FAN_TRAP_DETECTED = "fan_trap_detected"
     NON_AGGREGATED_COLUMN = "non_aggregated_column"
     AMBIGUOUS_COLUMN = "ambiguous_column"
+    VIEW_NOT_JOINABLE = "view_not_joinable"
 
 
 class OBQCSeverity(Enum):
@@ -150,6 +151,67 @@ COMPARISON_TYPES = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
 
 # XSD type names the ontology uses for dates and times.
 TEMPORAL_XSD_TYPES = frozenset({"date", "datetime", "time", "gyear", "gyearmonth"})
+
+
+def derive_view_columns(definition: str | None, dialect: str = "postgres") -> set[str]:
+    """Derive a view's output column names from its definition.
+
+    Returns an empty set whenever the answer is not certain, and the caller
+    reads that as "do not check this view's columns". Being wrong in the
+    permissive direction costs a missed error; being wrong the other way
+    blocks a correct query, which is the failure this whole exemption exists
+    to prevent.
+
+    Uncertain means: no definition (PostgreSQL withholds the body from
+    non-owners), a body that does not parse (view SQL comes back in
+    dialect-specific forms), or a ``SELECT *`` whose output depends on tables
+    resolved at creation time.
+
+    Args:
+        definition: The view's SQL body, if the backend exposed it.
+        dialect: sqlglot dialect name for parsing.
+
+    Returns:
+        Lower-cased output column names, or an empty set when not derivable.
+    """
+    if not definition:
+        return set()
+
+    try:
+        parsed = sqlglot.parse_one(definition, dialect=dialect)
+    except Exception as e:
+        logger.debug(f"Could not parse view definition ({e}); columns unchecked.")
+        return set()
+
+    # An explicit column header renames the whole output:
+    # "CREATE VIEW v (user_id, user_name) AS SELECT id, name ..." exposes
+    # user_id/user_name, not id/name. The header wins over the select list, and
+    # it is authoritative even when the body selects * -- so this is checked
+    # before anything reads the projections. DuckDB returns the full CREATE
+    # statement from duckdb_views(), which is how this shape reaches us.
+    if isinstance(parsed, exp.Create) and isinstance(parsed.this, exp.Schema):
+        declared = [ident.name for ident in parsed.this.expressions if ident.name]
+        if declared:
+            return {name.lower() for name in declared}
+
+    select = parsed.find(exp.Select)
+    if select is None:
+        return set()
+
+    columns: set[str] = set()
+    for projection in select.expressions:
+        # A star anywhere means the output list is not knowable from the text.
+        if isinstance(projection, exp.Star) or projection.find(exp.Star):
+            return set()
+
+        name = projection.alias_or_name
+        if not name:
+            # An unnamed expression (e.g. a bare literal) leaves the column
+            # name up to the database, so the set would be incomplete.
+            return set()
+        columns.add(name.lower())
+
+    return columns
 
 
 @dataclass
@@ -346,6 +408,80 @@ class OBQCValidator:
         # id() of table nodes in the query under validation that name a CTE
         # rather than a real table. Per-parse state, reset by validate().
         self._cte_references: set[int] = set()
+        # Database views: lower-cased name -> lower-cased output columns.
+        # Views are deliberately absent from the ontology (a view pre-joins its
+        # sources, so a class for it would restate what the base tables already
+        # model), but they are real objects a query may legitimately name. Held
+        # here so existence checks pass without the ontology having to describe
+        # them. An empty column set means "columns not derivable" -- see
+        # derive_view_columns.
+        self._known_views: dict[str, set[str]] = {}
+        # Signature of the view set last registered, so definitions are
+        # re-parsed only when they change.
+        self._view_signature: tuple[tuple[str, str], ...] | None = None
+
+    def load_views(self, views: dict[str, set[str]]) -> None:
+        """Register database views so queries against them are not rejected.
+
+        Without this, every view query fails: OBQC requires each referenced
+        table to appear in the ontology, and views never do. That is the same
+        false-positive shape already fixed for catalog tables and CTEs -- a
+        correct query blocked because the validator had no way to know the
+        object exists.
+
+        Args:
+            views: Mapping of view name to its output column names. An empty
+                set registers the view's existence while leaving its columns
+                unchecked, which is the safe reading when the definition could
+                not be parsed or selects ``*``.
+        """
+        self._known_views = {
+            name.lower(): {col.lower() for col in columns}
+            for name, columns in views.items()
+        }
+        logger.debug(f"OBQC registered {len(self._known_views)} views")
+
+    def load_views_from_definitions(
+        self, definitions: dict[str, str | None], dialect: str = "postgresql"
+    ) -> None:
+        """Register views, deriving each one's columns from its definition.
+
+        Safe to call on every validation: the definitions are re-parsed only
+        when the set of views actually changed, so a session that discovers a
+        schema after its validator was built still picks the views up without
+        paying to parse them again on each query.
+
+        Args:
+            definitions: Mapping of view name to SQL body (None when withheld).
+            dialect: Database dialect name, mapped to sqlglot's.
+        """
+        signature = tuple(
+            sorted((name, body or "") for name, body in definitions.items())
+        )
+        if signature == self._view_signature:
+            return
+
+        sqlglot_dialect = self.DIALECT_MAP.get(dialect, "postgres")
+        self.load_views(
+            {
+                name: derive_view_columns(body, sqlglot_dialect)
+                for name, body in definitions.items()
+            }
+        )
+        self._view_signature = signature
+
+    def _view_columns_unknown(self, table_key: str) -> bool:
+        """True when *table_key* is a view whose columns could not be derived."""
+        return table_key in self._known_views and not self._known_views[table_key]
+
+    def _table_provides_column(self, table_key: str, col_key: str) -> bool:
+        """True when *table_key* -- an ontology table or a view -- has *col_key*."""
+        if table_key in self._known_views:
+            return col_key in self._known_views[table_key]
+        if self._schema_cache is None:
+            return False
+        table = self._schema_cache.tables.get(table_key)
+        return table is not None and col_key in table.columns
 
     def load_ontology(self, ontology_graph: Graph, base_uri: str) -> None:
         """Load and cache schema from ontology graph.
@@ -1489,6 +1625,10 @@ class OBQCValidator:
             # be; demanding it appear there blocks catalog queries outright.
             if table_name in result.catalog_tables:
                 continue
+            # A view is a real object the ontology deliberately omits, for the
+            # same reason: requiring it there would block every view query.
+            if table_name.lower() in self._known_views:
+                continue
             if table_name.lower() not in self._schema_cache.tables:
                 available_tables = list(self._schema_cache.tables.keys())[:10]
                 result.issues.append(
@@ -1513,6 +1653,28 @@ class OBQCValidator:
                 table_name, col_name = parts[0], parts[1]
                 table_key = table_name.lower()
                 col_key = col_name.lower()
+
+                # A view's columns come from its definition, not the ontology.
+                # When they were derivable, check against them; when they were
+                # not, checking anything would invent errors.
+                if table_key in self._known_views:
+                    view_columns = self._known_views[table_key]
+                    if view_columns and col_key not in view_columns:
+                        available_cols = sorted(view_columns)[:10]
+                        result.issues.append(
+                            OBQCIssue(
+                                issue_type=OBQCIssueType.COLUMN_NOT_FOUND,
+                                severity=OBQCSeverity.ERROR,
+                                message=(
+                                    f"Column '{col_name}' not found in view "
+                                    f"'{table_name}'"
+                                ),
+                                location="Column reference",
+                                suggestion=f"Available columns: {', '.join(available_cols)}",
+                                related_entities=[col_ref],
+                            )
+                        )
+                    continue
 
                 # A qualifier naming a CTE was already dropped at extraction,
                 # at the reference itself, so anything reaching here is a real
@@ -1544,12 +1706,8 @@ class OBQCValidator:
                     matches = [
                         table_name
                         for table_name, is_cte in level
-                        if (
-                            not is_cte
-                            and table_name.lower() in self._schema_cache.tables
-                            and col_key
-                            in self._schema_cache.tables[table_name.lower()].columns
-                        )
+                        if not is_cte
+                        and self._table_provides_column(table_name.lower(), col_key)
                     ]
                     if matches:
                         found_in_tables = matches
@@ -1568,11 +1726,16 @@ class OBQCValidator:
                 # unqualified name that matches no ontology table may well be
                 # one of them. Judged per reference: a name that is a CTE here
                 # may be a real table in another scope.
+                # A view whose columns could not be derived is undescribable in
+                # exactly the sense this check means: an unqualified name that
+                # matches no ontology table may well be one of its outputs.
                 visible = [pair for level in scope for pair in level]
                 describable_tables = [
                     name
                     for name, is_cte in visible
-                    if not is_cte and name not in result.catalog_tables
+                    if not is_cte
+                    and name not in result.catalog_tables
+                    and not self._view_columns_unknown(name.lower())
                 ]
                 all_tables_describable = len(describable_tables) == len(visible)
 
@@ -1653,6 +1816,73 @@ class OBQCValidator:
             found = True
 
         return found
+
+    def _flag_view_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
+        """Report SELECTs that join a view to anything else.
+
+        A view is a single entity: it has already applied its own joins and
+        grain, and the ontology describes none of that. So none of the
+        machinery that makes a join checkable is available for one -- no
+        primary key, no foreign keys, no declared cardinality, no place in the
+        fan-trap topology. A join to a view is therefore unvalidatable, and an
+        unvalidatable join between an aggregate view and a fact table is
+        exactly the shape that silently multiplies rows.
+
+        Blocking is the same judgement OBQC already makes for fan-traps:
+        refuse the query rather than return numbers nobody can check. Query
+        the view on its own, or join the base tables it derives from.
+
+        Judged per SELECT, following the rule in _flag_cartesian_products: a
+        view used in one scope must not condemn a join in another.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to append issues to.
+        """
+        if not self._known_views:
+            return
+
+        for select in parsed.find_all(exp.Select):
+            tables = [
+                t
+                for t in select.find_all(exp.Table)
+                if t.name
+                and t.find_ancestor(exp.Select) is select
+                and id(t) not in self._cte_references
+            ]
+            if len(tables) < 2:
+                continue
+
+            views_used = sorted(
+                {t.name for t in tables if t.name.lower() in self._known_views}
+            )
+            if not views_used:
+                continue
+
+            others = sorted(
+                {t.name for t in tables if t.name.lower() not in self._known_views}
+            )
+            # A view joined only to other views is equally unvalidatable.
+            joined_to = others or views_used[1:]
+
+            result.issues.append(
+                OBQCIssue(
+                    issue_type=OBQCIssueType.VIEW_NOT_JOINABLE,
+                    severity=OBQCSeverity.ERROR,
+                    message=(
+                        f"View '{views_used[0]}' cannot be joined: a view is a "
+                        f"single entity whose joins and grain are already fixed, "
+                        f"and the ontology does not describe them "
+                        f"(joined with: {', '.join(joined_to)})"
+                    ),
+                    location="FROM clause",
+                    suggestion=(
+                        f"Query '{views_used[0]}' on its own, or join the base "
+                        "tables it derives from so the join can be validated."
+                    ),
+                    related_entities=views_used,
+                )
+            )
 
     def _unjoined_tables(
         self, select: exp.Select, tables: list[exp.Table]
@@ -1829,6 +2059,11 @@ class OBQCValidator:
 
     def _validate_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Rule: Validate joins use declared FK relationships."""
+        # Runs before the cross-product check returns: a view joined without
+        # an ON condition is both, and the view finding is the one that
+        # explains why no ON condition could have made it valid.
+        self._flag_view_joins(parsed, result)
+
         if self._flag_cartesian_products(parsed, result):
             # A cross product is reported once per query; the per-join checks
             # below would restate it as a missing ON condition.

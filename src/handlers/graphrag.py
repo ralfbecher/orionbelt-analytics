@@ -218,12 +218,24 @@ async def _auto_generate_ontology_background(
         logger.debug("Ontology auto-gen traceback:", exc_info=True)
 
 
+def _view_info_to_dict(view_info: Any) -> dict[str, Any]:
+    """Convert a ViewInfo (or already-dict) into the embedder's input shape."""
+    if isinstance(view_info, dict):
+        return view_info
+    return {
+        "name": view_info.name,
+        "definition": view_info.definition,
+        "comment": getattr(view_info, "comment", None),
+    }
+
+
 async def _auto_initialize_graphrag_background(
     schema_name: str,
     tables_info: list[Any],
     session: Any,
     ctx: Context,
     version: int | None = None,
+    views_info: list[Any] | None = None,
 ) -> None:
     """Background task: Auto-initialize or accumulate GraphRAG after schema analysis.
 
@@ -237,6 +249,7 @@ async def _auto_initialize_graphrag_background(
     try:
         start_time = time.time()
         tables_dict = [_table_info_to_dict(t) for t in tables_info]
+        views_dict = [_view_info_to_dict(v) for v in views_info or []]
 
         if session.graphrag_manager is None:
             # First schema — initialize from scratch
@@ -246,7 +259,9 @@ async def _auto_initialize_graphrag_background(
                 schema_name=schema_name,
             )
             session.graphrag_manager.initialize_from_schema(
-                tables_info=tables_dict, schema_name=schema_name
+                tables_info=tables_dict,
+                schema_name=schema_name,
+                views_info=views_dict,
             )
         else:
             # Additional schema — accumulate into existing graph
@@ -254,7 +269,9 @@ async def _auto_initialize_graphrag_background(
                 f"Accumulating schema '{schema_name}' into existing GraphRAG..."
             )
             session.graphrag_manager.accumulate_schema(
-                tables_info=tables_dict, schema_name=schema_name
+                tables_info=tables_dict,
+                schema_name=schema_name,
+                views_info=views_dict,
             )
 
         await _save_graphrag_state(session, schema_name, version)
@@ -378,6 +395,21 @@ async def initialize_graphrag(
     # Convert TableInfo objects to dictionaries
     tables_dict = [_table_info_to_dict(t) for t in tables_info]
 
+    # Views come from the discovery cache, or straight from the database when
+    # this tool is the entry point -- which it is whenever AUTO_GRAPHRAG is
+    # false or a client calls it directly. Without this the manual path
+    # indexes tables only, and views reach GraphRAG on the auto path alone.
+    views_info = session.get_cached_views(effective_schema or "")
+    if not views_info:
+        try:
+            views_info = db_manager.get_views(effective_schema)
+            if views_info:
+                session.cache_views(effective_schema or "", views_info)
+        except Exception as e:
+            logger.warning(f"Could not fetch views for GraphRAG: {e}")
+            views_info = []
+    views_dict = [_view_info_to_dict(v) for v in views_info]
+
     eff_schema = effective_schema or "default"
 
     # Bound to the generation current when this call started; embedding a large
@@ -400,12 +432,16 @@ async def initialize_graphrag(
                 schema_name=eff_schema,
             )
             session.graphrag_manager.initialize_from_schema(
-                tables_info=tables_dict, schema_name=eff_schema
+                tables_info=tables_dict,
+                schema_name=eff_schema,
+                views_info=views_dict,
             )
         else:
             # Accumulate into existing graph
             session.graphrag_manager.accumulate_schema(
-                tables_info=tables_dict, schema_name=eff_schema
+                tables_info=tables_dict,
+                schema_name=eff_schema,
+                views_info=views_dict,
             )
 
         session.graphrag_initialized = True

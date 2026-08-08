@@ -176,6 +176,34 @@ class PostgreSQLDriver(DatabaseDriver):
             logger.error(f"Failed to get tables: {e}")
             return []
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        # pg_catalog.pg_views rather than information_schema.views: the latter
+        # returns view_definition as NULL unless the caller owns the view, which
+        # is the common case for a read-only analytics role.
+        try:
+            assert self.engine is not None
+            with self.engine.connect() as conn:
+                if schema_name:
+                    query = text("""
+                        SELECT viewname, definition
+                        FROM pg_catalog.pg_views
+                        WHERE schemaname = :schema_name
+                        ORDER BY viewname
+                    """)
+                    result = conn.execute(query, {"schema_name": schema_name})
+                else:
+                    query = text("""
+                        SELECT viewname, definition
+                        FROM pg_catalog.pg_views
+                        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+                        ORDER BY viewname
+                    """)
+                    result = conn.execute(query)
+                return {row[0]: row[1] for row in result.fetchall()}
+        except SQLAlchemyError as e:
+            logger.error(f"Failed to get views: {e}")
+            return {}
+
     def analyze_table(
         self, table_name: str, schema_name: str | None = None
     ) -> TableInfo | None:

@@ -687,7 +687,7 @@ async def graphrag_search(
     query: _QueryText | None = None,
     top_k: int = 5,
     element_type: (
-        Literal["table", "column", "relationship", "semantic_context"] | None
+        Literal["table", "column", "relationship", "semantic_context", "view"] | None
     ) = None,
     overview: bool = False,
 ) -> dict[str, Any]:
@@ -700,11 +700,18 @@ async def graphrag_search(
     itself. If a concept lives in business vocabulary the column names do not
     use ("profit", "churn"), index it first with add_semantic_context.
 
+    Database views are indexed too, and are often the best answer to a
+    business-vocabulary question: a view body is analyst-authored SQL naming
+    the measures and joins someone already validated. A "view" hit carries its
+    definition in the metadata, so the SQL can be read or reused directly.
+    Views are searchable but are NOT in the ontology, so querying one still
+    has to be judged on its own.
+
     Args:
         query: Natural language search query (required unless overview=True)
         top_k: Number of results to return
         element_type: Filter by type ("table", "column", "relationship",
-            "semantic_context", or None)
+            "semantic_context", "view", or None)
         overview: If True, return schema statistics and communities instead of search
 
     Returns:

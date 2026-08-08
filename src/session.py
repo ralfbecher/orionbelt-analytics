@@ -46,6 +46,12 @@ class SchemaCache:
         self._cached_schema: dict[str, list[Any]] | None = (
             None  # schema_name -> List[TableInfo]
         )
+        # Views are cached separately, not folded into _cached_schema, because
+        # every consumer of that dict feeds the ontology -- and views are
+        # deliberately kept out of it. They exist here only to reach GraphRAG.
+        self._cached_views: dict[str, list[Any]] | None = (
+            None  # schema_name -> List[ViewInfo]
+        )
         self._last_analyzed_schema: str | None = None
 
     def cache_schema_analysis(self, schema_name: str, tables_info: list[Any]) -> None:
@@ -69,6 +75,30 @@ class SchemaCache:
             logger.debug(f"Using cached schema for '{cache_key}': {len(cached)} tables")
         return cached
 
+    def cache_views(self, schema_name: str, views_info: list[Any]) -> None:
+        """Cache discovered views for reuse by GraphRAG indexing."""
+        if self._cached_views is None:
+            self._cached_views = {}
+        cache_key = schema_name or "_default_"
+        self._cached_views[cache_key] = views_info
+        logger.debug(f"Cached views for '{cache_key}': {len(views_info)} views")
+
+    def get_cached_views(self, schema_name: str) -> list[Any]:
+        """Get cached views, or an empty list when none were discovered."""
+        if self._cached_views is None:
+            return []
+        return self._cached_views.get(schema_name or "_default_", [])
+
+    def get_all_cached_views(self) -> list[Any]:
+        """Every discovered view across all schemas on this connection.
+
+        OBQC is per session, not per schema, so it needs the union: a query may
+        name a view from a schema discovered earlier.
+        """
+        if self._cached_views is None:
+            return []
+        return [view for views in self._cached_views.values() for view in views]
+
     def clear(self, schema_name: str | None = None) -> None:
         """Clear cached schema analysis.
 
@@ -76,14 +106,21 @@ class SchemaCache:
             schema_name: If provided, clear only that schema's cache.
                          If None, clear all cached schemas.
         """
-        if schema_name is not None and self._cached_schema is not None:
+        # Views clear with their schema. Leaving them behind outlives the
+        # tables they came from, and OBQC would keep accepting objects from a
+        # connection or schema that is no longer loaded.
+        if schema_name is not None:
             cache_key = schema_name or "_default_"
-            self._cached_schema.pop(cache_key, None)
+            if self._cached_schema is not None:
+                self._cached_schema.pop(cache_key, None)
+            if self._cached_views is not None:
+                self._cached_views.pop(cache_key, None)
             if self._last_analyzed_schema == schema_name:
                 self._last_analyzed_schema = None
             logger.debug(f"Cleared schema cache for '{cache_key}'")
         else:
             self._cached_schema = None
+            self._cached_views = None
             self._last_analyzed_schema = None
             logger.debug("Cleared all schema caches")
 
@@ -387,6 +424,18 @@ class SessionData:
     def get_cached_schema(self, schema_name: str) -> list[Any] | None:
         """Get cached schema analysis results if available."""
         return self.schema_cache.get_cached_schema(schema_name)
+
+    def cache_views(self, schema_name: str, views_info: list[Any]) -> None:
+        """Cache discovered views for reuse by GraphRAG indexing."""
+        self.schema_cache.cache_views(schema_name, views_info)
+
+    def get_cached_views(self, schema_name: str) -> list[Any]:
+        """Get cached views, or an empty list when none were discovered."""
+        return self.schema_cache.get_cached_views(schema_name)
+
+    def get_all_cached_views(self) -> list[Any]:
+        """Every discovered view across all schemas on this connection."""
+        return self.schema_cache.get_all_cached_views()
 
     def clear_schema_cache(self, schema_name: str | None = None) -> None:
         """Clear cached schema analysis.

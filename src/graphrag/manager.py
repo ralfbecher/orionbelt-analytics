@@ -36,6 +36,64 @@ except ImportError:
     logger.warning("ChromaDB not available - falling back to JSON-based vector storage")
 
 
+def _annotate_view_sources(
+    views_info: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Fill in each view's ``referenced_tables`` by parsing its definition.
+
+    A view body names the base tables it reads, so the sources can be
+    recovered without asking the database a second question. Knowing them
+    makes the view findable by the vocabulary of its inputs, not only its own
+    name -- a search for "clients" should surface ``v_monthly_revenue`` when
+    that view reads the clients table.
+
+    Parse failures are not errors: view bodies come back in dialect-specific
+    forms, and a view that cannot be parsed is still worth indexing by name
+    and raw text. Such a view simply keeps an empty source list.
+
+    Args:
+        views_info: View metadata, or None.
+
+    Returns:
+        The same list with ``referenced_tables`` populated where derivable.
+        Returns an empty list when given None.
+    """
+    if not views_info:
+        return []
+
+    import sqlglot
+    from sqlglot import exp
+
+    for view in views_info:
+        if view.get("referenced_tables"):
+            continue
+
+        definition = view.get("definition")
+        if not definition:
+            view["referenced_tables"] = []
+            continue
+
+        try:
+            parsed = sqlglot.parse_one(definition)
+            # CTE names are defined by the view itself, so they are not
+            # sources; excluding them keeps the list to real base tables.
+            cte_names = {cte.alias_or_name.lower() for cte in parsed.find_all(exp.CTE)}
+            sources = {
+                table.name
+                for table in parsed.find_all(exp.Table)
+                if table.name and table.name.lower() not in cte_names
+            }
+            view["referenced_tables"] = sorted(sources)
+        except Exception as e:
+            logger.debug(
+                f"Could not parse definition of view '{view.get('name')}' "
+                f"({e}); indexing it without source tables."
+            )
+            view["referenced_tables"] = []
+
+    return views_info
+
+
 class GraphRAGManager:
     """Main manager for GraphRAG operations."""
 
@@ -93,7 +151,10 @@ class GraphRAGManager:
         self._connection_id: str = connection_id or "default"
 
     def initialize_from_schema(
-        self, tables_info: list[dict[str, Any]], schema_name: str = "default"
+        self,
+        tables_info: list[dict[str, Any]],
+        schema_name: str = "default",
+        views_info: list[dict[str, Any]] | None = None,
     ) -> None:
         """
         Initialize GraphRAG from schema metadata.
@@ -101,22 +162,28 @@ class GraphRAGManager:
         Args:
             tables_info: List of table metadata dictionaries
             schema_name: Schema identifier
+            views_info: Optional view metadata. Views are indexed for search
+                only -- they are not added to the relationship graph and never
+                reach the ontology.
         """
         logger.info(
-            f"Initializing GraphRAG for schema '{schema_name}' with {len(tables_info)} tables"
+            f"Initializing GraphRAG for schema '{schema_name}' with "
+            f"{len(tables_info)} tables and {len(views_info or [])} views"
         )
 
         self._schema_name = schema_name
+        views_info = _annotate_view_sources(views_info)
 
         # Step 1: Create embeddings
         logger.info("Creating embeddings...")
-        embeddings = self.embedder.batch_embed_schema(tables_info)
+        embeddings = self.embedder.batch_embed_schema(tables_info, views_info)
 
         # Step 2: Add to vector store
         logger.info("Building vector store...")
         self.vector_store.add_elements_batch(embeddings["tables"])
         self.vector_store.add_elements_batch(embeddings["columns"])
         self.vector_store.add_elements_batch(embeddings["relationships"])
+        self.vector_store.add_elements_batch(embeddings["views"])
         self.vector_store.build_index()
 
         # Step 3: Build graph
@@ -134,7 +201,10 @@ class GraphRAGManager:
         logger.info("GraphRAG initialization complete")
 
     def accumulate_schema(
-        self, tables_info: list[dict[str, Any]], schema_name: str = "default"
+        self,
+        tables_info: list[dict[str, Any]],
+        schema_name: str = "default",
+        views_info: list[dict[str, Any]] | None = None,
     ) -> None:
         """Add a schema's tables to an already-initialized GraphRAG (accumulative).
 
@@ -145,20 +215,25 @@ class GraphRAGManager:
         Args:
             tables_info: List of table metadata dictionaries
             schema_name: Schema identifier being added
+            views_info: Optional view metadata, indexed for search only.
         """
         logger.info(
             f"Accumulating schema '{schema_name}' into GraphRAG "
-            f"({len(tables_info)} tables, existing schemas: {self._schema_names})"
+            f"({len(tables_info)} tables, {len(views_info or [])} views, "
+            f"existing schemas: {self._schema_names})"
         )
+
+        views_info = _annotate_view_sources(views_info)
 
         # Step 1: Create embeddings for new tables
         logger.info("Creating embeddings for new schema...")
-        embeddings = self.embedder.batch_embed_schema(tables_info)
+        embeddings = self.embedder.batch_embed_schema(tables_info, views_info)
 
         # Step 2: Add to vector store (ChromaDB upserts by ID, JSON appends)
         self.vector_store.add_elements_batch(embeddings["tables"])
         self.vector_store.add_elements_batch(embeddings["columns"])
         self.vector_store.add_elements_batch(embeddings["relationships"])
+        self.vector_store.add_elements_batch(embeddings["views"])
         self.vector_store.build_index()
 
         # Step 3: Add to graph (accumulative, no clear)

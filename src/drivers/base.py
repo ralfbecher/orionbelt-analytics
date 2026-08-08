@@ -38,6 +38,31 @@ class DatabaseDriver(ABC):
     def get_tables(self, schema_name: str | None = None) -> list[str]:
         """Return a list of table names in the given schema."""
 
+    def get_views(self, schema_name: str | None = None) -> dict[str, str | None]:
+        """Return ``{view_name: definition_sql}`` for views in the schema.
+
+        Views are deliberately excluded from :meth:`get_tables` (which filters
+        to base tables) because they do not belong in the ontology: a view
+        pre-joins its sources, so modelling it as an OWL class would duplicate
+        concepts the base tables already carry and give the FK/fan-trap
+        reasoning an isolated node with no relationships. They are still
+        valuable to GraphRAG -- a view body is analyst-authored SQL carrying
+        both business vocabulary and validated join conditions.
+
+        Concrete: not abstract. A driver that cannot enumerate views (or whose
+        backend has none) inherits the empty default rather than failing, so
+        adding this never breaks an existing driver.
+
+        Args:
+            schema_name: Schema to inspect, or None for the default schema.
+
+        Returns:
+            Mapping of view name to its SQL definition. The definition is None
+            when the backend exposes the view but withholds its body (commonly
+            a permissions matter, e.g. PostgreSQL returns NULL to non-owners).
+        """
+        return {}
+
     @abstractmethod
     def analyze_table(
         self, table_name: str, schema_name: str | None = None

@@ -323,6 +323,7 @@ async def test_full_workflow_lightweight_to_ontology(
                 self.graphrag_manager = None
                 self.graphrag = Mock()
                 self._cache = cached_data
+                self._views = {}
                 self._current_schema = None
                 self.ontology_enriched = False
                 self.loaded_ontology = None
@@ -334,6 +335,14 @@ async def test_full_workflow_lightweight_to_ontology(
 
             def cache_schema_analysis(self, schema_name, tables):
                 self._cache[schema_name] = tables
+
+            def cache_views(self, schema_name, views):
+                # Views are cached apart from tables: they feed GraphRAG only
+                # and must never reach the ontology this test generates.
+                self._views[schema_name] = views
+
+            def get_cached_views(self, schema_name):
+                return self._views.get(schema_name, [])
 
             def get_last_analyzed_schema(self):
                 return "public" if "public" in self._cache else None
