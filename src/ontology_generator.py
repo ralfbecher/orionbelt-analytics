@@ -26,6 +26,100 @@ _WORD_FREQ_THRESHOLD = 1e-6
 # These should NOT be flagged as cryptic on their own.
 _KNOWN_DB_SUFFIXES = {"id", "pk", "fk", "idx", "seq"}
 
+# Alphabetic runs of a SQL type name. Splitting on everything else does the
+# normalization on its own: the width suffixes fall away (INT64 -> int,
+# Float64 -> float, Decimal128 -> decimal) and wrappers surrender their inner
+# type (Nullable(Float64) -> nullable, float; ARRAY<INT64> -> array, int).
+_TYPE_TOKEN_RE = re.compile(r"[a-z]+")
+
+# Numeric type names across every supported dialect, as tokens. Membership
+# rather than substring: "int" is contained in POINT, INTERVAL and GEOPOINT,
+# and matching those as numeric leaves SUM(location) unreported. Membership
+# rather than word-boundary regex: BigQuery writes INT64 and BIGNUMERIC,
+# ClickHouse UInt64 and Float32, DuckDB HUGEINT and UTINYINT -- none of which
+# contain a numeric *word*, so a \b matcher rejects them and every measure on
+# those engines is misread as an attribute.
+_NUMERIC_TYPE_TOKENS = frozenset(
+    {
+        # integers
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "mediumint",
+        "byteint",
+        "hugeint",
+        "int2",
+        "int4",
+        "int8",
+        # auto-increment integers
+        "serial",
+        "bigserial",
+        "smallserial",
+        # exact decimals
+        "decimal",
+        "numeric",
+        "bignumeric",
+        "dec",
+        "fixed",
+        "number",
+        # floating point
+        "float",
+        "double",
+        "real",
+        "float4",
+        "float8",
+        # currency
+        "money",
+        "smallmoney",
+    }
+)
+
+# Composite types. Scalar aggregation does not apply to them, whatever they
+# contain: SUM(Array(Float64)) is not a question about additivity.
+_COMPOSITE_TYPE_TOKENS = frozenset(
+    {
+        "array",
+        "map",
+        "tuple",
+        "struct",
+        "nested",
+        "json",
+        "jsonb",
+        "variant",
+        "object",
+        "list",
+        "row",
+        "set",
+        "geometry",
+        "geography",
+    }
+)
+
+
+def is_numeric_sql_type(sql_type: str) -> bool:
+    """True when *sql_type* holds a scalar number in any supported dialect.
+
+    Args:
+        sql_type: The SQL type as the catalog reports it.
+
+    Returns:
+        True for a scalar numeric type, False for anything else --
+        composites included, since they cannot be summed at all.
+    """
+    tokens = set(_TYPE_TOKEN_RE.findall((sql_type or "").lower()))
+    if tokens & _COMPOSITE_TYPE_TOKENS:
+        return False
+    # The unsigned prefix generically: ClickHouse UInt64 and DuckDB
+    # UTINYINT/UBIGINT are the signed name with a "u" in front.
+    return any(
+        token in _NUMERIC_TYPE_TOKENS
+        or (token.startswith("u") and token[1:] in _NUMERIC_TYPE_TOKENS)
+        for token in tokens
+    )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -129,6 +223,107 @@ class OntologyGenerator:
         "amt",
     ]
 
+    # Column-name patterns for measure semantics. Ordered most specific
+    # first at the point of use: "unit_price" is non-additive even though it
+    # contains "price", and "total_amount" is additive even though a bare
+    # "total" could be either.
+    #
+    # Never meaningful to SUM: a rate, a ratio, a per-unit value. AVG and
+    # MIN/MAX of these are perfectly ordinary, so only SUM is at issue.
+    NON_ADDITIVE_PATTERNS: ClassVar[list[str]] = [
+        "unit_price",
+        "unitprice",
+        "unit_cost",
+        "unitcost",
+        "_rate",
+        "rate_",
+        "_pct",
+        "_percent",
+        "percentage",
+        "_ratio",
+        "ratio_",
+        "margin",
+        "_avg",
+        "avg_",
+        "average",
+        "_price",
+        "price_",
+        "discount_pct",
+        "tax_rate",
+        "exchange_rate",
+        "score",
+        "rating",
+        "temperature",
+        "latitude",
+        "longitude",
+    ]
+
+    # Summable across entities but not across time: a snapshot of a level
+    # rather than a flow. Summing balances over months double-counts.
+    SEMI_ADDITIVE_PATTERNS: ClassVar[list[str]] = [
+        "balance",
+        "_level",
+        "level_",
+        "stock",
+        "on_hand",
+        "onhand",
+        "inventory",
+        "headcount",
+        "occupancy",
+        "_snapshot",
+    ]
+
+    # Meaningful to SUM across every dimension.
+    ADDITIVE_PATTERNS: ClassVar[list[str]] = [
+        "amount",
+        "_amt",
+        "amt_",
+        "quantity",
+        "_qty",
+        "qty_",
+        "revenue",
+        "sales",
+        "_total",
+        "total_",
+        "_sum",
+        "sum_",
+        "_count",
+        "count_",
+        "cost",
+        "profit",
+        "spend",
+        "volume",
+        "weight",
+    ]
+
+    # SQL types that can hold a measure at all. Anything else is an
+    # attribute by construction -- SUM() of a string, a date or a geometry
+    # is not a question about additivity, it is impossible.
+    #
+    # Matched with NUMERIC_TYPE_RE (whole words) rather than by substring:
+    # "int" is a substring of POINT, INTERVAL and GEOPOINT.
+    NUMERIC_SQL_TYPES: ClassVar[list[str]] = [
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "mediumint",
+        "serial",
+        "bigserial",
+        "smallserial",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "money",
+        "smallmoney",
+        "number",
+        "dec",
+        "fixed",
+    ]
+
     # Patterns for denormalized text fields
     DENORM_SUFFIXES: ClassVar[list[str]] = [
         "name",
@@ -144,6 +339,11 @@ class OntologyGenerator:
 
         # OBA (OrionBelt Analytics) namespace for database schema annotations
         self.oba_ns = Namespace(OBA_NAMESPACE)
+
+        # (table, column) pairs this generator inferred to be foreign keys.
+        # Populated by generate_from_schema before any column is written, so
+        # classify_measure can treat an inferred key as the identifier it is.
+        self._inferred_fk_columns: set[tuple[str, str]] = set()
 
         self.graph.bind("ns", self.base_uri)
         self.graph.bind("oba", self.oba_ns)
@@ -231,6 +431,23 @@ class OntologyGenerator:
         self.graph.add((ontology_uri, RDFS.label, Literal(ONTOLOGY_TITLE)))
         self.graph.add((ontology_uri, RDFS.comment, Literal(ONTOLOGY_DESCRIPTION)))
 
+        # Relationships are inferred *before* the columns are written,
+        # because measure classification needs them: an inferred foreign key
+        # is an identifier just as much as a declared one, and the engines
+        # that most need inference (ClickHouse has no FKs at all; BigQuery
+        # and Dremio rarely carry them) are exactly the ones where every key
+        # would otherwise go unrecognised and SUM(customer_id) pass unseen.
+        # The relationship triples themselves are still added further down,
+        # once the classes they connect exist.
+        inferred = (
+            self._infer_implicit_relationships(tables_info)
+            if include_inferred_relationships
+            else []
+        )
+        self._inferred_fk_columns = {
+            (rel.source_table.lower(), rel.column.lower()) for rel in inferred
+        }
+
         # Add all tables and their columns/relationships
         for table_info in tables_info:
             self._add_table_to_ontology(table_info)
@@ -244,9 +461,9 @@ class OntologyGenerator:
         for view_info in views_info or []:
             self._add_view_to_ontology(view_info, known_tables)
 
-        # Infer implicit relationships from naming patterns
+        # Materialize the relationships inferred above, now that the classes
+        # they connect exist.
         if include_inferred_relationships:
-            inferred = self._infer_implicit_relationships(tables_info)
             self.quality_report.inferred_relationships = inferred
 
             for rel in inferred:
@@ -297,6 +514,114 @@ class OntologyGenerator:
             Quality report or None if no generation has occurred
         """
         return self.quality_report
+
+    def classify_measure(
+        self, column: ColumnInfo, table_name: str | None = None
+    ) -> tuple[str, str, str] | None:
+        """Classify how *column* behaves under aggregation.
+
+        Deterministic, in two tiers of decreasing certainty, because the
+        consumer weighs them differently: a structural finding can justify
+        refusing a query, a name-pattern finding can only warn.
+
+        Tier 1, structural and certain. A key is an identifier, not a
+        measure -- ``SUM(order_id)`` is nonsense however numeric it is. A
+        non-numeric column cannot be summed at all. Both follow from schema
+        metadata alone, with no interpretation.
+
+        Tier 2, column-name patterns. A unit price or a rate is never
+        meaningful to SUM; a balance is summable across accounts but not
+        across time. Heuristic, so it is recorded with its reason and marked
+        ``name_pattern`` for the consumer to discount.
+
+        A numeric non-key column matching no pattern returns None -- left
+        unannotated rather than assumed additive. Consumers read these as
+        fact, so an absent value is safer than a wrong one.
+
+        Args:
+            column: The column to classify.
+            table_name: Owning table, needed to recognise a key this
+                generator inferred rather than read from the catalog.
+
+        Returns:
+            ``(measure_type, basis, reason)``, or None when undeterminable.
+        """
+        name = (column.name or "").lower()
+        sql_type = (column.data_type or "").lower()
+
+        # -- Tier 1: structural -------------------------------------------
+        if column.is_primary_key:
+            return (
+                "attribute",
+                "structural",
+                "Primary key: an identifier, not a measure",
+            )
+        if column.is_foreign_key:
+            return (
+                "attribute",
+                "structural",
+                "Foreign key: an identifier, not a measure",
+            )
+        # A key this generator inferred is as much an identifier as a
+        # declared one. Several supported engines carry no FK metadata at
+        # all -- ClickHouse has no foreign keys, BigQuery and Dremio rarely
+        # declare them -- so without this their keys would all read as
+        # unclassified numerics and SUM(customer_id) would pass unseen.
+        if table_name and (table_name.lower(), name) in self._inferred_fk_columns:
+            return (
+                "attribute",
+                "structural",
+                "Inferred foreign key: an identifier, not a measure",
+            )
+        # Token membership, not substring and not word boundaries. Both of
+        # those fail on real dialect spellings in opposite directions: "int"
+        # is a substring of POINT, and INT64 / UInt64 / HUGEINT contain no
+        # numeric word at all.
+        if not is_numeric_sql_type(sql_type):
+            return (
+                "attribute",
+                "structural",
+                f"Non-numeric SQL type '{column.data_type}' cannot be aggregated as a measure",
+            )
+        if any(t in sql_type for t in ("bool", "date", "time", "interval")):
+            return (
+                "attribute",
+                "structural",
+                f"Temporal or boolean SQL type '{column.data_type}' is not a measure",
+            )
+
+        # -- Tier 2: name patterns ----------------------------------------
+        # Most specific first: "unit_price" is non-additive despite
+        # containing neither an additive nor a semi-additive token, and
+        # "total_amount" must not be read as non-additive via "_avg".
+        for pattern in self.NON_ADDITIVE_PATTERNS:
+            if pattern in name:
+                return (
+                    "non_additive",
+                    "name_pattern",
+                    f"Column name contains '{pattern}': a per-unit value, rate or "
+                    "ratio is not meaningful to SUM (AVG and MIN/MAX still are)",
+                )
+        for pattern in self.SEMI_ADDITIVE_PATTERNS:
+            if pattern in name:
+                return (
+                    "semi_additive",
+                    "name_pattern",
+                    f"Column name contains '{pattern}': a level or snapshot is "
+                    "summable across entities but not across time",
+                )
+        for pattern in self.ADDITIVE_PATTERNS:
+            if pattern in name:
+                return (
+                    "additive",
+                    "name_pattern",
+                    f"Column name contains '{pattern}': a flow quantity, "
+                    "summable across every dimension",
+                )
+
+        # Numeric, not a key, no pattern matched. Unknowable without
+        # guessing, so say nothing.
+        return None
 
     def _add_view_to_ontology(
         self, view_info: Any, known_tables: dict[str, str]
@@ -457,6 +782,17 @@ class OntologyGenerator:
         self.graph.add((prop_uri, self.oba_ns.tableName, Literal(table_name)))
         self.graph.add((prop_uri, self.oba_ns.sqlDataType, Literal(column.data_type)))
         self.graph.add((prop_uri, self.oba_ns.isNullable, Literal(column.is_nullable)))
+
+        # Measure semantics: what SUM() may meaningfully touch. Per column,
+        # because a denormalized table holds additive measures next to
+        # attributes and a table-level role cannot express that. Omitted
+        # entirely when it could not be determined without guessing.
+        measure = self.classify_measure(column, table_name)
+        if measure is not None:
+            measure_type, basis, reason = measure
+            self.graph.add((prop_uri, self.oba_ns.measureType, Literal(measure_type)))
+            self.graph.add((prop_uri, self.oba_ns.measureBasis, Literal(basis)))
+            self.graph.add((prop_uri, self.oba_ns.measureReason, Literal(reason)))
         self.graph.add(
             (prop_uri, self.oba_ns.isPrimaryKey, Literal(column.is_primary_key))
         )

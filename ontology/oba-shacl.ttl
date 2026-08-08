@@ -92,11 +92,16 @@ oba:TableShape a sh:NodeShape ;
         sh:datatype xsd:string ;
         sh:name "semantic name"
     ] ;
+    # A real table is often both: a denormalized sales table holds additive
+    # measures next to dimension attributes, and the old enum could not say
+    # so.  "mixed" makes that expressible.  The role stays advisory either
+    # way -- what SUM() may touch is decided per column by oba:measureType,
+    # which is the granularity the question actually lives at.
     sh:property [
         sh:path oba:tableType ;
         sh:maxCount 1 ;
         sh:datatype xsd:string ;
-        sh:in ( "fact" "dimension" "lookup" ) ;
+        sh:in ( "fact" "dimension" "lookup" "mixed" ) ;
         sh:name "table type"
     ] ;
     sh:property [
@@ -139,6 +144,31 @@ oba:ColumnShape a sh:NodeShape ;
         sh:datatype xsd:string ;
         sh:name "SQL data type" ;
         sh:message "Every column property must have exactly one oba:sqlDataType (xsd:string)."
+    ] ;
+    # Measure semantics.  oba:measureBasis says how the classification was
+    # reached, because a structural fact (a key, a text column) can justify
+    # blocking a query while a name-pattern guess can only warn.
+    sh:property [
+        sh:path oba:measureType ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:in ( "additive" "semi_additive" "non_additive" "attribute" ) ;
+        sh:name "measure type" ;
+        sh:message "oba:measureType must be one of additive, semi_additive, non_additive, attribute."
+    ] ;
+    sh:property [
+        sh:path oba:measureBasis ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:in ( "structural" "name_pattern" "declared" ) ;
+        sh:name "measure basis" ;
+        sh:message "oba:measureBasis must be one of structural, name_pattern, declared."
+    ] ;
+    sh:property [
+        sh:path oba:measureReason ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "measure reason"
     ] ;
     sh:property [
         sh:path oba:sqlReference ;
