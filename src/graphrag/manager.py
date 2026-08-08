@@ -38,6 +38,7 @@ except ImportError:
 
 def _annotate_view_sources(
     views_info: list[dict[str, Any]] | None,
+    dialect: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fill in each view's ``referenced_tables`` by parsing its definition.
 
@@ -51,8 +52,16 @@ def _annotate_view_sources(
     forms, and a view that cannot be parsed is still worth indexing by name
     and raw text. Such a view simply keeps an empty source list.
 
+    The dialect matters more than the SQL does. Measured across real view
+    bodies, sqlglot parses semi-structured Snowflake, BigQuery structs,
+    ClickHouse aggregates and LATERAL joins without complaint -- and fails on
+    a Snowflake body read as PostgreSQL. Passing the connection's dialect is
+    what makes the difference between lineage and silence.
+
     Args:
         views_info: View metadata, or None.
+        dialect: sqlglot dialect name. None uses sqlglot's permissive
+            default, which is right only when the backend is unknown.
 
     Returns:
         The same list with ``referenced_tables`` populated where derivable.
@@ -74,14 +83,23 @@ def _annotate_view_sources(
             continue
 
         try:
-            parsed = sqlglot.parse_one(definition)
+            parsed = sqlglot.parse_one(definition, dialect=dialect)
             # CTE names are defined by the view itself, so they are not
             # sources; excluding them keeps the list to real base tables.
-            cte_names = {cte.alias_or_name.lower() for cte in parsed.find_all(exp.CTE)}
+            excluded = {cte.alias_or_name.lower() for cte in parsed.find_all(exp.CTE)}
+            # Nor is the view itself. DuckDB returns the whole CREATE VIEW
+            # statement, whose target parses as a Table like any other, so the
+            # view listed itself among its own sources.
+            if isinstance(parsed, exp.Create):
+                for target in parsed.this.find_all(exp.Table):
+                    if target.name:
+                        excluded.add(target.name.lower())
+            excluded.add(str(view.get("name", "")).lower())
+
             sources = {
                 table.name
                 for table in parsed.find_all(exp.Table)
-                if table.name and table.name.lower() not in cte_names
+                if table.name and table.name.lower() not in excluded
             }
             view["referenced_tables"] = sorted(sources)
         except Exception as e:

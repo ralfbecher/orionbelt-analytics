@@ -4,11 +4,14 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any
+from functools import partial
+from typing import Any, cast
 
 from fastmcp import Context
 
+from ..constants import DB_SQLGLOT_DIALECTS
 from ..database_manager import ColumnInfo, TableInfo
+from ..graphrag.manager import _annotate_view_sources
 from ..handler_context import HandlerContext
 from ..lifecycle.artifacts import artifact_family_lock, prune_superseded_artifacts
 from ..lifecycle.metadata import (
@@ -24,6 +27,52 @@ from ..paths import OUTPUT_DIR, ensure_output_dir, get_connection_dir
 from ..utils import utc_now, write_text_file
 
 logger = logging.getLogger(__name__)
+
+
+def _views_for_ontology(session: Any, schema_name: str | None) -> list[Any]:
+    """Discovered views for *schema_name*, with their lineage resolved.
+
+    Lineage is filled in here rather than at discovery because it is only the
+    ontology that consumes it, and it is parsed with the connection's own
+    dialect: a Snowflake body read as PostgreSQL fails to parse, and the view
+    then silently carries no sources at all.
+
+    Views are an enrichment, not a prerequisite: an ontology describing the
+    tables is useful, and one that fails to generate is not. So anything that
+    goes wrong resolving them degrades to "no views" rather than propagating.
+
+    Args:
+        session: The session holding the discovery cache.
+        schema_name: Schema being generated, or None for the default.
+
+    Returns:
+        ViewInfo objects, empty when nothing was discovered or resolution
+        failed.
+    """
+    try:
+        views = session.get_cached_views(schema_name or "")
+        if not views:
+            return []
+
+        dialect = None
+        if getattr(session, "db_manager", None) is not None:
+            db_type = session.db_manager.connection_info.get("type")
+            dialect = DB_SQLGLOT_DIALECTS.get(db_type) if db_type else None
+
+        annotated = _annotate_view_sources(
+            [{"name": v.name, "definition": v.definition} for v in views],
+            dialect=dialect,
+        )
+        for view, entry in zip(views, annotated, strict=False):
+            view.source_tables = entry.get("referenced_tables", [])
+
+        return cast(list[Any], views)
+    except Exception as e:
+        logger.warning(
+            f"Could not resolve views for the ontology ({e}); "
+            "generating it without them."
+        )
+        return []
 
 
 def _build_minimal_graph_summary(ontology_ttl: str) -> str:
@@ -263,9 +312,12 @@ async def generate_ontology(
             logger.warning(f"Failed to read active version: {e}")
 
     generator = services.server_state.get_ontology_generator(base_uri=base_uri)
+    views_info = _views_for_ontology(session, schema_name)
     # rdflib work is CPU-bound (~876 ms per 2.65 MB of Turtle); off the loop
     # so it does not freeze every concurrent session.
-    ontology_ttl = await asyncio.to_thread(generator.generate_from_schema, tables_info)
+    ontology_ttl = await asyncio.to_thread(
+        partial(generator.generate_from_schema, tables_info, views_info=views_info)
+    )
 
     # Optional SHACL conformance check (Phase 4). Default on, gated by setting;
     # never hard-fails generation — surfaces violations as a warning only.

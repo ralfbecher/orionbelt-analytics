@@ -226,3 +226,52 @@ oba:businessRule a owl:AnnotationProperty ;
     rdfs:label "business rule" ;
     rdfs:comment "LLM-generated business rule governing this relationship." ;
     rdfs:range xsd:string .
+
+# =============================================================================
+# 8. VIEW MODELLING (oba:View / oba:ViewColumn instances)
+# =============================================================================
+#
+# Views are typed oba:View rather than owl:Class, and their columns
+# oba:ViewColumn rather than owl:DatatypeProperty.  This is deliberate and
+# load-bearing: every consumer that reads tables looks for owl:Class carrying
+# oba:tableName, so a view modelled as an ordinary class would be picked up as
+# a base table by each of them and would have to be excluded again, rule by
+# rule, forever.  Distinct types make the separation structural -- a view is
+# invisible to table extraction by construction, and is found only by code
+# that asks for views on purpose.
+#
+# The same reasoning gives views oba:viewName instead of oba:tableName.
+#
+# What a view is NOT: joinable.  It has already applied its own joins and
+# grain, and carries no primary key, no foreign keys and no declared
+# cardinality, so a join to one cannot be validated.  oba:derivedFrom records
+# provenance for lineage and impact analysis, NOT a join path.
+
+oba:View a owl:Class ;
+    rdfs:label "database view" ;
+    rdfs:comment "A database view: a named query whose joins and grain are already fixed.  Typed apart from owl:Class so table consumers never mistake one for a base table." .
+
+oba:ViewColumn a owl:Class ;
+    rdfs:label "view column" ;
+    rdfs:comment "A column exposed by a view.  Typed apart from owl:DatatypeProperty for the same reason oba:View is typed apart from owl:Class." .
+
+oba:viewName a owl:AnnotationProperty ;
+    rdfs:label "view name" ;
+    rdfs:comment "Exact SQL view name as it appears in the database catalog.  Reused on oba:ViewColumn to name its owning view, mirroring how oba:tableName is reused on columns." ;
+    rdfs:range xsd:string .
+
+oba:viewDefinition a owl:AnnotationProperty ;
+    rdfs:label "view definition" ;
+    rdfs:comment "The SQL body defining the view, as returned by the database catalog.  Absent when the backend withholds it (commonly a permissions matter)." ;
+    rdfs:range xsd:string .
+
+oba:derivedFrom a owl:ObjectProperty ;
+    rdfs:label "derived from" ;
+    rdfs:comment "A base table this view reads.  Repeating property --- one triple per source table.  Provenance only: it records lineage for impact analysis and must never be read as a join path, because a view's own joins are already applied.  Asserted only when the source is known with certainty; omitted entirely rather than guessed." ;
+    rdfs:domain oba:View ;
+    rdfs:range owl:Class .
+
+oba:viewColumnCount a owl:AnnotationProperty ;
+    rdfs:label "view column count" ;
+    rdfs:comment "Number of columns the view exposes." ;
+    rdfs:range xsd:integer .

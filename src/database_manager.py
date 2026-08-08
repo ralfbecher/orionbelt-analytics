@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from sqlalchemy import text
@@ -67,6 +67,15 @@ class ViewInfo:
     schema: str
     definition: str | None = None
     comment: str | None = None
+    # Columns as the catalog reports them. Authoritative where a parsed
+    # definition is not: information_schema knows the output of "SELECT *"
+    # and of an explicit "CREATE VIEW v (a, b)" header, both of which reading
+    # the SQL gets wrong or gives up on.
+    columns: list[ColumnInfo] = field(default_factory=list)
+    # Base tables the view reads. Empty when lineage could not be established
+    # with certainty -- a guess here would be consumed as fact by anything
+    # reasoning over provenance.
+    source_tables: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ViewInfo":
@@ -74,15 +83,25 @@ class ViewInfo:
 
         Args:
             data: Dict with keys matching ViewInfo fields.
+                  Columns may be dicts or ColumnInfo instances.
 
         Returns:
             ViewInfo instance
         """
+        columns = []
+        for col in data.get("columns", []):
+            if isinstance(col, ColumnInfo):
+                columns.append(col)
+            elif isinstance(col, dict):
+                columns.append(ColumnInfo(**col))
+
         return cls(
             name=data["name"],
             schema=data.get("schema", ""),
             definition=data.get("definition"),
             comment=data.get("comment"),
+            columns=columns,
+            source_tables=data.get("source_tables", []),
         )
 
 
@@ -1007,6 +1026,24 @@ class DatabaseManager:
             ViewInfo(name=name, schema=schema_name or "", definition=definition)
             for name, definition in raw.items()
         ]
+
+        # Columns come from the catalog, never from reading the definition.
+        # information_schema knows the output of "SELECT *" and of an explicit
+        # "CREATE VIEW v (a, b)" header; parsing the SQL gets the second wrong
+        # and gives up on the first. A view whose columns cannot be read is
+        # still returned -- it stays searchable, and its columns stay
+        # unchecked rather than guessed.
+        for view in views:
+            try:
+                info = self._driver.analyze_table(view.name, schema_name)
+                if info and info.columns:
+                    view.columns = info.columns
+            except Exception as e:
+                logger.debug(
+                    f"Could not read columns of view '{view.name}' ({e}); "
+                    "its columns stay unchecked."
+                )
+
         self._store_in_cache(cache_key, views)
         return views
 

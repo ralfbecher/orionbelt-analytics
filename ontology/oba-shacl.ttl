@@ -492,3 +492,141 @@ oba:OntologyShape a sh:NodeShape ;
         sh:name "ontology comment" ;
         sh:message "The ontology must have at least one rdfs:comment."
     ] .
+
+# -----------------------------------------------------------------------------
+# View Shape --- validates oba:View instances representing database views
+# -----------------------------------------------------------------------------
+#
+# Targets oba:View, not owl:Class.  Views are typed apart precisely so that
+# TableShape (which targets owl:Class and requires oba:tableName) does not
+# apply to them, and so table consumers cannot mistake one for a base table.
+
+oba:ViewShape a sh:NodeShape ;
+    sh:targetClass oba:View ;
+    rdfs:label "OBA View Shape" ;
+    rdfs:comment "Validates entities annotated as database views." ;
+
+    # Required properties
+    sh:property [
+        sh:path oba:viewName ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "view name" ;
+        sh:message "Every view must have exactly one oba:viewName (xsd:string)."
+    ] ;
+    sh:property [
+        sh:path oba:schemaName ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "schema name" ;
+        sh:message "Every view must have exactly one oba:schemaName (xsd:string)."
+    ] ;
+    sh:property [
+        sh:path rdfs:label ;
+        sh:minCount 1 ;
+        sh:name "label" ;
+        sh:message "Every view must have at least one rdfs:label."
+    ] ;
+
+    # A view must never carry oba:tableName: that is what table extraction
+    # keys on, and carrying it would defeat the separation entirely.
+    sh:property [
+        sh:path oba:tableName ;
+        sh:maxCount 0 ;
+        sh:name "table name" ;
+        sh:message "A view must not carry oba:tableName -- use oba:viewName. Table consumers key on oba:tableName and would treat the view as a base table."
+    ] ;
+
+    # A view must never declare a primary key or foreign keys: it has none,
+    # and asserting one invites the join validation that cannot apply to it.
+    sh:property [
+        sh:path oba:primaryKey ;
+        sh:maxCount 0 ;
+        sh:name "primary key" ;
+        sh:message "A view must not declare oba:primaryKey -- a view has no key, and a join to it cannot be validated."
+    ] ;
+
+    # Optional properties with type constraints
+    sh:property [
+        sh:path oba:viewDefinition ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "view definition"
+    ] ;
+    sh:property [
+        sh:path oba:viewColumnCount ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:integer ;
+        sh:name "view column count"
+    ] ;
+    sh:property [
+        sh:path oba:derivedFrom ;
+        sh:nodeKind sh:IRI ;
+        sh:name "derived from" ;
+        sh:message "oba:derivedFrom must point at the IRI of a source table class."
+    ] ;
+    sh:property [
+        sh:path oba:semanticName ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "semantic name"
+    ] ;
+    sh:property [
+        sh:path oba:usageNotes ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "usage notes"
+    ] .
+
+# -----------------------------------------------------------------------------
+# View Column Shape --- validates oba:ViewColumn instances
+# -----------------------------------------------------------------------------
+
+oba:ViewColumnShape a sh:NodeShape ;
+    sh:targetClass oba:ViewColumn ;
+    rdfs:label "OBA View Column Shape" ;
+    rdfs:comment "Validates entities annotated as columns exposed by a view." ;
+
+    sh:property [
+        sh:path oba:columnName ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "column name" ;
+        sh:message "Every view column must have exactly one oba:columnName (xsd:string)."
+    ] ;
+    sh:property [
+        sh:path oba:viewName ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "view name" ;
+        sh:message "Every view column must name its owning view with exactly one oba:viewName."
+    ] ;
+    sh:property [
+        sh:path oba:tableName ;
+        sh:maxCount 0 ;
+        sh:name "table name" ;
+        sh:message "A view column must not carry oba:tableName -- use oba:viewName."
+    ] ;
+    sh:property [
+        sh:path oba:sqlDataType ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "SQL data type"
+    ] ;
+    sh:property [
+        sh:path oba:isNullable ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:name "is nullable"
+    ] ;
+    sh:property [
+        sh:path rdfs:domain ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:name "domain" ;
+        sh:message "A view column's rdfs:domain must be the IRI of its view."
+    ] .

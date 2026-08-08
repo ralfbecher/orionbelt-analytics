@@ -470,6 +470,48 @@ class OBQCValidator:
         )
         self._view_signature = signature
 
+    def _extract_views_from_ontology(self) -> None:
+        """Register views the ontology declares as oba:View.
+
+        Preferred over the definitions path: these columns came from the
+        database catalog, which knows the output of ``SELECT *`` and of an
+        explicit ``CREATE VIEW v (a, b)`` header -- both of which reading the
+        SQL gets wrong or abandons.
+
+        Views are found by asking for oba:View specifically. They are not
+        owl:Class and carry oba:viewName rather than oba:tableName, so
+        _extract_schema_from_ontology cannot see them at all: no rule that
+        reasons about tables has to remember to exclude them.
+
+        An ontology with no views leaves any previously registered set alone,
+        so loading a table-only ontology does not silently drop views the
+        session discovered.
+        """
+        if self._graph is None or self._oba_ns is None:
+            return
+
+        views: dict[str, set[str]] = {}
+        for subject in self._graph.subjects(RDF.type, self._oba_ns.View):
+            view_name = self._get_literal(subject, self._oba_ns.viewName)
+            if view_name:
+                views[view_name.lower()] = set()
+
+        if not views:
+            return
+
+        for subject in self._graph.subjects(RDF.type, self._oba_ns.ViewColumn):
+            column_name = self._get_literal(subject, self._oba_ns.columnName)
+            view_name = self._get_literal(subject, self._oba_ns.viewName)
+            if column_name and view_name and view_name.lower() in views:
+                views[view_name.lower()].add(column_name.lower())
+
+        self._known_views = views
+        # The ontology is authoritative, so a later definitions-based
+        # registration must not quietly overwrite it with parsed guesses
+        # unless the view set genuinely changed.
+        self._view_signature = None
+        logger.debug(f"OBQC registered {len(views)} views from the ontology")
+
     def _view_columns_unknown(self, table_key: str) -> bool:
         """True when *table_key* is a view whose columns could not be derived."""
         return table_key in self._known_views and not self._known_views[table_key]
@@ -495,6 +537,7 @@ class OBQCValidator:
         self._oba_ns = Namespace(OBA_NAMESPACE)
         self._schema_cache = self._extract_schema_from_ontology()
         self._disjoint_pairs = self._extract_disjoint_pairs()
+        self._extract_views_from_ontology()
 
         # Check if ontology has required oba: annotations for OBQC
         self._is_compatible = self._check_ontology_compatibility()

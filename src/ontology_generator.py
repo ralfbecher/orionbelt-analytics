@@ -202,6 +202,7 @@ class OntologyGenerator:
         tables_info: list[TableInfo],
         include_inferred_relationships: bool = True,
         annotate_denormalized: bool = True,
+        views_info: list[Any] | None = None,
     ) -> str:
         """Generate an ontology from a list of table information with quality enhancements.
 
@@ -209,6 +210,11 @@ class OntologyGenerator:
             tables_info: List of table information from schema analysis
             include_inferred_relationships: Whether to add relationships inferred from naming patterns
             annotate_denormalized: Whether to annotate detected denormalized fields
+            views_info: Optional database views. Emitted as oba:View, typed
+                apart from owl:Class so table consumers never see them, and
+                excluded from every table-driven step below (relationship
+                inference, denormalization, disjointness, property chains) --
+                a view has no keys for any of those to reason about.
 
         Returns:
             Serialized ontology in Turtle format
@@ -228,6 +234,15 @@ class OntologyGenerator:
         # Add all tables and their columns/relationships
         for table_info in tables_info:
             self._add_table_to_ontology(table_info)
+
+        # Views are added after the tables so oba:derivedFrom can point at
+        # classes that already exist, and before nothing else: every step
+        # below this reasons about keys and relationships, which a view has
+        # none of, so views are excluded from all of them by simply not being
+        # in tables_info.
+        known_tables = {t.name.lower(): t.name for t in tables_info}
+        for view_info in views_info or []:
+            self._add_view_to_ontology(view_info, known_tables)
 
         # Infer implicit relationships from naming patterns
         if include_inferred_relationships:
@@ -282,6 +297,111 @@ class OntologyGenerator:
             Quality report or None if no generation has occurred
         """
         return self.quality_report
+
+    def _add_view_to_ontology(
+        self, view_info: Any, known_tables: dict[str, str]
+    ) -> None:
+        """Add a database view to the ontology as an oba:View.
+
+        Typed oba:View rather than owl:Class, and annotated oba:viewName
+        rather than oba:tableName, so every consumer that reads tables --
+        OBQC's schema extraction, the SHACL TableShape, the relationship and
+        fan-trap reasoning -- cannot see it. Excluding views rule by rule
+        would work only until the next rule is written; this makes the
+        separation structural.
+
+        No primary key and no foreign keys are emitted, because a view has
+        neither. oba:derivedFrom records provenance only, and is asserted
+        solely for sources that resolve to a table already in the ontology --
+        a guessed lineage would be consumed as fact by anything reasoning
+        over it, so an unknown source is omitted instead.
+
+        Args:
+            view_info: A ViewInfo (or compatible object) to add.
+            known_tables: Lower-cased name -> real name for tables already in
+                the ontology, used to resolve oba:derivedFrom targets.
+        """
+        view_uri = self.base_uri[self._clean_name(view_info.name)]
+
+        self.graph.add((view_uri, RDF.type, self.oba_ns.View))
+        self.graph.add((view_uri, RDFS.label, Literal(view_info.name)))
+        self.graph.add((view_uri, self.oba_ns.viewName, Literal(view_info.name)))
+        self.graph.add(
+            (view_uri, self.oba_ns.schemaName, Literal(view_info.schema or "public"))
+        )
+
+        definition = getattr(view_info, "definition", None)
+        if definition:
+            self.graph.add((view_uri, self.oba_ns.viewDefinition, Literal(definition)))
+
+        comment = getattr(view_info, "comment", None)
+        if comment:
+            self.graph.add((view_uri, RDFS.comment, Literal(comment)))
+
+        columns = getattr(view_info, "columns", None) or []
+        for column in columns:
+            self._add_view_column_to_ontology(view_uri, column, view_info.name)
+        if columns:
+            self.graph.add(
+                (view_uri, self.oba_ns.viewColumnCount, Literal(len(columns)))
+            )
+
+        for source in getattr(view_info, "source_tables", None) or []:
+            real_name = known_tables.get(str(source).lower())
+            if real_name is None:
+                # The view reads something this ontology does not describe
+                # (another schema, a nested view). Asserting a dangling link
+                # would be worse than asserting nothing.
+                logger.debug(
+                    f"View '{view_info.name}' reads unknown source '{source}'; "
+                    "omitting oba:derivedFrom for it."
+                )
+                continue
+            self.graph.add(
+                (
+                    view_uri,
+                    self.oba_ns.derivedFrom,
+                    self.base_uri[self._clean_name(real_name)],
+                )
+            )
+
+    def _add_view_column_to_ontology(
+        self, view_uri: URIRef, column: Any, view_name: str
+    ) -> None:
+        """Add a single view column as an oba:ViewColumn.
+
+        Typed apart from owl:DatatypeProperty for the same reason the view is
+        typed apart from owl:Class: column extraction keys on that type plus
+        oba:tableName, and a view column must not answer to either.
+
+        Args:
+            view_uri: URI of the owning view.
+            column: A ColumnInfo (or compatible object).
+            view_name: Name of the owning view.
+        """
+        prop_uri = self.base_uri[
+            f"{self._clean_name(view_name)}_{self._clean_name(column.name)}"
+        ]
+
+        self.graph.add((prop_uri, RDF.type, self.oba_ns.ViewColumn))
+        self.graph.add((prop_uri, RDFS.label, Literal(column.name)))
+        self.graph.add((prop_uri, self.oba_ns.columnName, Literal(column.name)))
+        self.graph.add((prop_uri, self.oba_ns.viewName, Literal(view_name)))
+        self.graph.add((prop_uri, RDFS.domain, view_uri))
+
+        data_type = getattr(column, "data_type", None)
+        if data_type:
+            self.graph.add((prop_uri, self.oba_ns.sqlDataType, Literal(data_type)))
+
+        is_nullable = getattr(column, "is_nullable", None)
+        if is_nullable is not None:
+            self.graph.add(
+                (
+                    prop_uri,
+                    self.oba_ns.isNullable,
+                    Literal("true" if is_nullable else "false"),
+                )
+            )
 
     def _add_table_to_ontology(self, table_info: TableInfo) -> None:
         """Add a single table and its columns to the ontology with comprehensive database annotations."""
