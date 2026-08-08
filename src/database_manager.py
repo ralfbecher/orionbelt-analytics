@@ -192,6 +192,26 @@ class DatabaseManager:
         self._metadata_cache[cache_key] = {"data": data, "timestamp": time.time()}
         logger.debug(f"Cached data for {cache_key}")
 
+    def _activate_driver(self, driver: Any) -> None:
+        """Make *driver* the active one, invalidating cached metadata.
+
+        Every connect_* success path swaps the driver, and cache keys are
+        built from the operation and schema name only -- nothing in them
+        identifies the connection. So without this, connecting to a second
+        database answers get_tables("public") and get_views("public") from the
+        first one for the whole TTL, and the caller has no way to tell.
+
+        Driver assignment goes through here rather than each connect_* path
+        clearing the cache itself, so a new backend cannot be added with the
+        invalidation left out.
+
+        Args:
+            driver: The newly connected driver to activate.
+        """
+        self._driver = driver
+        self._metadata_cache.clear()
+        logger.debug("Activated new driver; metadata cache invalidated")
+
     # ------------------------------------------------------------------
     # SQL / identifier helpers
     # ------------------------------------------------------------------
@@ -500,7 +520,7 @@ class DatabaseManager:
             password=password,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self._dremio_rest_connection = None
             self._sync_engine_from_driver()
 
@@ -552,7 +572,7 @@ class DatabaseManager:
             role=role,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self._dremio_rest_connection = None
             self._sync_engine_from_driver()
 
@@ -604,7 +624,7 @@ class DatabaseManager:
             secure=secure,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             # Store database name on driver for get_tables fallback.
             # Set dynamically (read via getattr in the driver); not a declared
             # attribute, so silence the attr-defined check here.
@@ -663,7 +683,7 @@ class DatabaseManager:
             pat=pat,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self.engine = None
             self.metadata = None
 
@@ -729,7 +749,7 @@ class DatabaseManager:
             credentials_json=credentials_json,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self._dremio_rest_connection = None
             self._sync_engine_from_driver()
 
@@ -770,7 +790,7 @@ class DatabaseManager:
             read_only=read_only,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self._dremio_rest_connection = None
             self._sync_engine_from_driver()
 
@@ -816,7 +836,7 @@ class DatabaseManager:
             schema=schema,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self._dremio_rest_connection = None
             self._sync_engine_from_driver()
 
@@ -882,7 +902,7 @@ class DatabaseManager:
             charset=charset,
         )
         if success:
-            self._driver = driver
+            self._activate_driver(driver)
             self._dremio_rest_connection = None
             self._sync_engine_from_driver()
 
