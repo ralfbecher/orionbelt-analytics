@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+from functools import partial
 from typing import Any, cast
 
 from fastmcp import Context
@@ -130,8 +131,14 @@ async def _auto_generate_ontology_background(
         base_uri = config.ontology_base_uri
 
         ontology_generator = OntologyGenerator(base_uri=base_uri)
+        from .ontology_generation import _views_for_ontology
+
         ontology_ttl = await asyncio.to_thread(
-            ontology_generator.generate_from_schema, tables_info
+            partial(
+                ontology_generator.generate_from_schema,
+                tables_info,
+                views_info=_views_for_ontology(session, schema_name),
+            )
         )
 
         conn_dir = (
