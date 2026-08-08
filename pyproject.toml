@@ -1,6 +1,13 @@
 [project]
 name = "orionbelt-analytics"
-version = "2.0.0"
+# Sourced from src/__init__.py via [tool.hatch.version] rather than repeated
+# here. Not only to avoid two places drifting: a static version is an input to
+# the Docker dependency layer (Dockerfile copies pyproject.toml and uv.lock
+# before installing), and it lands in uv.lock too, so a release bump used to
+# invalidate that layer and pay a full cold install of chromadb, onnxruntime
+# and pandas -- roughly six minutes, on exactly the PR that can least afford
+# it. Declared dynamic, a bump touches neither file.
+dynamic = ["version"]
 description = "OrionBelt Analytics - the Ontology-based MCP server for your Text-2-SQL convenience"
 authors = [{name = "Ralf Becher, RALFORION d.o.o.", email = "info@ralforion.com"}]
 readme = "README.md"

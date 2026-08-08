@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Bump the OrionBelt Analytics version everywhere it is recorded, in one step.
 #
-# Updates: src/__init__.py, pyproject.toml, server.json (both version fields),
-# the README badge, and prepends a CHANGELOG stub. Then runs `uv lock` so the
-# lockfile's pinned project version never drifts (the bug this script prevents:
-# uv.lock pins the editable project's own version and does NOT update on a bare
-# version edit — you must regenerate the lockfile).
+# Updates: src/__init__.py, server.json (both version fields), the README
+# badge, and prepends a CHANGELOG stub. Then runs `uv lock` to keep the
+# lockfile in step.
+#
+# pyproject.toml is NOT touched: [project] declares the version dynamic and
+# hatch reads it from src/__init__.py. That also keeps it, and uv.lock, out of
+# the churn — both are inputs to the Docker dependency layer, so a bump that
+# edited them forced a full cold reinstall on every release. `uv lock` is still
+# run because a bump can coincide with other manifest edits; it is now
+# expected to be a no-op for the version alone.
 #
 # Usage:
 #   ./scripts/bump-version.sh X.Y.Z
@@ -55,8 +60,11 @@ replace() {
     echo "  updated ${file}"
 }
 
+# pyproject.toml is deliberately absent: [project] declares the version
+# dynamic and hatch reads it from src/__init__.py above, so there is nothing
+# to replace. Keeping it out is what lets a bump leave the Docker dependency
+# layer's inputs untouched -- see the comment in pyproject.toml.
 replace src/__init__.py  "__version__ = \"${OLD_VERSION}\"" "__version__ = \"${NEW_VERSION}\""
-replace pyproject.toml   "version = \"${OLD_VERSION}\""      "version = \"${NEW_VERSION}\""
 replace server.json      "\"version\": \"${OLD_VERSION}\""   "\"version\": \"${NEW_VERSION}\""
 replace README.md        "version-${OLD_VERSION}"            "version-${NEW_VERSION}"
 replace README.md        "Version ${OLD_VERSION}"            "Version ${NEW_VERSION}"
