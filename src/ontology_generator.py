@@ -98,26 +98,120 @@ _COMPOSITE_TYPE_TOKENS = frozenset(
 )
 
 
-def is_numeric_sql_type(sql_type: str) -> bool:
-    """True when *sql_type* holds a scalar number in any supported dialect.
+# Types that certainly cannot hold a measure. Enumerated in their own right
+# rather than inferred from "not numeric", so an unfamiliar type name is
+# *unknown* instead of assumed non-numeric -- see sql_type_kind.
+_NON_NUMERIC_TYPE_TOKENS = frozenset(
+    {
+        # character
+        "char",
+        "varchar",
+        "nchar",
+        "nvarchar",
+        "text",
+        "string",
+        "clob",
+        "nvarchar2",
+        "varchar2",
+        "enum",
+        # temporal
+        "date",
+        "time",
+        "datetime",
+        "timestamp",
+        "timestamptz",
+        "datetime2",
+        "smalldatetime",
+        "interval",
+        "year",
+        "datetimeoffset",
+        # boolean
+        "bool",
+        "boolean",
+        "bit",
+        # binary and identifiers
+        "binary",
+        "varbinary",
+        "blob",
+        "bytea",
+        "bytes",
+        "uuid",
+        "guid",
+        "uniqueidentifier",
+        # spatial
+        "point",
+        "geopoint",
+        "polygon",
+        "linestring",
+        "multipoint",
+        # network / documents
+        "inet",
+        "cidr",
+        "macaddr",
+        "xml",
+    }
+)
+
+
+def sql_type_kind(sql_type: str) -> str:
+    """Classify *sql_type* as "numeric", "non_numeric" or "unknown".
+
+    Three outcomes, not two, and the third is the point. Treating
+    "unrecognized" as "non-numeric" makes an unfamiliar type name a blocking
+    error on a perfectly good ``SUM`` -- which is how INT64, UInt64 and
+    HUGEINT once blocked every measure on four supported engines. Enumerating
+    harder does not fix that; it only postpones it to the next dialect.
+
+    So both sets are positive statements, and anything in neither is
+    admitted as unknown. That matches how the rest of this vocabulary is
+    populated: an absent fact beats an invented one, because consumers read
+    what is asserted as certain.
 
     Args:
         sql_type: The SQL type as the catalog reports it.
 
     Returns:
-        True for a scalar numeric type, False for anything else --
-        composites included, since they cannot be summed at all.
+        "numeric" for a scalar number, "non_numeric" for something that
+        certainly cannot be one, "unknown" otherwise.
     """
     tokens = set(_TYPE_TOKEN_RE.findall((sql_type or "").lower()))
+    if not tokens:
+        return "unknown"
+
+    # Composites first: a composite of numbers is still not summable, so the
+    # inner type must not decide it.
     if tokens & _COMPOSITE_TYPE_TOKENS:
-        return False
+        return "non_numeric"
+
     # The unsigned prefix generically: ClickHouse UInt64 and DuckDB
     # UTINYINT/UBIGINT are the signed name with a "u" in front.
-    return any(
+    if any(
         token in _NUMERIC_TYPE_TOKENS
         or (token.startswith("u") and token[1:] in _NUMERIC_TYPE_TOKENS)
         for token in tokens
-    )
+    ):
+        return "numeric"
+
+    if tokens & _NON_NUMERIC_TYPE_TOKENS:
+        return "non_numeric"
+
+    return "unknown"
+
+
+def is_numeric_sql_type(sql_type: str) -> bool:
+    """True when *sql_type* is recognised as holding a scalar number.
+
+    Note the asymmetry: False covers both "certainly not a number" and "not
+    recognised". Callers that act on the difference -- anything that blocks
+    -- must use :func:`sql_type_kind` instead.
+
+    Args:
+        sql_type: The SQL type as the catalog reports it.
+
+    Returns:
+        True only for a recognised scalar numeric type.
+    """
+    return sql_type_kind(sql_type) == "numeric"
 
 
 logger = logging.getLogger(__name__)
@@ -573,22 +667,27 @@ class OntologyGenerator:
                 "structural",
                 "Inferred foreign key: an identifier, not a measure",
             )
-        # Token membership, not substring and not word boundaries. Both of
-        # those fail on real dialect spellings in opposite directions: "int"
-        # is a substring of POINT, and INT64 / UInt64 / HUGEINT contain no
-        # numeric word at all.
-        if not is_numeric_sql_type(sql_type):
+        # Three outcomes, because only two of them are safe to act on. A type
+        # recognised as non-numeric certainly is not a measure. A type we do
+        # not recognise says nothing -- and since this classification blocks
+        # queries, reading "unrecognised" as "not a measure" would reject a
+        # valid SUM on any dialect spelling not yet enumerated. That is
+        # exactly how INT64 and UInt64 once blocked every measure on four
+        # supported engines.
+        kind = sql_type_kind(sql_type)
+        if kind == "non_numeric":
             return (
                 "attribute",
                 "structural",
-                f"Non-numeric SQL type '{column.data_type}' cannot be aggregated as a measure",
+                f"SQL type '{column.data_type}' cannot hold a measure",
             )
-        if any(t in sql_type for t in ("bool", "date", "time", "interval")):
-            return (
-                "attribute",
-                "structural",
-                f"Temporal or boolean SQL type '{column.data_type}' is not a measure",
+        if kind == "unknown":
+            logger.debug(
+                f"Unrecognised SQL type '{column.data_type}' on "
+                f"{table_name}.{column.name}; leaving it unclassified rather "
+                "than assuming it is not a measure."
             )
+            return None
 
         # -- Tier 2: name patterns ----------------------------------------
         # Most specific first: "unit_price" is non-additive despite

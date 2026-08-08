@@ -18,7 +18,11 @@ from rdflib import Graph, Namespace
 from src.constants import OBA_NAMESPACE
 from src.database_manager import ColumnInfo, TableInfo
 from src.obqc_validator import OBQCIssueType, OBQCSeverity, OBQCValidator
-from src.ontology_generator import OntologyGenerator, is_numeric_sql_type
+from src.ontology_generator import (
+    OntologyGenerator,
+    is_numeric_sql_type,
+    sql_type_kind,
+)
 
 BASE_URI = "http://test.com/ontology/"
 OBA = Namespace(OBA_NAMESPACE)
@@ -392,6 +396,69 @@ class TestNumericTypeDetection(unittest.TestCase):
         for sql_type in ("POINT", "GEOPOINT", "POLYGON", "GEOGRAPHY"):
             result = gen.classify_measure(_col("location", sql_type))
             self.assertEqual((result[0], result[1]), ("attribute", "structural"))
+
+
+class TestUnrecognisedTypesDoNotBlock(unittest.TestCase):
+    """Three outcomes, because only two are safe to act on.
+
+    Reading "unrecognised" as "not a measure" rejects a valid SUM on any
+    dialect spelling not yet enumerated -- which is how INT64 and UInt64 once
+    blocked every measure on four supported engines. Enumerating harder only
+    postpones that to the next dialect; admitting "unknown" removes it.
+    """
+
+    def setUp(self):
+        self.gen = OntologyGenerator(BASE_URI)
+
+    def _classify(self, sql_type):
+        return self.gen.classify_measure(_col("amount", sql_type))
+
+    def test_unfamiliar_numeric_types_are_unknown_not_blocked(self):
+        for sql_type in ("DECFLOAT", "SMALLDECIMAL", "SOMETHING_NEW"):
+            self.assertEqual(sql_type_kind(sql_type), "unknown", sql_type)
+            self.assertIsNone(self._classify(sql_type), sql_type)
+
+    def test_recognised_non_numeric_types_still_block(self):
+        for sql_type in ("TEXT", "DATE", "BOOLEAN", "UUID", "POINT", "GEOGRAPHY"):
+            self.assertEqual(sql_type_kind(sql_type), "non_numeric", sql_type)
+            result = self._classify(sql_type)
+            self.assertEqual((result[0], result[1]), ("attribute", "structural"))
+
+    def test_composites_are_non_numeric_not_unknown(self):
+        """A composite of numbers is still not summable, so the inner type
+        must not decide it."""
+        for sql_type in ("ARRAY<INT64>", "Array(Float64)", "MAP<STRING,INT64>"):
+            self.assertEqual(sql_type_kind(sql_type), "non_numeric", sql_type)
+
+    def test_recognised_numeric_types_classify(self):
+        for sql_type in ("INT64", "UInt64", "HUGEINT", "DECIMAL(18,2)"):
+            self.assertEqual(sql_type_kind(sql_type), "numeric", sql_type)
+            self.assertEqual(self._classify(sql_type)[0], "additive", sql_type)
+
+    def test_an_unknown_type_never_reaches_obqc_as_a_finding(self):
+        table = TableInfo(
+            name="t",
+            schema="public",
+            columns=[_col("id", "INTEGER", pk=True), _col("amount", "DECFLOAT")],
+            primary_keys=["id"],
+            foreign_keys=[],
+        )
+        ttl = OntologyGenerator(BASE_URI).generate_from_schema([table])
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        validator = OBQCValidator()
+        validator.load_ontology(g, BASE_URI)
+        found = [
+            i
+            for i in validator.validate("SELECT SUM(amount) FROM t").issues
+            if i.issue_type is OBQCIssueType.INVALID_AGGREGATION
+        ]
+        self.assertEqual(found, [])
+
+    def test_is_numeric_sql_type_keeps_its_two_valued_contract(self):
+        self.assertTrue(is_numeric_sql_type("INT64"))
+        self.assertFalse(is_numeric_sql_type("TEXT"))
+        self.assertFalse(is_numeric_sql_type("DECFLOAT"))
 
 
 class TestTableTypeAllowsMixed(unittest.TestCase):
