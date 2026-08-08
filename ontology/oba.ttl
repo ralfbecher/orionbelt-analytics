@@ -275,3 +275,31 @@ oba:viewColumnCount a owl:AnnotationProperty ;
     rdfs:label "view column count" ;
     rdfs:comment "Number of columns the view exposes." ;
     rdfs:range xsd:integer .
+
+# =============================================================================
+# 9. MEASURE SEMANTICS (used on owl:DatatypeProperty)
+# =============================================================================
+#
+# Additivity is a property of a column, not of the table holding it.  A
+# denormalized table carries additive measures next to attributes, so a
+# table-level role cannot express what SUM() is allowed to touch.
+#
+# Classified deterministically -- structural facts first (a key or a
+# non-numeric column can never be a measure), then column-name patterns.  A
+# column matching neither is left unannotated rather than guessed: consumers
+# read these as fact, so an absent value is safer than a wrong one.
+
+oba:measureType a owl:AnnotationProperty ;
+    rdfs:label "measure type" ;
+    rdfs:comment "How the column behaves under aggregation. 'additive': meaningful to SUM across every dimension. 'semi_additive': summable across entities but not across time (a balance, a stock level). 'non_additive': never meaningful to SUM (a unit price, a rate, a ratio) though AVG and MIN/MAX still are. 'attribute': not a measure at all (a key, a code, a label). Absent when it could not be determined without guessing." ;
+    rdfs:range xsd:string .
+
+oba:measureBasis a owl:AnnotationProperty ;
+    rdfs:label "measure basis" ;
+    rdfs:comment "How oba:measureType was arrived at: 'structural' when it follows from the data type or key membership and is therefore certain, 'name_pattern' when it was inferred from the column name and is therefore a heuristic, 'declared' when supplied by a client or semantic enrichment. Consumers weigh findings by this: a structural basis can justify blocking a query, a name pattern can only warn." ;
+    rdfs:range xsd:string .
+
+oba:measureReason a owl:AnnotationProperty ;
+    rdfs:label "measure reason" ;
+    rdfs:comment "Human-readable justification for the assigned oba:measureType, so a heuristic classification can be audited and corrected." ;
+    rdfs:range xsd:string .

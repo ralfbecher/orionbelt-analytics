@@ -129,6 +129,94 @@ class OntologyGenerator:
         "amt",
     ]
 
+    # Column-name patterns for measure semantics. Ordered most specific
+    # first at the point of use: "unit_price" is non-additive even though it
+    # contains "price", and "total_amount" is additive even though a bare
+    # "total" could be either.
+    #
+    # Never meaningful to SUM: a rate, a ratio, a per-unit value. AVG and
+    # MIN/MAX of these are perfectly ordinary, so only SUM is at issue.
+    NON_ADDITIVE_PATTERNS: ClassVar[list[str]] = [
+        "unit_price",
+        "unitprice",
+        "unit_cost",
+        "unitcost",
+        "_rate",
+        "rate_",
+        "_pct",
+        "_percent",
+        "percentage",
+        "_ratio",
+        "ratio_",
+        "margin",
+        "_avg",
+        "avg_",
+        "average",
+        "_price",
+        "price_",
+        "discount_pct",
+        "tax_rate",
+        "exchange_rate",
+        "score",
+        "rating",
+        "temperature",
+        "latitude",
+        "longitude",
+    ]
+
+    # Summable across entities but not across time: a snapshot of a level
+    # rather than a flow. Summing balances over months double-counts.
+    SEMI_ADDITIVE_PATTERNS: ClassVar[list[str]] = [
+        "balance",
+        "_level",
+        "level_",
+        "stock",
+        "on_hand",
+        "onhand",
+        "inventory",
+        "headcount",
+        "occupancy",
+        "_snapshot",
+    ]
+
+    # Meaningful to SUM across every dimension.
+    ADDITIVE_PATTERNS: ClassVar[list[str]] = [
+        "amount",
+        "_amt",
+        "amt_",
+        "quantity",
+        "_qty",
+        "qty_",
+        "revenue",
+        "sales",
+        "_total",
+        "total_",
+        "_sum",
+        "sum_",
+        "_count",
+        "count_",
+        "cost",
+        "profit",
+        "spend",
+        "volume",
+        "weight",
+    ]
+
+    # SQL types that can hold a measure at all. Anything else is an
+    # attribute by construction -- SUM() of a string or a date is not a
+    # question about additivity, it is impossible.
+    NUMERIC_SQL_TYPES: ClassVar[list[str]] = [
+        "int",
+        "serial",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "money",
+        "number",
+    ]
+
     # Patterns for denormalized text fields
     DENORM_SUFFIXES: ClassVar[list[str]] = [
         "name",
@@ -298,6 +386,97 @@ class OntologyGenerator:
         """
         return self.quality_report
 
+    def classify_measure(self, column: ColumnInfo) -> tuple[str, str, str] | None:
+        """Classify how *column* behaves under aggregation.
+
+        Deterministic, in two tiers of decreasing certainty, because the
+        consumer weighs them differently: a structural finding can justify
+        refusing a query, a name-pattern finding can only warn.
+
+        Tier 1, structural and certain. A key is an identifier, not a
+        measure -- ``SUM(order_id)`` is nonsense however numeric it is. A
+        non-numeric column cannot be summed at all. Both follow from schema
+        metadata alone, with no interpretation.
+
+        Tier 2, column-name patterns. A unit price or a rate is never
+        meaningful to SUM; a balance is summable across accounts but not
+        across time. Heuristic, so it is recorded with its reason and marked
+        ``name_pattern`` for the consumer to discount.
+
+        A numeric non-key column matching no pattern returns None -- left
+        unannotated rather than assumed additive. Consumers read these as
+        fact, so an absent value is safer than a wrong one.
+
+        Args:
+            column: The column to classify.
+
+        Returns:
+            ``(measure_type, basis, reason)``, or None when undeterminable.
+        """
+        name = (column.name or "").lower()
+        sql_type = (column.data_type or "").lower()
+
+        # -- Tier 1: structural -------------------------------------------
+        if column.is_primary_key:
+            return (
+                "attribute",
+                "structural",
+                "Primary key: an identifier, not a measure",
+            )
+        if column.is_foreign_key:
+            return (
+                "attribute",
+                "structural",
+                "Foreign key: an identifier, not a measure",
+            )
+        if not any(t in sql_type for t in self.NUMERIC_SQL_TYPES):
+            return (
+                "attribute",
+                "structural",
+                f"Non-numeric SQL type '{column.data_type}' cannot be aggregated as a measure",
+            )
+        # "int" matches "point"/"interval" but bool/date/time do not reach
+        # here anyway; guard the one real overlap explicitly.
+        if any(t in sql_type for t in ("bool", "date", "time", "interval")):
+            return (
+                "attribute",
+                "structural",
+                f"Temporal or boolean SQL type '{column.data_type}' is not a measure",
+            )
+
+        # -- Tier 2: name patterns ----------------------------------------
+        # Most specific first: "unit_price" is non-additive despite
+        # containing neither an additive nor a semi-additive token, and
+        # "total_amount" must not be read as non-additive via "_avg".
+        for pattern in self.NON_ADDITIVE_PATTERNS:
+            if pattern in name:
+                return (
+                    "non_additive",
+                    "name_pattern",
+                    f"Column name contains '{pattern}': a per-unit value, rate or "
+                    "ratio is not meaningful to SUM (AVG and MIN/MAX still are)",
+                )
+        for pattern in self.SEMI_ADDITIVE_PATTERNS:
+            if pattern in name:
+                return (
+                    "semi_additive",
+                    "name_pattern",
+                    f"Column name contains '{pattern}': a level or snapshot is "
+                    "summable across entities but not across time",
+                )
+        for pattern in self.ADDITIVE_PATTERNS:
+            if pattern in name:
+                return (
+                    "additive",
+                    "name_pattern",
+                    f"Column name contains '{pattern}': a flow quantity, "
+                    "summable across every dimension",
+                )
+
+        # Numeric, not a key, no pattern matched. Unknowable without
+        # guessing, so say nothing.
+        return None
+
     def _add_view_to_ontology(
         self, view_info: Any, known_tables: dict[str, str]
     ) -> None:
@@ -457,6 +636,17 @@ class OntologyGenerator:
         self.graph.add((prop_uri, self.oba_ns.tableName, Literal(table_name)))
         self.graph.add((prop_uri, self.oba_ns.sqlDataType, Literal(column.data_type)))
         self.graph.add((prop_uri, self.oba_ns.isNullable, Literal(column.is_nullable)))
+
+        # Measure semantics: what SUM() may meaningfully touch. Per column,
+        # because a denormalized table holds additive measures next to
+        # attributes and a table-level role cannot express that. Omitted
+        # entirely when it could not be determined without guessing.
+        measure = self.classify_measure(column)
+        if measure is not None:
+            measure_type, basis, reason = measure
+            self.graph.add((prop_uri, self.oba_ns.measureType, Literal(measure_type)))
+            self.graph.add((prop_uri, self.oba_ns.measureBasis, Literal(basis)))
+            self.graph.add((prop_uri, self.oba_ns.measureReason, Literal(reason)))
         self.graph.add(
             (prop_uri, self.oba_ns.isPrimaryKey, Literal(column.is_primary_key))
         )

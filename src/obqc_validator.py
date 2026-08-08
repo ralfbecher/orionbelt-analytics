@@ -35,6 +35,7 @@ class OBQCIssueType(Enum):
     NON_AGGREGATED_COLUMN = "non_aggregated_column"
     AMBIGUOUS_COLUMN = "ambiguous_column"
     VIEW_NOT_JOINABLE = "view_not_joinable"
+    INVALID_AGGREGATION = "invalid_aggregation"
 
 
 class OBQCSeverity(Enum):
@@ -347,6 +348,12 @@ class ColumnSchema:
     is_foreign_key: bool = False
     fk_referenced_table: str | None = None
     fk_referenced_column: str | None = None
+    # How the column behaves under aggregation, and how that was decided.
+    # None means the ontology did not say -- treated as "no opinion", never
+    # as "additive", so an unclassified column is never reported.
+    measure_type: str | None = None
+    measure_basis: str | None = None
+    measure_reason: str | None = None
 
 
 @dataclass
@@ -624,6 +631,15 @@ class OBQCValidator:
                         is_foreign_key=self._get_bool(
                             subject, self._oba_ns.isForeignKey, False
                         ),
+                        measure_type=self._get_literal(
+                            subject, self._oba_ns.measureType
+                        ),
+                        measure_basis=self._get_literal(
+                            subject, self._oba_ns.measureBasis
+                        ),
+                        measure_reason=self._get_literal(
+                            subject, self._oba_ns.measureReason
+                        ),
                     )
 
                     # Get XSD type from rdfs:range
@@ -793,6 +809,7 @@ class OBQCValidator:
         self._validate_joins(parsed, result)
         self._validate_type_compatibility(parsed, result)
         self._validate_aggregation_context(parsed, result)
+        self._validate_measure_aggregation(parsed, result)
         self._detect_fan_trap(result, blocking=not allow_fan_out)
 
         # Set overall validity
@@ -1859,6 +1876,117 @@ class OBQCValidator:
             found = True
 
         return found
+
+    def _validate_measure_aggregation(
+        self, parsed: exp.Expr, result: OBQCResult
+    ) -> None:
+        """Rule: SUM only what is meaningful to sum.
+
+        Independent of joins, and that is the point: ``SUM(unit_price)``
+        returns a number with no meaning even from a single table, and
+        nothing in OBQC could see that before. Additivity is a property of
+        the column, so a denormalized table holding measures beside
+        attributes is judged correctly without any table-level role.
+
+        Severity follows how the classification was reached, which the
+        ontology records. A structural finding is certain -- summing a
+        primary key or a text column is wrong by construction -- and blocks.
+        A name-pattern finding is a heuristic and only warns: a pattern that
+        misreads one schema's naming must not refuse to run its queries.
+
+        Only SUM is judged. AVG, MIN and MAX of a unit price are perfectly
+        ordinary, and COUNT does not read the value at all.
+
+        Args:
+            parsed: Parsed query.
+            result: Result to append issues to.
+        """
+        if self._schema_cache is None:
+            return
+
+        for select in parsed.find_all(exp.Select):
+            for agg in select.find_all(exp.Sum):
+                if agg.find_ancestor(exp.Select) is not select:
+                    continue
+
+                for column in self._value_columns(agg):
+                    schema = self._resolve_column_schema(column, select)
+                    if schema is None or schema.measure_type is None:
+                        continue
+                    if schema.measure_type in ("additive", "semi_additive"):
+                        continue
+
+                    structural = schema.measure_basis == "structural"
+                    label = f"{schema.table_name}.{schema.name}"
+                    if schema.measure_type == "attribute":
+                        headline = f"SUM({label}) sums a value that is not a measure"
+                    else:
+                        headline = (
+                            f"SUM({label}) sums a non-additive measure; the "
+                            "result has no meaning"
+                        )
+
+                    result.issues.append(
+                        OBQCIssue(
+                            issue_type=OBQCIssueType.INVALID_AGGREGATION,
+                            severity=(
+                                OBQCSeverity.ERROR
+                                if structural
+                                else OBQCSeverity.WARNING
+                            ),
+                            message=headline,
+                            location="SELECT list",
+                            suggestion=(
+                                schema.measure_reason
+                                or "Aggregate an additive measure instead."
+                            )
+                            + (
+                                ""
+                                if structural
+                                else " Classified from the column name, so"
+                                " override it if this schema means otherwise."
+                            ),
+                            related_entities=[label],
+                        )
+                    )
+
+    def _resolve_column_schema(
+        self, column: exp.Column, select: exp.Select
+    ) -> ColumnSchema | None:
+        """Find the ontology schema for *column* as referenced in *select*.
+
+        Args:
+            column: The column reference.
+            select: The SELECT providing its scope.
+
+        Returns:
+            The ColumnSchema, or None when it cannot be resolved unambiguously.
+        """
+        if self._schema_cache is None:
+            return None
+
+        col_key = (column.name or "").lower()
+        if not col_key:
+            return None
+
+        alias_map = self._build_alias_map(select)
+
+        qualifier = (column.table or "").lower()
+        if qualifier:
+            table_key = alias_map.get(qualifier, qualifier).lower()
+            table = self._schema_cache.tables.get(table_key)
+            return table.columns.get(col_key) if table else None
+
+        # Unqualified: only resolvable when exactly one table in scope has
+        # it. An ambiguous name is left alone rather than attributed to a
+        # guess, since the finding names the column it accuses.
+        matches = [
+            table.columns[col_key]
+            for name in {v.lower() for v in alias_map.values()}
+            if (table := self._schema_cache.tables.get(name)) is not None
+            and col_key in table.columns
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def _flag_view_joins(self, parsed: exp.Expr, result: OBQCResult) -> None:
         """Report SELECTs that join a view to anything else.
