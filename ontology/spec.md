@@ -179,13 +179,42 @@ Cardinality:
 - at most one of each
 - if `oba:isDenormalized` is `true`, `oba:likelySourceTable` SHOULD be present
 
+### 6.7 Measure Semantics (on `owl:DatatypeProperty`)
+
+How a column behaves under aggregation. Placed on columns, not tables,
+because additivity is a property of the column: a denormalized table holds
+additive measures beside attributes, and no table-level role can say what
+`SUM()` may touch.
+
+Optional (present only when it could be determined without guessing):
+- `oba:measureType` --- `xsd:string`, one of `additive`, `semi_additive`,
+  `non_additive`, `attribute` (7.5)
+- `oba:measureBasis` --- `xsd:string`, one of `structural`, `name_pattern`,
+  `declared` (7.6)
+- `oba:measureReason` --- `xsd:string`, justification, so a heuristic
+  classification can be audited and corrected
+
+Cardinality:
+- at most one of each
+- if `oba:measureType` is present, `oba:measureBasis` SHOULD be present
+
+Consumers MUST weigh a finding by its basis: a `structural` classification
+is certain and may justify rejecting a query, whereas a `name_pattern`
+classification is a heuristic and SHOULD only warn.
+
+A column carrying no `oba:measureType` has not been classified. Consumers
+MUST NOT read that as `additive`.
+
 ### 6.6 Semantic Enrichment Properties (LLM-applied)
 
 These properties are added during LLM-driven semantic enrichment workflows. They are always optional.
 
 On `owl:Class` (tables):
 - `oba:semanticName` --- `xsd:string`, business-friendly name
-- `oba:tableType` --- `xsd:string`, `"fact"`, `"dimension"`, or `"lookup"`
+- `oba:tableType` --- `xsd:string`, `"fact"`, `"dimension"`, `"lookup"`, or
+  `"mixed"`. Advisory only. A denormalized table holds additive measures
+  beside dimension attributes, which is what `"mixed"` records; what may
+  actually be aggregated is decided per column by `oba:measureType` (6.7).
 - `oba:usageNotes` --- `xsd:string`, usage guidance
 
 On `owl:DatatypeProperty` (columns):
@@ -226,6 +255,21 @@ Cardinality:
 - `fact`
 - `dimension`
 - `lookup`
+- `mixed` --- both, as a denormalized table usually is
+
+Advisory. Aggregation is governed per column by `oba:measureType`, not by
+this value.
+
+### 7.5 Measure Types
+- `additive` --- meaningful to SUM across every dimension
+- `semi_additive` --- summable across entities but not across time
+- `non_additive` --- never meaningful to SUM (AVG and MIN/MAX still are)
+- `attribute` --- not a measure at all
+
+### 7.6 Measure Bases
+- `structural` --- follows from the SQL type or key membership; certain
+- `name_pattern` --- inferred from the column name; a heuristic
+- `declared` --- supplied by a client or semantic enrichment
 
 ## 8. Relationship to OBSL
 

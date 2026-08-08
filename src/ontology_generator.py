@@ -26,6 +26,20 @@ _WORD_FREQ_THRESHOLD = 1e-6
 # These should NOT be flagged as cryptic on their own.
 _KNOWN_DB_SUFFIXES = {"id", "pk", "fk", "idx", "seq"}
 
+# Whole-word matcher for numeric SQL types, built from
+# OntologyGenerator.NUMERIC_SQL_TYPES below. Word boundaries matter: "int" is
+# a substring of POINT, INTERVAL and GEOPOINT, so substring matching reads a
+# geometry column as numeric.
+NUMERIC_TYPE_RE = re.compile(
+    r"\b(?:"
+    r"int|integer|bigint|smallint|tinyint|mediumint"
+    r"|serial|bigserial|smallserial"
+    r"|decimal|numeric|dec|fixed"
+    r"|float|double|real"
+    r"|money|smallmoney|number"
+    r")\b"
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,18 +217,31 @@ class OntologyGenerator:
     ]
 
     # SQL types that can hold a measure at all. Anything else is an
-    # attribute by construction -- SUM() of a string or a date is not a
-    # question about additivity, it is impossible.
+    # attribute by construction -- SUM() of a string, a date or a geometry
+    # is not a question about additivity, it is impossible.
+    #
+    # Matched with NUMERIC_TYPE_RE (whole words) rather than by substring:
+    # "int" is a substring of POINT, INTERVAL and GEOPOINT.
     NUMERIC_SQL_TYPES: ClassVar[list[str]] = [
         "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "mediumint",
         "serial",
+        "bigserial",
+        "smallserial",
         "decimal",
         "numeric",
         "float",
         "double",
         "real",
         "money",
+        "smallmoney",
         "number",
+        "dec",
+        "fixed",
     ]
 
     # Patterns for denormalized text fields
@@ -232,6 +259,11 @@ class OntologyGenerator:
 
         # OBA (OrionBelt Analytics) namespace for database schema annotations
         self.oba_ns = Namespace(OBA_NAMESPACE)
+
+        # (table, column) pairs this generator inferred to be foreign keys.
+        # Populated by generate_from_schema before any column is written, so
+        # classify_measure can treat an inferred key as the identifier it is.
+        self._inferred_fk_columns: set[tuple[str, str]] = set()
 
         self.graph.bind("ns", self.base_uri)
         self.graph.bind("oba", self.oba_ns)
@@ -319,6 +351,23 @@ class OntologyGenerator:
         self.graph.add((ontology_uri, RDFS.label, Literal(ONTOLOGY_TITLE)))
         self.graph.add((ontology_uri, RDFS.comment, Literal(ONTOLOGY_DESCRIPTION)))
 
+        # Relationships are inferred *before* the columns are written,
+        # because measure classification needs them: an inferred foreign key
+        # is an identifier just as much as a declared one, and the engines
+        # that most need inference (ClickHouse has no FKs at all; BigQuery
+        # and Dremio rarely carry them) are exactly the ones where every key
+        # would otherwise go unrecognised and SUM(customer_id) pass unseen.
+        # The relationship triples themselves are still added further down,
+        # once the classes they connect exist.
+        inferred = (
+            self._infer_implicit_relationships(tables_info)
+            if include_inferred_relationships
+            else []
+        )
+        self._inferred_fk_columns = {
+            (rel.source_table.lower(), rel.column.lower()) for rel in inferred
+        }
+
         # Add all tables and their columns/relationships
         for table_info in tables_info:
             self._add_table_to_ontology(table_info)
@@ -332,9 +381,9 @@ class OntologyGenerator:
         for view_info in views_info or []:
             self._add_view_to_ontology(view_info, known_tables)
 
-        # Infer implicit relationships from naming patterns
+        # Materialize the relationships inferred above, now that the classes
+        # they connect exist.
         if include_inferred_relationships:
-            inferred = self._infer_implicit_relationships(tables_info)
             self.quality_report.inferred_relationships = inferred
 
             for rel in inferred:
@@ -386,7 +435,9 @@ class OntologyGenerator:
         """
         return self.quality_report
 
-    def classify_measure(self, column: ColumnInfo) -> tuple[str, str, str] | None:
+    def classify_measure(
+        self, column: ColumnInfo, table_name: str | None = None
+    ) -> tuple[str, str, str] | None:
         """Classify how *column* behaves under aggregation.
 
         Deterministic, in two tiers of decreasing certainty, because the
@@ -409,6 +460,8 @@ class OntologyGenerator:
 
         Args:
             column: The column to classify.
+            table_name: Owning table, needed to recognise a key this
+                generator inferred rather than read from the catalog.
 
         Returns:
             ``(measure_type, basis, reason)``, or None when undeterminable.
@@ -429,14 +482,27 @@ class OntologyGenerator:
                 "structural",
                 "Foreign key: an identifier, not a measure",
             )
-        if not any(t in sql_type for t in self.NUMERIC_SQL_TYPES):
+        # A key this generator inferred is as much an identifier as a
+        # declared one. Several supported engines carry no FK metadata at
+        # all -- ClickHouse has no foreign keys, BigQuery and Dremio rarely
+        # declare them -- so without this their keys would all read as
+        # unclassified numerics and SUM(customer_id) would pass unseen.
+        if table_name and (table_name.lower(), name) in self._inferred_fk_columns:
+            return (
+                "attribute",
+                "structural",
+                "Inferred foreign key: an identifier, not a measure",
+            )
+        # Whole-word match, not substring. "int" is contained in POINT,
+        # INTERVAL and GEOPOINT, all of which would otherwise be read as
+        # numeric and then fall through unclassified -- leaving SUM(location)
+        # on a POINT column entirely unreported.
+        if not NUMERIC_TYPE_RE.search(sql_type):
             return (
                 "attribute",
                 "structural",
                 f"Non-numeric SQL type '{column.data_type}' cannot be aggregated as a measure",
             )
-        # "int" matches "point"/"interval" but bool/date/time do not reach
-        # here anyway; guard the one real overlap explicitly.
         if any(t in sql_type for t in ("bool", "date", "time", "interval")):
             return (
                 "attribute",
@@ -641,7 +707,7 @@ class OntologyGenerator:
         # because a denormalized table holds additive measures next to
         # attributes and a table-level role cannot express that. Omitted
         # entirely when it could not be determined without guessing.
-        measure = self.classify_measure(column)
+        measure = self.classify_measure(column, table_name)
         if measure is not None:
             measure_type, basis, reason = measure
             self.graph.add((prop_uri, self.oba_ns.measureType, Literal(measure_type)))

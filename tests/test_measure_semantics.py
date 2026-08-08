@@ -222,6 +222,112 @@ class TestOBQCMeasureRule(unittest.TestCase):
         self.assertIn("override", found[0].suggestion)
 
 
+class TestCTEShadowingIsNotJudged(unittest.TestCase):
+    """A WITH alias may shadow a base table, and its columns are the query's
+    own. Resolving against the same-named ontology table blocked valid CTEs."""
+
+    def setUp(self):
+        ttl = OntologyGenerator(BASE_URI).generate_from_schema([MIXED_TABLE])
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        self.validator = OBQCValidator()
+        self.validator.load_ontology(g, BASE_URI)
+
+    def _findings(self, sql):
+        return [
+            i
+            for i in self.validator.validate(sql).issues
+            if i.issue_type is OBQCIssueType.INVALID_AGGREGATION
+        ]
+
+    def test_qualified_reference_to_a_shadowing_cte_is_not_judged(self):
+        self.assertEqual(
+            self._findings(
+                "WITH sales AS (SELECT 1 AS sale_id) "
+                "SELECT SUM(sales.sale_id) FROM sales"
+            ),
+            [],
+        )
+
+    def test_unqualified_reference_with_a_cte_in_scope_is_not_judged(self):
+        self.assertEqual(
+            self._findings(
+                "WITH sales AS (SELECT 1 AS sale_id) SELECT SUM(sale_id) FROM sales"
+            ),
+            [],
+        )
+
+    def test_the_real_table_is_still_judged_outside_the_cte(self):
+        """Shadowing must not disable the rule everywhere."""
+        self.assertTrue(self._findings("SELECT SUM(sale_id) FROM sales"))
+
+
+class TestInferredForeignKeys(unittest.TestCase):
+    """Several supported engines carry no FK metadata at all."""
+
+    def _validator(self, tables):
+        ttl = OntologyGenerator(BASE_URI).generate_from_schema(tables)
+        g = Graph()
+        g.parse(data=ttl, format="turtle")
+        validator = OBQCValidator()
+        validator.load_ontology(g, BASE_URI)
+        return validator
+
+    def test_inferred_fk_is_an_attribute(self):
+        """customer_id -> customers is inferred, though never declared."""
+        sales = TableInfo(
+            name="sales",
+            schema="public",
+            columns=[_col("id", "INTEGER", pk=True), _col("customer_id", "INTEGER")],
+            primary_keys=["id"],
+            foreign_keys=[],
+        )
+        customers = TableInfo(
+            name="customers",
+            schema="public",
+            columns=[_col("id", "INTEGER", pk=True), _col("name", "TEXT")],
+            primary_keys=["id"],
+            foreign_keys=[],
+        )
+        validator = self._validator([sales, customers])
+        found = [
+            i
+            for i in validator.validate("SELECT SUM(customer_id) FROM sales").issues
+            if i.issue_type is OBQCIssueType.INVALID_AGGREGATION
+        ]
+        self.assertTrue(found)
+        self.assertEqual(found[0].severity, OBQCSeverity.ERROR)
+        self.assertIn("Inferred foreign key", found[0].suggestion)
+
+
+class TestNumericTypeMatchingIsWholeWord(unittest.TestCase):
+    """ "int" is a substring of POINT, INTERVAL and GEOPOINT."""
+
+    def setUp(self):
+        self.gen = OntologyGenerator(BASE_URI)
+
+    def test_geometry_types_are_attributes(self):
+        for sql_type in ("POINT", "GEOPOINT", "POLYGON", "GEOGRAPHY"):
+            result = self.gen.classify_measure(_col("location", sql_type))
+            self.assertIsNotNone(result, sql_type)
+            self.assertEqual((result[0], result[1]), ("attribute", "structural"))
+
+    def test_interval_is_an_attribute(self):
+        result = self.gen.classify_measure(_col("duration", "INTERVAL"))
+        self.assertEqual(result[0], "attribute")
+
+    def test_real_numeric_types_still_match(self):
+        for sql_type in (
+            "INTEGER",
+            "BIGINT",
+            "DECIMAL(18,2)",
+            "DOUBLE PRECISION",
+            "NUMERIC",
+        ):
+            result = self.gen.classify_measure(_col("amount", sql_type))
+            self.assertEqual(result[0], "additive", sql_type)
+
+
 class TestTableTypeAllowsMixed(unittest.TestCase):
     def test_mixed_is_a_valid_table_type(self):
         from src.shacl_validator import shacl_available, validate_ontology

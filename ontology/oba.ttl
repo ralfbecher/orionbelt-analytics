@@ -194,7 +194,7 @@ oba:semanticName a owl:AnnotationProperty ;
 
 oba:tableType a owl:AnnotationProperty ;
     rdfs:label "table type" ;
-    rdfs:comment "LLM-classified table role: 'fact', 'dimension', or 'lookup'." ;
+    rdfs:comment "LLM-classified table role: 'fact', 'dimension', 'lookup', or 'mixed' for a denormalized table that is both.  Advisory only: what may meaningfully be aggregated is decided per column by oba:measureType, because a single table holds additive measures beside dimension attributes." ;
     rdfs:range xsd:string .
 
 oba:usageNotes a owl:AnnotationProperty ;

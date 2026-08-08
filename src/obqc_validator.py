@@ -1969,20 +1969,35 @@ class OBQCValidator:
         if not col_key:
             return None
 
-        alias_map = self._build_alias_map(select)
-
         qualifier = (column.table or "").lower()
         if qualifier:
-            table_key = alias_map.get(qualifier, qualifier).lower()
-            table = self._schema_cache.tables.get(table_key)
+            # Resolve the table *node*, not the name: whether a reference is
+            # a CTE is a property of that reference. A WITH alias may shadow
+            # a real table, and its columns are whatever its select list
+            # produced -- not the ontology's, whatever the name matches.
+            node = self._resolve_qualifier_table(select, qualifier)
+            if node is None or self._is_cte_reference(node):
+                return None
+            table = self._schema_cache.tables.get((node.name or "").lower())
             return table.columns.get(col_key) if table else None
 
-        # Unqualified: only resolvable when exactly one table in scope has
-        # it. An ambiguous name is left alone rather than attributed to a
-        # guess, since the finding names the column it accuses.
+        # Unqualified. A CTE in scope can legitimately provide this name, and
+        # nothing here can know its columns, so the whole scope is
+        # unjudgeable rather than resolved against a same-named base table.
+        scope_tables = [
+            t
+            for t in select.find_all(exp.Table)
+            if t.name and t.find_ancestor(exp.Select) is select
+        ]
+        if any(self._is_cte_reference(t) for t in scope_tables):
+            return None
+
+        # Only resolvable when exactly one table in scope has the column. An
+        # ambiguous name is left alone rather than attributed to a guess,
+        # since the finding names the column it accuses.
         matches = [
             table.columns[col_key]
-            for name in {v.lower() for v in alias_map.values()}
+            for name in {(t.name or "").lower() for t in scope_tables}
             if (table := self._schema_cache.tables.get(name)) is not None
             and col_key in table.columns
         ]
