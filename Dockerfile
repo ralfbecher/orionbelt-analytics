@@ -30,9 +30,17 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
-# Install dependencies first (cached layer) using the lockfile
+# Install dependencies first (cached layer) using the lockfile.
+#
+# Only the three files this step actually reads are copied. src/__init__.py
+# used to be copied too, for the version [tool.hatch.version] reads -- but
+# --no-install-project does not build the project, so it was never needed, and
+# it made every version bump invalidate this layer and pay a full cold install
+# of chromadb, onnxruntime and pandas. The project's own version is now
+# dynamic, so none of these three change on a bump either, and the layer
+# survives a release. The project (and its version) is installed below, once
+# the source is present.
 COPY pyproject.toml uv.lock README.md ./
-COPY src/__init__.py ./src/__init__.py
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy the rest of the project and install it
