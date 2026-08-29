@@ -45,6 +45,7 @@ import re
 import subprocess
 import sys
 import sysconfig
+import textwrap
 from collections import defaultdict
 from pathlib import Path
 
@@ -229,7 +230,67 @@ upstream is <https://docutils.sourceforge.io/>.""",
 
 BUNDLE_PATH_IN_IMAGE = "/app/licenses/THIRD_PARTY_LICENSES.txt"
 
-LICENSE_FILE_RE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE)", re.IGNORECASE)
+# Canonical licence texts kept in-tree, for packages that ship none of their
+# own. Only licences with a single verbatim upstream text belong here -- MIT
+# and BSD are templates carrying a per-project copyright line, so they cannot
+# be supplied generically and must come from the package itself.
+VENDORED_TEXTS_DIR = Path(__file__).resolve().parent / "license-texts"
+
+# Recognised as attribution material wherever it is installed. ThirdPartyNotices
+# is included because a package that vendors its own dependencies (onnxruntime
+# ships 325 KB of them) passes their notices on to us along with the binary.
+LICENSE_FILE_RE = re.compile(
+    r"^(LICEN[CS]E|COPYING|NOTICE|THIRD[-_ ]?PARTY[-_ ]?NOTICES)",
+    re.IGNORECASE,
+)
+
+# A file named like a licence but carrying code is a module, not a notice.
+NON_TEXT_SUFFIXES = frozenset({".py", ".pyc", ".pyi", ".pyd", ".so", ".dll", ".dylib"})
+
+# Packages that ship no licence file anywhere in their distribution. Every
+# entry is (SPDX licence to reproduce, upstream source, attribution note), and
+# each fact below is sourced from the installed distribution itself -- its
+# METADATA, or the licence headers in the source files it installs -- rather
+# than from memory. Without an entry here a package is dropped from the bundle
+# silently, which is why collect_texts() refuses to proceed instead.
+MISSING_TEXT_FALLBACK: dict[str, tuple[str, str, str]] = {
+    "fastmcp-slim": (
+        "Apache-2.0",
+        "https://github.com/PrefectHQ/fastmcp",
+        "Author, per package metadata: Jeremiah Lowin.",
+    ),
+    "flatbuffers": (
+        "Apache-2.0",
+        "https://github.com/google/flatbuffers",
+        "Copyright 2014 Google Inc. All rights reserved. (from the Apache "
+        "licence headers on the source files in this distribution)",
+    ),
+    "py-key-value-aio": (
+        "Apache-2.0",
+        "https://pypi.org/project/py-key-value-aio/",
+        "",
+    ),
+    "pyoxigraph": (
+        "Apache-2.0",
+        "https://github.com/oxigraph/oxigraph/tree/main/python",
+        "Author, per package metadata: Tpt <thomas@pellissier-tanon.fr>. "
+        "Dual-licensed MIT OR Apache-2.0; Apache-2.0 is elected and "
+        "reproduced here, the MIT alternative being a template whose "
+        "copyright line the distribution does not carry.",
+    ),
+    "thrift": (
+        "Apache-2.0",
+        "https://github.com/apache/thrift",
+        "Licensed to the Apache Software Foundation (ASF) under one or more "
+        "contributor licence agreements (from the licence headers on the "
+        "source files in this distribution).",
+    ),
+    "tokenizers": (
+        "Apache-2.0",
+        "https://github.com/huggingface/tokenizers",
+        "Authors, per package metadata: Nicolas Patry, Anthony Moi.",
+    ),
+}
 
 
 def normalize(name: str) -> str:
@@ -473,6 +534,14 @@ def render(resolved: dict[str, str]) -> str:
     )
     out.append("")
     out.append(
+        "A few packages ship no licence file of their own. Rather than being "
+        "dropped from the bundle, each carries a notice naming its licence, "
+        "the attribution recorded in its own metadata or source headers, and "
+        "the upstream source; the generator refuses to run if a package is "
+        "covered by neither."
+    )
+    out.append("")
+    out.append(
         "The image also contains a Debian base with system packages "
         "(chromium, libpq5, fonts). Their copyright files remain in place "
         "under `/usr/share/doc/*/copyright` and are not duplicated here."
@@ -523,34 +592,168 @@ def render(resolved: dict[str, str]) -> str:
     return "\n".join(line.rstrip() for line in out).rstrip() + "\n"
 
 
-def dump_texts(packages: dict[str, str], destination: Path) -> None:
-    """Collect every installed licence and NOTICE file into one bundle.
+def _license_files(dist_info: Path) -> list[Path]:
+    """Find every licence-like file a distribution installs.
 
-    Intended for the Docker builder stage, where the environment holds exactly
-    the production closure. Texts are deduplicated by content, so the many
-    packages shipping an unmodified Apache-2.0 text share a single copy.
+    Searching only ``*.dist-info`` misses packages that put their licence
+    inside the package directory instead -- onnxruntime is the example in this
+    tree -- so the installed-file manifest is consulted as well.
+
+    Args:
+        dist_info: A ``*.dist-info`` directory.
+
+    Returns:
+        Existing files, deduplicated, in a stable order.
+    """
+    found: list[Path] = []
+
+    def consider(path: Path) -> None:
+        if path.suffix.lower() in NON_TEXT_SUFFIXES:
+            return
+        if not LICENSE_FILE_RE.match(path.name):
+            return
+        if path.is_file() and path not in found:
+            found.append(path)
+
+    for path in sorted(dist_info.rglob("*")):
+        consider(path)
+
+    record = dist_info / "RECORD"
+    if record.is_file():
+        site_dir = dist_info.parent
+        with record.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                relative = line.split(",", 1)[0].strip()
+                if not relative:
+                    continue
+                candidate = (site_dir / relative).resolve()
+                # A RECORD entry may point outside site-packages (scripts,
+                # data files); anything beyond the tree is not ours to ship.
+                if site_dir.resolve() in candidate.parents:
+                    consider(candidate)
+
+    return sorted(found)
+
+
+def _fallback_entry(display: str) -> str:
+    """Build a notice for a package that ships no licence file.
+
+    Args:
+        display: The package's display name.
+
+    Returns:
+        The notice body, including the vendored canonical licence text.
+
+    Raises:
+        SystemExit: If the vendored text for the licence is missing.
+    """
+    spdx, source, attribution = MISSING_TEXT_FALLBACK[normalize(display)]
+    text_path = VENDORED_TEXTS_DIR / f"{spdx}.txt"
+    if not text_path.is_file():
+        sys.exit(
+            f"{display} needs the canonical {spdx} text, but "
+            f"{text_path} does not exist."
+        )
+
+    # Wrapped to match the width of the licence texts it sits alongside.
+    lines = textwrap.wrap(
+        f"{display} ships no licence file in its distribution. Its declared "
+        f"licence is {spdx}; the canonical text is reproduced below.",
+        width=78,
+    )
+    lines.append("")
+    if attribution:
+        lines.extend(textwrap.wrap(attribution, width=78))
+        lines.append("")
+    lines.extend([f"Source and licence notice: {source}", "", "-" * 78, ""])
+    lines.append(text_path.read_text(encoding="utf-8").rstrip())
+    return "\n".join(lines)
+
+
+def collect_texts(
+    packages: dict[str, str],
+) -> tuple[dict[str, tuple[str, list[str]]], list[str]]:
+    """Gather the licence text of every installed production package.
 
     Args:
         packages: Mapping of normalized name to display name.
-        destination: File to write; parent directories are created.
+
+    Returns:
+        ``(texts, uncovered)`` where ``texts`` maps a content hash to
+        ``(text, packages)`` -- identical texts are shared, so the many
+        packages carrying an unmodified Apache-2.0 copy collapse into one
+        entry -- and ``uncovered`` lists installed packages that ship no
+        licence file and have no curated fallback.
     """
     by_hash: dict[str, tuple[str, list[str]]] = {}
+    uncovered: list[str] = []
+
+    def record_text(text: str, display: str) -> None:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        entry = by_hash.setdefault(digest, (text, []))
+        if display not in entry[1]:
+            entry[1].append(display)
+
     for directory in site_packages_dirs():
         for dist_info in sorted(directory.glob("*.dist-info")):
             parsed = _read_metadata(dist_info)
             if parsed is None:
                 continue
-            name, _ = parsed
-            if normalize(name) not in packages:
+            display, _ = parsed
+            key = normalize(display)
+            if key not in packages:
                 continue
-            for path in sorted(dist_info.rglob("*")):
-                if not path.is_file() or not LICENSE_FILE_RE.match(path.name):
-                    continue
-                text = path.read_text(encoding="utf-8", errors="replace")
-                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-                entry = by_hash.setdefault(digest, (text, []))
-                if name not in entry[1]:
-                    entry[1].append(name)
+
+            files = _license_files(dist_info)
+            if files:
+                for path in files:
+                    record_text(
+                        path.read_text(encoding="utf-8", errors="replace"),
+                        display,
+                    )
+            elif key in MISSING_TEXT_FALLBACK:
+                record_text(_fallback_entry(display), display)
+            else:
+                uncovered.append(display)
+
+    return by_hash, sorted(uncovered, key=str.lower)
+
+
+def require_full_coverage(uncovered: list[str]) -> None:
+    """Abort if any installed production package has no licence text.
+
+    Silently dropping such a package is the failure that matters here: the
+    bundle would still be written, the image would still build, and the
+    missing attribution would ship.
+
+    Args:
+        uncovered: Display names with neither a shipped text nor a fallback.
+
+    Raises:
+        SystemExit: If ``uncovered`` is non-empty.
+    """
+    if not uncovered:
+        return
+    sys.exit(
+        "These bundled packages ship no licence file and have no curated "
+        "fallback, so their attribution would be missing from the collected "
+        "bundle:\n"
+        + "\n".join(f"  {name}" for name in uncovered)
+        + "\n\nRead the package's own metadata and source headers, then add an "
+        "entry to MISSING_TEXT_FALLBACK (and, if its licence has no vendored "
+        "canonical text yet, add one under scripts/license-texts/)."
+    )
+
+
+def dump_texts(packages: dict[str, str], destination: Path) -> None:
+    """Write the verbatim licence-text bundle shipped inside the image.
+
+    Args:
+        packages: Mapping of normalized name to display name.
+        destination: File to write; parent directories are created.
+    """
+    by_hash, uncovered = collect_texts(packages)
+    require_full_coverage(uncovered)
 
     chunks: list[str] = [
         "THIRD-PARTY LICENCE TEXTS",
@@ -558,9 +761,11 @@ def dump_texts(packages: dict[str, str], destination: Path) -> None:
         "",
         "Verbatim licence and NOTICE files for every third-party package",
         "bundled in this OrionBelt Analytics distribution. Identical texts are",
-        "listed once against every package that ships them. See",
-        "THIRD_PARTY_NOTICES.md for the package/licence index and for the",
-        "notices that carry obligations beyond attribution.",
+        "listed once against every package that ships them. Packages that ship",
+        "no licence file of their own carry a notice naming their licence and",
+        "upstream source instead. See THIRD_PARTY_NOTICES.md for the",
+        "package/licence index and for the notices that carry obligations",
+        "beyond attribution.",
         "",
         "OrionBelt Analytics itself is licensed under the Business Source",
         "License 1.1; see LICENSE.",
@@ -580,7 +785,11 @@ def dump_texts(packages: dict[str, str], destination: Path) -> None:
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text("\n".join(chunks) + "\n", encoding="utf-8")
-    print(f"Wrote {destination} ({len(by_hash)} distinct texts)")
+    covered = sorted({name for _, names in by_hash.values() for name in names})
+    print(
+        f"Wrote {destination} ({len(by_hash)} distinct texts, "
+        f"{len(covered)} packages)"
+    )
 
 
 def main() -> int:
@@ -625,6 +834,12 @@ def main() -> int:
             "list the package in REVIEWED_COPYLEFT."
         )
 
+    # Coverage is validated here too, not just in --dump-texts, so a package
+    # shipping no licence file fails in this 17-second job rather than in the
+    # six-minute image build -- or, worse, at release time.
+    _, uncovered = collect_texts(packages)
+    require_full_coverage(uncovered)
+
     content = render(resolved)
 
     if args.check:
@@ -636,7 +851,10 @@ def main() -> int:
                 f"{NOTICES_PATH.name} is out of date. Regenerate it with:\n"
                 f"  uv run python scripts/gen-third-party-notices.py"
             )
-        print(f"{NOTICES_PATH.name} is up to date ({len(resolved)} packages).")
+        print(
+            f"{NOTICES_PATH.name} is up to date ({len(resolved)} packages, "
+            f"licence texts complete)."
+        )
         return 0
 
     NOTICES_PATH.write_text(content, encoding="utf-8")

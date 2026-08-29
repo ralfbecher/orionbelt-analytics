@@ -8,6 +8,8 @@ The published Docker image bundles the full production dependency closure, so di
 
 **Verbatim licence texts** are shipped inside the image, both under each package's own `*.dist-info/` directory in `/opt/venv` and collected into `/app/licenses/THIRD_PARTY_LICENSES.txt`. This file records which packages are present and under what terms; it omits version numbers deliberately, so that a routine dependency bump does not churn it.
 
+A few packages ship no licence file of their own. Rather than being dropped from the bundle, each carries a notice naming its licence, the attribution recorded in its own metadata or source headers, and the upstream source; the generator refuses to run if a package is covered by neither.
+
 The image also contains a Debian base with system packages (chromium, libpq5, fonts). Their copyright files remain in place under `/usr/share/doc/*/copyright` and are not duplicated here.
 
 ## Licences requiring specific attention
