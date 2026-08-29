@@ -12,13 +12,25 @@ description = "OrionBelt Analytics - the Ontology-based MCP server for your Text
 authors = [{name = "Ralf Becher, RALFORION d.o.o.", email = "info@ralforion.com"}]
 readme = "README.md"
 requires-python = ">=3.13"
+# PEP 639 metadata. BUSL-1.1 is a registered SPDX identifier, so the licence is
+# declared as an expression rather than through the deprecated
+# "License :: ..." classifier -- the two are mutually exclusive and build
+# backends reject a project that sets both.
+#
+# license-files lands both files in the wheel's dist-info/licenses/. Shipping
+# the third-party notices there as well is deliberate: the PyPI wheel owes no
+# attribution (it declares its dependencies rather than bundling them), but the
+# notice file is the index the Docker image's bundled licences point back to,
+# and a single canonical copy travelling with every artefact beats two that can
+# drift. Regenerate it with scripts/gen-third-party-notices.py.
+license = "BUSL-1.1"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 keywords = ["mcp", "database", "ontology", "rdf", "schema-analysis", "postgresql", "snowflake", "clickhouse", "bigquery", "duckdb", "databricks", "mysql"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Information Analysis",
-    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.13",
 ]
@@ -80,7 +92,7 @@ Documentation = "https://github.com/ralforion/orionbelt-analytics#readme"
 Issues = "https://github.com/ralforion/orionbelt-analytics/issues"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

@@ -265,6 +265,12 @@ By contributing to this project, you agree to the [Contributor License Agreement
 
 For commercial licensing inquiries, contact: licensing@ralforion.com
 
+### Third-party software
+
+OrionBelt Analytics builds on open source. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists every bundled dependency with its licence, and calls out the few that carry obligations beyond attribution (psycopg2's LGPL, wordfreq's CC-BY-SA data, the MPL-2.0 components).
+
+The Docker image redistributes those packages, so it ships their verbatim licence texts at `/app/licenses/THIRD_PARTY_LICENSES.txt`, alongside the Debian copyright files under `/usr/share/doc/`. The PyPI wheel bundles nothing third-party — it declares its dependencies and the installer fetches them from PyPI.
+
 ---
 
 <p align="center">

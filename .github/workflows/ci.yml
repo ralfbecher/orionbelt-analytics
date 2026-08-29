@@ -45,6 +45,30 @@ jobs:
       - name: Tests
         run: uv run pytest
 
+  # Blocking gate: THIRD_PARTY_NOTICES.md matches the locked production tree.
+  #
+  # The Docker image bundles every production dependency, so its attribution
+  # obligations move whenever the dependency set does -- and in this repo that
+  # is mostly Dependabot, not a human. The generator omits versions and derives
+  # every row from the package name, so a routine bump produces no diff; this
+  # job only goes red when a package enters or leaves the tree, changes
+  # licence, or arrives under copyleft terms nobody has read yet.
+  notices:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Third-party notices up to date
+        run: uv run python scripts/gen-third-party-notices.py --check
+
   # Blocking gate: src/ type-checks clean under strict mypy. Keep it green.
   typecheck:
     runs-on: ubuntu-latest

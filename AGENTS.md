@@ -19,6 +19,7 @@ black src/ tests/ server.py && isort src/ tests/ server.py   # format
 ruff check src/ tests/ server.py         # lint (server.py is the root entry point)
 mypy src/                                # strict type check (disallow_untyped_defs etc.)
 bandit -r src/                           # security scan (run for SQL/credential changes)
+uv run python scripts/gen-third-party-notices.py   # refresh THIRD_PARTY_NOTICES.md after a dependency change
 pre-commit run --all-files               # all of the above as configured hooks
 ```
 
@@ -49,6 +50,11 @@ Config comes from `.env` (copy from `.env.template`). At minimum set credentials
 ## Conventions
 
 - **Conventional commits** (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).
+- Changing the **production dependency set** means regenerating attribution:
+  `uv run python scripts/gen-third-party-notices.py`. CI (`--check`) enforces it.
+  Version bumps alone produce no diff by design; adding a package, or one under
+  copyleft terms, does — and a new copyleft dependency fails the check until it
+  has a written notice. See `THIRD_PARTY_NOTICES.md`.
 - Type hints required on all public functions (strict mypy); Google-style docstrings; 88-char lines; async handlers.
 - Tests in `tests/` as `test_*.py`; `pytest-asyncio` in `auto` mode (no `@pytest.mark.asyncio` needed).
 - Releases are **squash-only** (merge commits disabled) and PyPI publish is irreversible — see `scripts/bump-version.sh` and the release-process note in memory before cutting a release.
