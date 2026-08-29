@@ -57,4 +57,12 @@ Config comes from `.env` (copy from `.env.template`). At minimum set credentials
   has a written notice. See `THIRD_PARTY_NOTICES.md`.
 - Type hints required on all public functions (strict mypy); Google-style docstrings; 88-char lines; async handlers.
 - Tests in `tests/` as `test_*.py`; `pytest-asyncio` in `auto` mode (no `@pytest.mark.asyncio` needed).
-- Releases are **squash-only** (merge commits disabled) and PyPI publish is irreversible — see `scripts/bump-version.sh` and the release-process note in memory before cutting a release.
+- Releases are **squash-only** (merge commits disabled). Tagging `v*.*.*` publishes
+  both artefacts: `docker-publish.yml` builds the multi-arch image, and
+  `pypi-publish.yml` builds, verifies and uploads the wheel. **The PyPI upload is
+  irreversible** — a version can never be re-uploaded — so it is gated behind the
+  `pypi` GitHub environment (Trusted Publishing, no stored token) and preceded by
+  `twine check` plus assertions on tag/version agreement, licence metadata and the
+  force-included ontology files. See
+  `scripts/bump-version.sh` and the release-process note in memory before cutting
+  a release.

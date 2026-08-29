@@ -1,0 +1,99 @@
+name: Publish to PyPI
+
+# Publishes the package to PyPI on every version tag (v*.*.*), using PyPI
+# Trusted Publishing (OIDC) — no API token is stored. workflow_dispatch is
+# also enabled so an existing tag can be backfilled (run against that tag's ref).
+#
+# A PyPI upload is irreversible: a version can never be re-uploaded, even after
+# a delete. So the job runs from a clean checkout — `dist/` cannot inherit a
+# stale artefact from a previous version, as it once did locally — and verifies
+# what it built before handing it to the upload step.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  pypi-publish:
+    runs-on: ubuntu-latest
+    # Only run for version tags or a manual dispatch.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/orionbelt-analytics/
+    permissions:
+      contents: read # actions/checkout
+      id-token: write # required for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # The floor of requires-python (>=3.13): what most installs get.
+          python-version: "3.13"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check artifacts
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      # What twine cannot know about, all of it unfixable after an upload.
+      - name: Verify release artifacts
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "::error::Refusing to publish from ${GITHUB_REF}." \
+                 "Dispatch this workflow against a v*.*.* tag ref."
+            exit 1
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+
+          # The version is dynamic — hatch reads it from src/__init__.py — so a
+          # tag can disagree with what actually gets built, and the wrong
+          # version number cannot be reclaimed.
+          PKG_VERSION="$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' src/__init__.py)"
+          if [[ "${TAG_VERSION}" != "${PKG_VERSION}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match" \
+                 "__version__ ${PKG_VERSION} in src/__init__.py."
+            exit 1
+          fi
+
+          WHEEL="dist/orionbelt_analytics-${PKG_VERSION}-py3-none-any.whl"
+          if [[ ! -f "${WHEEL}" ]]; then
+            echo "::error::Expected ${WHEEL}, which the build did not produce."
+            ls -l dist/
+            exit 1
+          fi
+
+          METADATA="$(unzip -p "${WHEEL}" '*.dist-info/METADATA')"
+          for line in "License-Expression: BUSL-1.1" \
+                      "License-File: LICENSE" \
+                      "License-File: THIRD_PARTY_NOTICES.md"; do
+            if ! grep -qxF "${line}" <<<"${METADATA}"; then
+              echo "::error::Wheel metadata is missing: ${line}"
+              exit 1
+            fi
+          done
+
+          # ontology/*.ttl are force-included in pyproject.toml and load-bearing:
+          # a wheel without them installs cleanly and only fails later, when
+          # SHACL validation runs.
+          CONTENTS="$(unzip -Z1 "${WHEEL}")"
+          for required in ontology/oba.ttl ontology/oba-shacl.ttl; do
+            if ! grep -qxF "${required}" <<<"${CONTENTS}"; then
+              echo "::error::Wheel is missing ${required}"
+              exit 1
+            fi
+          done
+
+          echo "Verified ${PKG_VERSION}: tag, licence metadata, ontology files."
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
