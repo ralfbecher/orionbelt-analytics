@@ -5,6 +5,12 @@ design/
 scripts/*
 !scripts/publish-docker.sh
 !scripts/bump-version.sh
+# Tracked: CI runs it as a gate, and the Docker build runs it to collect the
+# bundled dependencies' licence texts.
+!scripts/gen-third-party-notices.py
+# Canonical licence texts the generator reproduces for packages that
+# ship none of their own.
+!scripts/license-texts/
 build/
 dist/
 wheels/

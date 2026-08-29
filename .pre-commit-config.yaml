@@ -61,6 +61,18 @@ repos:
         language: python
         stages: [commit]
 
+  # Third-party attribution: keep THIRD_PARTY_NOTICES.md in step with the
+  # locked production tree. Scoped to the files that can change the dependency
+  # set, so it does not run (and does not need the venv) on an ordinary commit.
+  - repo: local
+    hooks:
+      - id: third-party-notices
+        name: third-party notices
+        entry: uv run python scripts/gen-third-party-notices.py --check
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock|scripts/gen-third-party-notices\.py)$
+
   # Dependency vulnerability scanning
   - repo: local
     hooks:

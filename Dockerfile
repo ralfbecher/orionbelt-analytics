@@ -47,6 +47,15 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev
 
+# Collect the verbatim licence text of every bundled dependency into a single
+# file. The image redistributes the whole production closure, so MIT/BSD/Apache
+# attribution clauses apply to it in a way they do not to the PyPI wheel, which
+# only declares its dependencies. The texts already exist under each package's
+# dist-info; gathering them here means that stays true by construction rather
+# than by accident, and survives any future slimming of the runtime layer.
+RUN /opt/venv/bin/python scripts/gen-third-party-notices.py \
+        --dump-texts /licenses/THIRD_PARTY_LICENSES.txt
+
 # ---------- Runtime stage ----------
 FROM python:3.14-slim AS runtime
 
@@ -77,6 +86,10 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY . .
+
+# Third-party licence texts, next to the THIRD_PARTY_NOTICES.md index that
+# COPY . . brings in.
+COPY --from=builder /licenses /app/licenses
 
 # Non-root user; owns /app and /data
 RUN useradd --create-home --uid 1000 oba \
