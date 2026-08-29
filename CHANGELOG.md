@@ -5,6 +5,44 @@ All notable changes to OrionBelt Analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-08-29
+
+No functional change. This release exists so the published artefacts carry the
+third-party attribution the Docker image owes, and to ship three weeks of
+accumulated dependency updates.
+
+### Added
+- **Third-party attribution.** `THIRD_PARTY_NOTICES.md` indexes every bundled
+  dependency with its SPDX licence, generated from the locked production tree
+  by `scripts/gen-third-party-notices.py`. The Docker image bundles the whole
+  production closure, so publishing it redistributes ~197 packages plus a
+  Debian base and chromium, and the MIT/BSD/Apache-2.0 attribution clauses
+  apply to it in a way they never did to the PyPI wheel, which only declares
+  its dependencies. (#104)
+- **Verbatim licence texts in the image** at `/app/licenses/THIRD_PARTY_LICENSES.txt`,
+  collected at build time from each package's own distribution, alongside the
+  Debian copyright files already under `/usr/share/doc/`. Packages that ship no
+  licence file of their own carry a notice naming their licence, upstream
+  source and recorded attribution; a package covered by neither fails the
+  build rather than being dropped silently. (#104)
+- **Written notices for the four dependencies with obligations beyond
+  attribution**: psycopg2's LGPL-3.0 source offer, the CC-BY-SA 4.0 data
+  bundled in wordfreq (with the Google Books Ngrams and SUBTLEX credits it
+  requires), the MPL-2.0 file-level copyleft in certifi/orjson/tqdm, and
+  docutils' mixed per-file terms. (#104)
+- **A CI gate** that fails on stale notices, a missing licence text, or a new
+  copyleft dependency that nobody has read — the path such an obligation would
+  realistically take into this repo, given how much of the dependency tree
+  moves by automated bump. (#104)
+
+### Changed
+- The project licence is now declared per PEP 639 as the SPDX expression
+  `BUSL-1.1`, replacing the deprecated (and now mutually exclusive) `License ::`
+  classifier. The wheel carries `LICENSE` and `THIRD_PARTY_NOTICES.md` under
+  `dist-info/licenses/`. No change to the licence itself. (#104)
+- Dependency updates, including cryptography 49 → 50, fastmcp 3.4.7, and the
+  python-minor-patch group. (#99, #100, #101, #102, #103)
+
 ## [2.0.0] - 2026-08-08
 
 Database views become first-class, and the ontology learns which columns can
