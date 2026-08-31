@@ -7,7 +7,7 @@
 
 <p align="center"><strong>The Ontology-based MCP server for your Text-2-SQL convenience.</strong></p>
 
-[![Version 2.0.2](https://img.shields.io/badge/version-2.0.2-purple.svg)](https://github.com/ralforion/orionbelt-analytics/releases)
+[![Version 2.0.3](https://img.shields.io/badge/version-2.0.3-purple.svg)](https://github.com/ralforion/orionbelt-analytics/releases)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](https://github.com/ralforion/orionbelt-analytics/blob/main/LICENSE)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.3.1+-blue)](https://github.com/jlowin/fastmcp)
