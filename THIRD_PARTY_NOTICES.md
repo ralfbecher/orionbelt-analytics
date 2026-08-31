@@ -74,36 +74,25 @@ making the source of those files available:
 Should any of these ever be patched rather than vendored as-is, the modified
 files themselves must be published under MPL-2.0.
 
-### docutils — mixed public domain / BSD / GPL
-
-`docutils` arrives transitively (fastmcp → cyclopts → rich-rst → docutils) and
-is licensed per-file rather than as a whole: the bulk is public domain, with
-some files under a 2-clause BSD licence and a small number under the GPL. It is
-not GPL as a work, and the GPL-licensed files are auxiliary tooling rather than
-anything on OrionBelt Analytics' import path — the dependency is pulled in for
-reStructuredText rendering in the FastMCP CLI's help output.
-
-Per-file terms are in `docutils/COPYING.txt` inside the distribution;
-upstream is <https://docutils.sourceforge.io/>.
-
 ## Summary by licence
 
 | Licence | Packages |
 | --- | --- |
-| Apache-2.0 | 60 |
+| Apache-2.0 | 59 |
 | Apache-2.0 AND CNRI-Python | 1 |
 | Apache-2.0 AND MIT | 1 |
 | Apache-2.0 OR BSD-2-Clause | 1 |
 | Apache-2.0 OR BSD-3-Clause | 2 |
-| BSD-2-Clause | 5 |
-| BSD-3-Clause | 31 |
+| BSD-2-Clause | 4 |
+| BSD-3-Clause | 29 |
 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 1 |
 | ISC | 4 |
 | LGPL-3.0-or-later WITH psycopg-exception | 1 |
-| LicenseRef-Docutils-Mixed | 1 |
-| MIT | 77 |
-| MIT AND Python-2.0 | 1 |
-| MIT OR Apache-2.0 | 2 |
+| MIT | 74 |
+| MIT AND PSF-2.0 | 1 |
+| MIT OR AFL-2.1 | 1 |
+| MIT OR Apache-2.0 | 1 |
+| MIT-0 | 1 |
 | MIT-CMU | 1 |
 | MPL-2.0 | 1 |
 | MPL-2.0 AND (Apache-2.0 OR MIT) | 1 |
@@ -112,7 +101,7 @@ upstream is <https://docutils.sourceforge.io/>.
 | Unlicense | 1 |
 | W3C-20150513 | 1 |
 
-197 packages in total.
+190 packages in total.
 
 ## Packages
 
@@ -122,6 +111,7 @@ upstream is <https://docutils.sourceforge.io/>.
 | aiohappyeyeballs | PSF-2.0 | <https://pypi.org/project/aiohappyeyeballs/> |
 | aiohttp | Apache-2.0 AND MIT | <https://pypi.org/project/aiohttp/> |
 | aiosignal | Apache-2.0 | <https://pypi.org/project/aiosignal/> |
+| annotated-doc | MIT | <https://pypi.org/project/annotated-doc/> |
 | annotated-types | MIT | <https://pypi.org/project/annotated-types/> |
 | anyio | MIT | <https://pypi.org/project/anyio/> |
 | asn1crypto | MIT | <https://pypi.org/project/asn1crypto/> |
@@ -136,7 +126,7 @@ upstream is <https://docutils.sourceforge.io/>.
 | cachetools | MIT | <https://pypi.org/project/cachetools/> |
 | caio | Apache-2.0 | <https://pypi.org/project/caio/> |
 | certifi | MPL-2.0 | <https://pypi.org/project/certifi/> |
-| cffi | MIT | <https://pypi.org/project/cffi/> |
+| cffi | MIT-0 | <https://pypi.org/project/cffi/> |
 | charset-normalizer | MIT | <https://pypi.org/project/charset-normalizer/> |
 | choreographer | MIT | <https://pypi.org/project/choreographer/> |
 | chromadb | Apache-2.0 | <https://pypi.org/project/chromadb/> |
@@ -150,11 +140,10 @@ upstream is <https://docutils.sourceforge.io/>.
 | databricks-sql-connector | Apache-2.0 | <https://pypi.org/project/databricks-sql-connector/> |
 | dnspython | ISC | <https://pypi.org/project/dnspython/> |
 | docstring_parser | MIT | <https://pypi.org/project/docstring-parser/> |
-| docutils | LicenseRef-Docutils-Mixed | <https://pypi.org/project/docutils/> |
 | duckdb | MIT | <https://pypi.org/project/duckdb/> |
 | duckdb_engine | MIT | <https://pypi.org/project/duckdb-engine/> |
 | durationpy | MIT | <https://pypi.org/project/durationpy/> |
-| email_validator | Unlicense | <https://pypi.org/project/email-validator/> |
+| email-validator | Unlicense | <https://pypi.org/project/email-validator/> |
 | et_xmlfile | MIT | <https://pypi.org/project/et-xmlfile/> |
 | exceptiongroup | MIT | <https://pypi.org/project/exceptiongroup/> |
 | fastmcp | Apache-2.0 | <https://pypi.org/project/fastmcp/> |
@@ -171,7 +160,7 @@ upstream is <https://docutils.sourceforge.io/>.
 | google-crc32c | Apache-2.0 | <https://pypi.org/project/google-crc32c/> |
 | google-resumable-media | Apache-2.0 | <https://pypi.org/project/google-resumable-media/> |
 | googleapis-common-protos | Apache-2.0 | <https://pypi.org/project/googleapis-common-protos/> |
-| greenlet | MIT AND Python-2.0 | <https://pypi.org/project/greenlet/> |
+| greenlet | MIT AND PSF-2.0 | <https://pypi.org/project/greenlet/> |
 | griffelib | ISC | <https://pypi.org/project/griffelib/> |
 | grpcio | Apache-2.0 | <https://pypi.org/project/grpcio/> |
 | grpcio-status | Apache-2.0 | <https://pypi.org/project/grpcio-status/> |
@@ -184,7 +173,6 @@ upstream is <https://docutils.sourceforge.io/>.
 | httpx-sse | MIT | <https://pypi.org/project/httpx-sse/> |
 | huggingface_hub | Apache-2.0 | <https://pypi.org/project/huggingface-hub/> |
 | idna | BSD-3-Clause | <https://pypi.org/project/idna/> |
-| importlib_metadata | Apache-2.0 | <https://pypi.org/project/importlib-metadata/> |
 | importlib_resources | Apache-2.0 | <https://pypi.org/project/importlib-resources/> |
 | jaraco.classes | MIT | <https://pypi.org/project/jaraco-classes/> |
 | jaraco.context | MIT | <https://pypi.org/project/jaraco-context/> |
@@ -201,7 +189,6 @@ upstream is <https://docutils.sourceforge.io/>.
 | keyring | MIT | <https://pypi.org/project/keyring/> |
 | kubernetes | Apache-2.0 | <https://pypi.org/project/kubernetes/> |
 | langcodes | MIT | <https://pypi.org/project/langcodes/> |
-| leb128 | MIT | <https://pypi.org/project/leb128/> |
 | locate | MIT | <https://pypi.org/project/locate/> |
 | logistro | MIT | <https://pypi.org/project/logistro/> |
 | lz4 | BSD-3-Clause | <https://pypi.org/project/lz4/> |
@@ -210,7 +197,6 @@ upstream is <https://docutils.sourceforge.io/>.
 | mdurl | MIT | <https://pypi.org/project/mdurl/> |
 | mmh3 | MIT | <https://pypi.org/project/mmh3/> |
 | more-itertools | MIT | <https://pypi.org/project/more-itertools/> |
-| mpmath | BSD-3-Clause | <https://pypi.org/project/mpmath/> |
 | msgpack | Apache-2.0 | <https://pypi.org/project/msgpack/> |
 | multidict | Apache-2.0 | <https://pypi.org/project/multidict/> |
 | narwhals | MIT | <https://pypi.org/project/narwhals/> |
@@ -280,9 +266,8 @@ upstream is <https://docutils.sourceforge.io/>.
 | scipy | BSD-3-Clause | <https://pypi.org/project/scipy/> |
 | secretstorage | BSD-3-Clause | <https://pypi.org/project/secretstorage/> |
 | shellingham | ISC | <https://pypi.org/project/shellingham/> |
-| simplejson | MIT | <https://pypi.org/project/simplejson/> |
+| simplejson | MIT OR AFL-2.1 | <https://pypi.org/project/simplejson/> |
 | six | MIT | <https://pypi.org/project/six/> |
-| sniffio | MIT OR Apache-2.0 | <https://pypi.org/project/sniffio/> |
 | snowflake-connector-python | Apache-2.0 | <https://pypi.org/project/snowflake-connector-python/> |
 | snowflake-sqlalchemy | Apache-2.0 | <https://pypi.org/project/snowflake-sqlalchemy/> |
 | sortedcontainers | Apache-2.0 | <https://pypi.org/project/sortedcontainers/> |
@@ -291,7 +276,6 @@ upstream is <https://docutils.sourceforge.io/>.
 | sqlglot | MIT | <https://pypi.org/project/sqlglot/> |
 | sse-starlette | BSD-3-Clause | <https://pypi.org/project/sse-starlette/> |
 | starlette | BSD-3-Clause | <https://pypi.org/project/starlette/> |
-| sympy | BSD-3-Clause | <https://pypi.org/project/sympy/> |
 | tenacity | Apache-2.0 | <https://pypi.org/project/tenacity/> |
 | threadpoolctl | BSD-3-Clause | <https://pypi.org/project/threadpoolctl/> |
 | thrift | Apache-2.0 | <https://pypi.org/project/thrift/> |
@@ -313,5 +297,3 @@ upstream is <https://docutils.sourceforge.io/>.
 | websockets | BSD-3-Clause | <https://pypi.org/project/websockets/> |
 | wordfreq | Apache-2.0 | <https://pypi.org/project/wordfreq/> |
 | yarl | Apache-2.0 | <https://pypi.org/project/yarl/> |
-| zipp | MIT | <https://pypi.org/project/zipp/> |
-| zstd | BSD-2-Clause | <https://pypi.org/project/zstd/> |
