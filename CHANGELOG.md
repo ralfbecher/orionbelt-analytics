@@ -28,10 +28,23 @@ bundling them, so an installer already resolves the fixed versions.
   HTTP API, while GraphRAG uses `PersistentClient` in embedded mode against a
   local file and never exposes that surface. Tracked for whenever upstream
   ships a fix. (#112)
+- **Nine development-only dependencies with advisories were upgraded** in the
+  same sweep: `virtualenv` 20.33.1 → 21.7.7, `setuptools` 80.9.0 → 84.0.0,
+  `python-socketio` 5.13.0 → 5.16.4, `python-engineio` 4.12.2 → 4.14.0,
+  `werkzeug` 3.1.1 → 3.1.8, `marshmallow` 4.0.1 → 4.3.1, `nltk` 3.10.0 →
+  3.10.3, `flask` 3.1.2 → 3.1.3 and `brotli` 1.1.0 → 1.2.0 — all reached
+  through `locust`, `safety` and `pre-commit`. None ships in the wheel or the
+  image, and the production tree is byte-identical with and without them, so
+  this changes nothing about the released artefacts; it clears the alert list
+  and keeps the contributor toolchain clean. (#116, #118–#123)
 - **Dependabot security updates and alerts are now enabled** on the repository.
   The weekly version updates already configured only bump dependencies declared
-  in `pyproject.toml`, so transitive packages — all nine above — were invisible
-  to them.
+  in `pyproject.toml`, so every transitive package above — production and
+  development alike — was invisible to them. Enabling it immediately surfaced
+  the nine development advisories in this release, which had gone unreported.
+
+With those two sweeps, the whole locked tree is free of known advisories apart
+from the four unfixable `chromadb` ones.
 
 ### Changed
 - **Every GitHub Action is pinned to a commit SHA** with a comment naming the
