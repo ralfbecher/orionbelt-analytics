@@ -5,6 +5,46 @@ All notable changes to OrionBelt Analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-08-31
+
+No functional change — not a line of `src/` differs from 2.0.1. This release
+exists to get patched dependencies into the **Docker image**, which bundles the
+whole production closure and is only ever built on a version tag. The PyPI
+wheel is unaffected either way: it declares its dependencies rather than
+bundling them, so an installer already resolves the fixed versions.
+
+### Security
+- **Nine transitive dependencies carrying published advisories were upgraded**:
+  `pyjwt` 2.10.1 → 2.13.0, `urllib3` 2.5.0 → 2.7.0, `mcp` 1.26.0 → 1.29.1,
+  `pyasn1` 0.6.3 → 0.6.4, plus `click`, `idna`, `msgpack`, `pygments` and
+  `requests`. That takes the production tree from 26 advisories across ten
+  packages to 4 across one. Deliberately targeted rather than a blanket
+  re-resolve, which would have moved 144 packages across 23 major versions for
+  no security benefit. (#113)
+- **`chromadb` stays at 1.5.9**, which is the remaining 4. There is nowhere to
+  go: all four of its open advisories (CVE-2026-45829, -45830, -45831, -45833)
+  report no patched version, and 1.5.9 is the newest release published. None is
+  reachable from here in any case — every one targets the ChromaDB *server's*
+  HTTP API, while GraphRAG uses `PersistentClient` in embedded mode against a
+  local file and never exposes that surface. Tracked for whenever upstream
+  ships a fix. (#112)
+- **Dependabot security updates and alerts are now enabled** on the repository.
+  The weekly version updates already configured only bump dependencies declared
+  in `pyproject.toml`, so transitive packages — all nine above — were invisible
+  to them.
+
+### Changed
+- **Every GitHub Action is pinned to a commit SHA** with a comment naming the
+  exact patch release it was cut from, and every workflow now runs with a
+  read-only token by default; the PyPI job keeps its `id-token: write` alone.
+  `scripts/check-action-pins.sh` resolves each pinned tag upstream and fails
+  when the commit it names is not the one pinned, which is what distinguishes a
+  real version bump from a hash quietly swapped for one taken from a fork. It
+  runs as a required `pins` check on every pull request and as the first step
+  of both publishing workflows, before any other action can touch the
+  workspace. Build-affecting only — nothing here changes the published
+  artefacts. (#111)
+
 ## [2.0.1] - 2026-08-29
 
 No functional change. This release exists so the published artefacts carry the
