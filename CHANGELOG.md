@@ -5,6 +5,46 @@ All notable changes to OrionBelt Analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-08-31
+
+No functional change — as with 2.0.2, not a line of `src/` differs, and the
+tool surface stays at 28. This release ships the full dependency re-resolve
+that 2.0.2 deliberately held back, so the Docker image is rebuilt on a current
+tree rather than one carrying a year of drift.
+
+### Changed
+- **Full lockfile re-resolve.** 127 packages moved, ten left the tree, one
+  arrived. Eighteen major-version jumps reach the production closure —
+  `protobuf` 6 → 7, `rpds-py` 0.27 → 2026.6.3, `websockets` 15 → 17, `rich`
+  14 → 15, `markdown-it-py` 3 → 4, `kubernetes` 35 → 36, `packaging` 25 → 26,
+  `pycparser` 2 → 3, `simplejson` 3 → 4, `more-itertools` 10 → 11, `cachetools`
+  6 → 7, `attrs` 25 → 26, `importlib-resources` 6 → 7, `rich-rst` 1 → 2, and
+  the date-shaped `certifi`, `pytz`, `tzdata`, `pywin32`. Four more are
+  development-only. Held back from 2.0.2 on purpose: a security fix that had to
+  ship was not the place to also move 127 packages. (#125)
+- **`zstd` 1.5.7.3 is gone**, which upstream had yanked as "buggy — not thread
+  safe" and which `uv` warned about on every resolve. It left the tree as a
+  consequence of the re-resolve rather than needing separate handling. (#125)
+
+### Fixed
+- **Three third-party licences were recorded incorrectly** and are now right.
+  `cffi`, `greenlet` and `simplejson` have adopted PEP 639 licence expressions,
+  and what they declare disagrees with what their previous classifiers implied.
+  The notices generator failed closed on all three rather than guessing — the
+  first time that gate has fired on real input — and each was resolved by
+  reading the package's own shipped licence text: `cffi` MIT → **MIT-0** (its
+  `LICENSE` reads "MIT No Attribution" and omits the attribution clause),
+  `greenlet` MIT AND Python-2.0 → **MIT AND PSF-2.0** (`LICENSE.PSF` is the
+  Python Software Foundation licence, covering the files derived from Stackless
+  Python), and `simplejson` MIT → **MIT OR AFL-2.1** (dual-licensed, per
+  `LICENSE.txt`). None is copyleft, so no new written notice is owed. (#125)
+
+### Removed
+- **`docutils` has left the dependency tree**, retiring the
+  `LicenseRef-Docutils-Mixed` entry — one fewer bundled dependency with
+  obligations beyond attribution. `THIRD_PARTY_NOTICES.md` now covers 190
+  packages, down from 197. (#125)
+
 ## [2.0.2] - 2026-08-31
 
 No functional change — not a line of `src/` differs from 2.0.1. This release
