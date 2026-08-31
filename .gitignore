@@ -11,6 +11,9 @@ scripts/*
 # Canonical licence texts the generator reproduces for packages that
 # ship none of their own.
 !scripts/license-texts/
+# Tracked: CI and both publishing workflows run it to verify that every
+# Action pin still matches the release its comment names.
+!scripts/check-action-pins.sh
 build/
 dist/
 wheels/
