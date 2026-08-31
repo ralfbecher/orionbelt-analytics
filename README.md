@@ -242,6 +242,24 @@ execute_sql_query(query) -> generate_chart(data, "bar", ...)
 connect_database("postgresql") -> execute_sql_query(...)
 ```
 
+## Development
+
+`uv sync` installs everything; `uv run pytest`, `black`/`isort`/`ruff` and strict
+`mypy` are the gates. The [Development guide](docs/development.md) has the full
+setup, project layout, and contribution checklist.
+
+One thing worth knowing before you open a workflow file: every GitHub Action is
+pinned to a 40-character commit SHA carrying a `# vX.Y.Z` comment, which is why
+they are full of hex. A git tag is a movable label, so `actions/checkout@v7` runs
+whatever commit that label points at when the job starts; a SHA cannot move. The
+comments name exact patch releases rather than `# v7`, because a major tag moves
+with every upstream release. `./scripts/check-action-pins.sh` resolves each tag
+upstream and fails when the commit it names is not the one pinned -- which is the
+only thing that distinguishes a real bump from a hash quietly swapped for one
+taken from a fork. It runs as the `pins` job on every pull request and as the
+first step of both publishing workflows; `--offline` skips the upstream lookups
+and checks only the SHA and comment format.
+
 ## Documentation
 
 | Document                                           | Contents                                                                      |

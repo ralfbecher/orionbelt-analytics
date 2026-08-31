@@ -136,6 +136,59 @@ bandit -r src/
 safety check
 ```
 
+### Workflow action pins
+
+Every `uses:` in `.github/workflows/` is pinned to a 40-character commit SHA
+with a `# vX.Y.Z` comment naming the release it was cut from. That is why the
+workflows are full of hex. A git tag is a movable label, so `actions/checkout@v7`
+runs whatever commit that label points at when the job starts, and the owner of
+the action can repoint it at any time. A SHA cannot move.
+
+Pinning fixes *which* code runs, but it also makes every reference unreadable,
+and nothing otherwise keeps a hash and the comment beside it in agreement. A
+pull request could swap the hash for one taken from a fork -- reachable under
+the real repository's URL, because forks share object storage with their parent
+-- leave the comment saying `# v7.0.1`, and produce a diff that looks exactly
+like a routine Dependabot bump. Only resolving the tag tells the two apart:
+
+```bash
+# Verify every pin: SHA present, owner allowed, comment names an exact patch
+# release, and that release really is the commit pinned.
+./scripts/check-action-pins.sh
+
+# Same, minus the upstream `git ls-remote` lookups -- useful offline or when
+# you only want the format checks.
+./scripts/check-action-pins.sh --offline
+```
+
+The comment must name an exact patch release (`# v7.0.1`), never a major tag:
+`v7` moves with every upstream release and would turn the check red for a pin
+that is still perfectly good. Tags are resolved with `git ls-remote`, so the
+check needs no token and is not rate limited. It fails closed -- a lookup that
+could not be made at all is a failure, not a pass.
+
+The script's `ALLOWED_OWNERS` list carries the most weight of its three checks,
+because a SHA matching its own tag says nothing about whether the action
+belongs here at all: `evil/action@<sha> # v1.0.0` verifies perfectly well
+against evil's own tag. Adding an owner is a deliberate decision, not a
+formality. The `pins` job in `ci.yml` runs the check on every pull request, and
+both tag-publishing workflows run it as the first step after checkout, before
+any other action -- an action that has already executed could have rewritten
+the workspace, this script included.
+
+What it does not do: it does not judge whether an action is safe (a pinned SHA
+of a genuinely malicious release passes), it does not stop a downgrade to a
+real but ancient release, and it says nothing about upstream being compromised.
+`actions/checkout` runs before the check and is therefore unverified -- an
+irreducible bootstrap dependency, since nothing can be checked before the tree
+it fetches exists.
+
+To resolve a SHA yourself when bumping an action:
+
+```bash
+git ls-remote https://github.com/actions/checkout 'refs/tags/v7.0.1^{}'
+```
+
 ### Pre-commit hooks
 
 ```bash
@@ -384,6 +437,14 @@ docs: update configuration reference for BigQuery
    ```bash
    bandit -r src/
    ```
+
+7. **Verify action pins** if you touched anything under `.github/workflows/`:
+
+   ```bash
+   ./scripts/check-action-pins.sh
+   ```
+
+   The `pins` job in CI runs the same check and blocks the merge.
 
 ### Code standards
 
