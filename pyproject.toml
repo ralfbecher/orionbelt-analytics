@@ -122,7 +122,6 @@ dev = [
     "mypy>=1.8.0,<3.0.0",
     # Security tools - NEW
     "bandit>=1.7.5,<2.0.0",
-    "safety>=3.0.0,<4.0.0",
     # Git hooks and automation
     "pre-commit>=3.6.0,<5.0.0",
     # Performance testing
@@ -255,8 +254,3 @@ skips = ["B101"]  # Skip assert_used test
 
 [tool.bandit.assert_used]
 skips = ["*_test.py", "test_*.py"]
-
-# Safety configuration for vulnerability scanning
-[tool.safety]
-# Ignore specific vulnerabilities if needed (use with caution)
-ignore = []

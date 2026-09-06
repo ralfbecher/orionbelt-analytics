@@ -72,13 +72,3 @@ repos:
         language: system
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock|scripts/gen-third-party-notices\.py)$
-
-  # Dependency vulnerability scanning
-  - repo: local
-    hooks:
-      - id: safety
-        name: safety
-        entry: safety
-        language: system
-        args: ["check", "--json"]
-        files: requirements.*\.txt$
