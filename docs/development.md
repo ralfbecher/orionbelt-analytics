@@ -132,9 +132,15 @@ mypy is configured with `disallow_untyped_defs`, `disallow_incomplete_defs`, `wa
 # Static security analysis (skips assert_used in tests)
 bandit -r src/
 
-# Dependency vulnerability scanning
-safety check
+# Dependency vulnerability scanning, against the tree that actually ships
+uv export --no-dev --no-emit-project --format requirements-txt \
+  | uvx pip-audit --disable-pip -r -
 ```
+
+Dependabot security updates scan the whole of `uv.lock`, so its alert list is
+wider than the shipped surface — it includes the dev group. The `pip-audit`
+command above is the narrower check: what a user installing the wheel is
+actually exposed to.
 
 ### Workflow action pins
 
