@@ -14,6 +14,9 @@ scripts/*
 # Tracked: CI and both publishing workflows run it to verify that every
 # Action pin still matches the release its comment names.
 !scripts/check-action-pins.sh
+# Tracked: CI runs it as the `deps` gate, and it is the documented local
+# command for auditing the shipped dependency tree.
+!scripts/audit-prod-deps.sh
 build/
 dist/
 wheels/

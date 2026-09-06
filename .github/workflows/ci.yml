@@ -96,6 +96,26 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy src
 
+  # Blocking gate: no known advisory in the tree that actually ships.
+  #
+  # Dependabot alerts cover the whole lockfile including the dev group, which
+  # makes them wider than this gate on purpose -- a dev-only advisory should
+  # not stop a release. This job is the narrower question: is a user who
+  # installs the wheel exposed? The accepted-advisory list lives in the script
+  # beside the reason each one is unreachable, so it stays reviewable in diff.
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+
+      - name: Audit production dependencies (pip-audit)
+        run: ./scripts/audit-prod-deps.sh
+
   # Blocking gate: every `uses:` in every workflow is pinned to an immutable
   # commit SHA whose version comment names the release it was really cut from.
   #
