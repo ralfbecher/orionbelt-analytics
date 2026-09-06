@@ -133,14 +133,19 @@ mypy is configured with `disallow_untyped_defs`, `disallow_incomplete_defs`, `wa
 bandit -r src/
 
 # Dependency vulnerability scanning, against the tree that actually ships
-uv export --no-dev --no-emit-project --format requirements-txt \
-  | uvx pip-audit --disable-pip -r -
+./scripts/audit-prod-deps.sh
 ```
 
 Dependabot security updates scan the whole of `uv.lock`, so its alert list is
-wider than the shipped surface — it includes the dev group. The `pip-audit`
-command above is the narrower check: what a user installing the wheel is
-actually exposed to.
+wider than the shipped surface — it includes the dev group. `audit-prod-deps.sh`
+is the narrower check: what a user installing the wheel is actually exposed to.
+It runs in CI as the blocking `deps` job, so it is the same command locally and
+on a pull request.
+
+Advisories accepted as unreachable are listed at the top of that script, each
+with the reason it cannot be triggered from this codebase. Adding an entry there
+is a review decision, not a formality — it should mirror a Dependabot dismissal
+and be removed as soon as a fixed release exists.
 
 ### Workflow action pins
 

@@ -19,6 +19,7 @@ black src/ tests/ server.py && isort src/ tests/ server.py   # format
 ruff check src/ tests/ server.py         # lint (server.py is the root entry point)
 mypy src/                                # strict type check (disallow_untyped_defs etc.)
 bandit -r src/                           # security scan (run for SQL/credential changes)
+./scripts/audit-prod-deps.sh             # advisories in the shipped dep tree (CI job `deps`)
 uv run python scripts/gen-third-party-notices.py   # refresh THIRD_PARTY_NOTICES.md after a dependency change
 pre-commit run --all-files               # all of the above as configured hooks
 ```
